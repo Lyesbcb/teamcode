@@ -157,7 +157,8 @@ try:
         '''
         for path in (config, config.parent):
             result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', acl_script],
-                                    env=dict(env, TEAMCODE_ACL_PATH=str(path)), capture_output=True, text=True, check=True)
+                                    env=dict(env, TEAMCODE_ACL_PATH=str(path)), capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, 'Synthetic ACL inspection failed: ' + result.stderr
             acl = json.loads(result.stdout)
             assert acl['owner'] == acl['user'] and acl['protected'], 'Ownership or protected DACL is incorrect'
             assert len(acl['rules']) == 1, 'Unexpected users/groups can access the private configuration'

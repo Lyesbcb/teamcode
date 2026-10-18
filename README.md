@@ -45,7 +45,7 @@ Administrators can configure ordered model replacements and fallbacks in **Dashb
 
 ## Local service
 
-After login, `teamcode service install` starts a local proxy automatically at user login on macOS/Linux. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Windows and startup before login remain planned.
+After login, `teamcode service install` starts a local proxy automatically at user login on macOS/Linux. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Windows runtime acceptance is in progress; startup before login remains planned. See the [Windows workstation guide](docs/windows.md).
 
 ## Try the transport fixture
 
@@ -83,7 +83,7 @@ python3 scripts/smoke-native.py \
   --jar app/build/libs/app-all.jar
 ```
 
-The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows; macOS ARM64 has been verified locally. Windows private configuration is deliberately unavailable until an owner-only DACL adapter is implemented. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. The CI verifies the JVM and native transport on macOS/Linux; it does not use provider credentials.
+The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows. macOS and Linux native runtime checks pass; Windows has native configuration, process and service adapters under runtime acceptance. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. CI verifies the JVM and runs native transport and service checks on macOS/Linux/Windows; it does not use provider credentials. Each platform uploads its development binary only after its acceptance tests pass.
 
 ## Architecture
 
@@ -126,7 +126,7 @@ teamcode run claude -- --dangerously-skip-permissions
 teamcode run claude -- --model claude-haiku-4-5-20251001 -p "Hello"
 ```
 
-`run` starts a dedicated authenticated proxy on a free loopback port, launches the installed agent from your PATH, forwards the arguments after `--` literally, preserves your working directory and terminal, and closes the proxy when the agent exits. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each simultaneous launch gets its own local capability. Native `run` is implemented for macOS/Linux; Windows remains pending with the private configuration adapter.
+`run` reuses a matching authenticated TeamCode service when available; otherwise it starts a dedicated proxy on a free loopback port. It launches the installed agent from your PATH, forwards the arguments after `--` literally and preserves your working directory and terminal. The dedicated proxy closes when the agent exits; a shared service stays running. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each dedicated proxy gets its own local capability. Native `run` is verified on macOS/Linux; Windows runtime acceptance is in progress.
 
 For a manually managed proxy:
 
