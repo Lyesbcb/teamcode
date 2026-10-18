@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -23,8 +24,15 @@ args = parser.parse_args()
 assert os.name == 'nt', 'This acceptance test must run on Windows'
 binary = str(args.binary.resolve())
 node = Path(shutil.which('node')).resolve()
+powershell = str(Path(shutil.which('pwsh')).resolve())
 team_token = secrets.token_hex(32)
 local_token = secrets.token_hex(32)
+initial_team_token = secrets.token_hex(32)
+initial_password = 'Synthetic initial ' + secrets.token_hex(12)
+replacement_password = 'Synthetic replacement ' + secrets.token_hex(12)
+login_password = initial_password
+login_change_required = True
+revoked = False
 calls = []
 checks = []
 stream_started = threading.Event()
@@ -37,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         checks.append(self.path)
-        if self.headers.get('Authorization') != 'Bearer ' + team_token:
+        if revoked or self.headers.get('Authorization') != 'Bearer ' + team_token:
             self.send_error(401)
             return
         payload = ({'id': 'member', 'username': 'synthetic', 'role': 'MEMBER', 'disabled': False, 'passwordChangeRequired': False}
@@ -51,7 +59,35 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
+        global login_password, login_change_required, revoked
         body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if self.path.startswith('/api/v1/auth/'):
+            payload = json.loads(body) if body else {}
+            if self.path.endswith('/login'):
+                assert payload['username'] == 'synthetic' and payload['password'] == login_password
+                result = {'accessToken': initial_team_token if login_change_required else team_token,
+                          'expiresAt': int(time.time() * 1000) + 3_600_000,
+                          'member': {'id': 'member', 'username': 'synthetic', 'role': 'MEMBER',
+                                     'disabled': False, 'passwordChangeRequired': login_change_required}}
+            elif self.path.endswith('/password'):
+                assert self.headers.get('Authorization') == 'Bearer ' + initial_team_token
+                assert payload == {'currentPassword': initial_password, 'newPassword': replacement_password}
+                login_password, login_change_required = replacement_password, False
+                result = {'success': True}
+            elif self.path.endswith('/logout'):
+                assert self.headers.get('Authorization') == 'Bearer ' + team_token
+                revoked = True
+                result = {'success': True}
+            else:
+                self.send_error(404)
+                return
+            data = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         assert self.headers.get('Authorization') == 'Bearer ' + team_token
         assert self.headers.get('x-api-key') is None
         assert self.path in ('/v1/messages', '/v1/responses')
@@ -85,12 +121,16 @@ try:
         def command(*arguments, stdin=None, check=True):
             result = subprocess.run([binary, *arguments], env=env, input=stdin, text=True,
                                     encoding='utf-8', capture_output=True, timeout=45)
-            assert team_token not in result.stdout + result.stderr and local_token not in result.stdout + result.stderr
+            assert all(secret not in result.stdout + result.stderr for secret in
+                       (team_token, local_token, initial_team_token, initial_password, replacement_password))
             if check:
                 assert result.returncode == 0, f'{arguments} (upstream checks: {len(checks)}): {result.stdout}\n{result.stderr}'
             return result
 
         command('configure', '--server', origin, stdin=team_token + '\n')
+        command('login', '--server', origin, '--username', 'synthetic', '--password-stdin',
+                stdin=initial_password + '\n' + replacement_password + '\n' + replacement_password + '\n')
+        assert not login_change_required, 'Native login did not complete the required password change'
         original_config = config.read_bytes()
         assert json.loads(original_config)['accessToken'] == team_token
         command('configure', '--server', origin, stdin=team_token + '\n')
@@ -120,6 +160,63 @@ try:
             assert acl['owner'] == acl['user'] and acl['protected'], 'Ownership or protected DACL is incorrect'
             assert len(acl['rules']) == 1, 'Unexpected users/groups can access the private configuration'
             assert acl['rules'][0] == {'sid': acl['user'], 'inherited': False, 'type': 'Allow', 'full': True}
+
+        # Exercise the native Windows HTTPS engine and its OS certificate validation.
+        cert_dir = root / 'tls'
+        cert_dir.mkdir()
+        cert_env = dict(env, TEAMCODE_TEST_CERT_DIRECTORY=str(cert_dir))
+        generate_certificate = r'''
+        $ErrorActionPreference = 'Stop'
+        $rsa = [Security.Cryptography.RSA]::Create(2048)
+        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+          'CN=localhost', $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256,
+          [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        $san.AddDnsName('localhost'); $san.AddIpAddress([Net.IPAddress]::Loopback)
+        $request.CertificateExtensions.Add($san.Build())
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
+        $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddHours(1))
+        [IO.File]::WriteAllText((Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'cert.pem'), $certificate.ExportCertificatePem())
+        [IO.File]::WriteAllBytes((Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'cert.cer'), $certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        [IO.File]::WriteAllText((Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'key.pem'), $rsa.ExportPkcs8PrivateKeyPem())
+        '''
+        subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', generate_certificate],
+                       env=cert_env, capture_output=True, check=True, timeout=30)
+        trust_certificate = r'''
+        $ErrorActionPreference = 'Stop'
+        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+          (Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'cert.cer'))
+        $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
+        $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        try {
+          if ($env:TEAMCODE_TEST_CERT_OPERATION -eq 'add') { $store.Add($certificate) }
+          else { $store.Remove($certificate) }
+        } finally { $store.Close() }
+        '''
+        tls = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert_dir / 'cert.pem', cert_dir / 'key.pem')
+        tls.socket = context.wrap_socket(tls.socket, server_side=True)
+        threading.Thread(target=tls.serve_forever, daemon=True).start()
+        previous_config_home = env['XDG_CONFIG_HOME']
+        try:
+            env['XDG_CONFIG_HOME'] = str(root / 'https configuration')
+            tls_origin = f'https://127.0.0.1:{tls.server_port}'
+            checks_before = len(checks)
+            rejected = command('configure', '--server', tls_origin, stdin=team_token + '\n', check=False)
+            assert rejected.returncode != 0 and len(checks) == checks_before, 'Untrusted HTTPS peer received a request'
+            assert not (Path(env['XDG_CONFIG_HOME']) / 'teamcode/config.json').exists()
+            subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', trust_certificate],
+                           env=dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='add'), capture_output=True, check=True, timeout=30)
+            command('configure', '--server', tls_origin, stdin=team_token + '\n')
+            assert 'Mode: fixture' in command('status').stdout
+        finally:
+            env['XDG_CONFIG_HOME'] = previous_config_home
+            tls.shutdown()
+            tls.server_close()
+            subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', trust_certificate],
+                           env=dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='remove'), capture_output=True, check=True, timeout=30)
+        print('PASS: native Windows login/password change and HTTPS trust/rejection', flush=True)
 
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
@@ -281,6 +378,8 @@ try:
         assert config.read_bytes() == original_config and not task.exists()
         command('service', 'uninstall')
         service_installed = False
+        command('logout')
+        assert revoked and not config.exists(), 'Logout did not revoke the server session and remove the saved token'
         print('PASS: Windows Task Scheduler installation, idempotence, authenticated reuse, graceful drain, restart and uninstall', flush=True)
 finally:
     stream_release.set()

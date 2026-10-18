@@ -64,7 +64,10 @@ static inline int teamcode_windows_write_private(const wchar_t *path, const wcha
     if (!GetSecurityDescriptorOwner(descriptor, &owner, &defaulted) ||
         !GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) || !present || !dacl) goto cleanup;
     stage = 3;
-    if (!CreateDirectoryW(parent, &attributes) && GetLastError() != ERROR_ALREADY_EXISTS) goto cleanup;
+    if (!CreateDirectoryW(parent, &attributes)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS) { stage = 30000 + (int)error; goto cleanup; }
+    }
     stage = 4;
     DWORD parent_flags = GetFileAttributesW(parent);
     if (parent_flags == INVALID_FILE_ATTRIBUTES || !(parent_flags & FILE_ATTRIBUTE_DIRECTORY) ||

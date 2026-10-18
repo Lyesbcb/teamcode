@@ -13,14 +13,15 @@ actual fun writePrivateFile(path: String, content: String) {
     require(destination.isAbsolute)
     parent.parent?.let { FileSystem.SYSTEM.createDirectories(it) }
     val suffix = secureRandomBytes(16).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
-    val temporary = "$path.$suffix.tmp"
+    val normalized = destination.toString()
+    val temporary = "$normalized.$suffix.tmp"
     val contentBytes = content.encodeToByteArray()
     require(contentBytes.size <= 1024 * 1024)
     // The adapter creates the immediate directory/file with a protected owner-only DACL,
     // rejects reparse points/foreign owners, and replaces the destination atomically.
     memScoped {
         contentBytes.usePinned { bytes ->
-            val failure = teamcode_windows_write_private(path.wcstr.ptr, parent.toString().wcstr.ptr,
+            val failure = teamcode_windows_write_private(normalized.wcstr.ptr, parent.toString().wcstr.ptr,
                 temporary.wcstr.ptr, if (contentBytes.isEmpty()) null else bytes.addressOf(0), contentBytes.size.toUInt())
             if (failure != 0) throw CliOperationException("windows_private_file_$failure")
         }
