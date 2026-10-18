@@ -42,7 +42,7 @@ jobs:
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
   image:
-    needs: [jvm, helm, native]
+    needs: [jvm, helm, native, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,3 +111,17 @@ jobs:
       - name: Verify persistent team setup with the native CLI
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-team.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
+      - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe

@@ -1,0 +1,3 @@
+headers = windows_support.h
+package = me.nathanfallet.teamcode.cli.interop.windows
+linkerOpts = -ladvapi32 -lbcrypt

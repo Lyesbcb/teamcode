@@ -15,6 +15,11 @@ kotlin {
                 definitionFile.set(project.file("src/nativeInterop/cinterop/process.def"))
                 includeDirs(project.file("src/nativeInterop/cinterop"))
             }
+        } else {
+            target.compilations.getByName("main").cinterops.create("windows") {
+                definitionFile.set(project.file("src/nativeInterop/cinterop/windows.def"))
+                includeDirs(project.file("src/nativeInterop/cinterop"))
+            }
         }
         target.binaries.executable {
             entryPoint = "me.nathanfallet.teamcode.cli.main"
