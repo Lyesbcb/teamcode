@@ -2,6 +2,7 @@
 
 - All repository content must be English. Root package and Gradle group: `me.nathanfallet.teamcode`.
 - Standalone public project. No ControlResell dependencies, registries, secrets, infrastructure or CI.
+- Use TeamClaude as the behavioral reference. Before implementing account enrollment, provider routing, agent launchers or service integration, inspect the corresponding implementation and regression tests in the sibling `teamclaude` checkout. Reuse its established behavior where applicable; document adaptations required by native Kotlin, team authorization or shared persistence. Do not invent a parallel mechanism without first checking the reference.
 - Keep `cli -> client -> api`. The CLI must never depend on server domain or infrastructure modules.
 - Server layers: `app -> presentation + infrastructure + domain + api`; `presentation -> domain + api`; `infrastructure -> domain`. Domain and API do not depend on other project modules.
 - Put business rules in use cases and services, never in HTTP routes or CLI commands. Use constructor injection and Koin in the server composition root.

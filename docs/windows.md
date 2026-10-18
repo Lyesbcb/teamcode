@@ -47,7 +47,20 @@ Development requires JDK 21. From the repository in PowerShell:
 
 ```powershell
 .\gradlew.bat :cli:linkDebugExecutableMingwX64
-python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe --allow-machine-test-certificate
 ```
 
-The acceptance script also requires Node.js and PowerShell 7 (`pwsh`). It uses synthetic credentials, a temporary configuration, an isolated test certificate and its own scheduled task. It verifies native authentication, HTTPS trust, file permissions, streaming, agent process handling and the service lifecycle without calling a model provider. The test removes its own certificate and task afterward.
+Run the full acceptance script in a disposable elevated Windows environment, such as its GitHub-hosted CI runner, with Node.js and PowerShell 7 (`pwsh`). The explicit flag permits adding the generated, short-lived certificate to that machine's trusted roots for the HTTPS test. It uses synthetic credentials, a temporary configuration and its own scheduled task. It verifies native authentication, HTTPS trust, file permissions, streaming, agent process handling and the service lifecycle without calling a model provider. The test removes its own certificate and task afterward. Ordinary TeamCode use does not install certificates or require elevation.
+
+## TeamClaude reference and native adaptations
+
+The reference below was checked against TeamClaude commit `88fe9b37862c40fefa459a90cd3dbd2c31db98ce`.
+
+| Behavior | TeamClaude implementation | TeamCode adaptation |
+| --- | --- | --- |
+| Agent launch | [`runCommand`](https://github.com/KarpelesLab/teamclaude/blob/88fe9b37862c40fefa459a90cd3dbd2c31db98ce/src/index.js#L1506) locates Claude through PATH, inherits stdio and passes Windows npm shims through the shell | Preserve PATH discovery, stdio, working directory and exit status. The native adapter resolves `.exe` files and standard npm entry points, using Unicode process APIs and explicit argument quoting. Custom shell wrappers are not currently supported. |
+| Saved configuration | [`getConfigPath` and `writeJsonAtomic`](https://github.com/KarpelesLab/teamclaude/blob/88fe9b37862c40fefa459a90cd3dbd2c31db98ce/src/config.js#L10) use XDG or the home `.config` directory, then a temporary file, flush and atomic replacement | Keep the same location convention and atomic-write sequence. Store the team's server URL/session locally; provider credentials belong on the server. Use Windows DACLs for private credentials. |
+| Service registration | [`serviceKind`](https://github.com/KarpelesLab/teamclaude/blob/88fe9b37862c40fefa459a90cd3dbd2c31db98ce/src/service.js#L22) supports LaunchAgent and systemd user units; Windows is explicitly unsupported in its tests | Preserve the explicit per-user install/startup workflow. Task Scheduler supplies the Windows integration required by TeamCode. |
+| Provider sign-in | [`openBrowser`](https://github.com/KarpelesLab/teamclaude/blob/88fe9b37862c40fefa459a90cd3dbd2c31db98ce/src/login-flow.js#L80) opens the browser with an HTTP(S) URL and keeps a manual fallback | Current Claude enrollment prints the URL for manual opening. Automatic browser opening and full direct Codex enrollment remain follow-up work. |
+
+TeamClaude uses Node for Unicode file access and process support. TeamCode's native executable must supply those platform adapters; the reference's service behavior does not include a Windows implementation to port.

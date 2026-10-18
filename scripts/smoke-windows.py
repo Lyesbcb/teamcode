@@ -22,8 +22,11 @@ import urllib.request
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', type=Path, required=True)
+parser.add_argument('--allow-machine-test-certificate', action='store_true',
+                    help='Allow the HTTPS fixture to temporarily trust its own certificate on a disposable elevated Windows runner.')
 args = parser.parse_args()
 assert os.name == 'nt', 'This acceptance test must run on Windows'
+assert args.allow_machine_test_certificate, 'Run this full acceptance in a disposable elevated environment with --allow-machine-test-certificate'
 binary = str(args.binary.resolve())
 node = Path(shutil.which('node')).resolve()
 powershell = str(Path(shutil.which('pwsh')).resolve())
@@ -197,7 +200,9 @@ try:
         $ErrorActionPreference = 'Stop'
         $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
           (Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'cert.cer'))
-        $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
+        # CurrentUser Root operations can open a Windows confirmation dialog even with -NonInteractive.
+        # This opt-in fixture uses the disposable CI machine store and removes only its generated certificate.
+        $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
         $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
         try {
           if ($env:TEAMCODE_TEST_CERT_OPERATION -eq 'add') { $store.Add($certificate) }
@@ -289,8 +294,11 @@ try:
           const descendant = require('child_process').spawn(process.execPath,
             ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
           descendant.unref();
-          fs.writeFileSync(process.env.TEAMCODE_RUN_RECORD, JSON.stringify({args, cwd:process.cwd(), origin:new URL(url).origin, descendant:descendant.pid}));
-          console.log('CHILD_STDOUT_OK'); console.error('CHILD_STDERR_OK'); process.exit(37);
+          fs.writeFileSync(process.env.TEAMCODE_RUN_RECORD + '.tmp', JSON.stringify({args, cwd:process.cwd(), origin:new URL(url).origin, pid:process.pid, descendant:descendant.pid}));
+          fs.renameSync(process.env.TEAMCODE_RUN_RECORD + '.tmp', process.env.TEAMCODE_RUN_RECORD);
+          console.log('CHILD_STDOUT_OK'); console.error('CHILD_STDERR_OK');
+          if (process.env.TEAMCODE_TEST_WAIT === '1') { setInterval(() => {}, 1000); return; }
+          process.exit(37);
         })().catch(() => { console.error('Synthetic child failed'); process.exit(1); });
         '''
         # Standard npm installation shape: wrappers are deliberately not executed by TeamCode.
@@ -339,6 +347,33 @@ try:
                     raise AssertionError('Ephemeral proxy remained after child exit')
             except OSError:
                 pass
+        # Simulate abrupt termination of this test's own launcher. The OS job must clean up
+        # both the npm process and its native descendant even when Kotlin finally blocks cannot run.
+        record = root / 'cancelled-agent.json'
+        cancelled = subprocess.Popen([binary, 'run', 'claude', '--'],
+            env=dict(env, TEAMCODE_TEST_AGENT='claude', TEAMCODE_RUN_RECORD=str(record), TEAMCODE_TEST_WAIT='1'),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            cancelled.stdin.write(b'stdin reaches the child\n')
+            cancelled.stdin.close()
+            for _ in range(100):
+                assert cancelled.poll() is None, 'Synthetic cancellation child exited too early'
+                if record.exists():
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError('Synthetic cancellation child did not start')
+            captured = json.loads(record.read_text(encoding='utf-8'))
+            cancelled.terminate()  # Exact process handle created above; never by executable name.
+            cancelled.wait(timeout=10)
+            descendant_exited(captured['pid'])
+            descendant_exited(captured['descendant'])
+        finally:
+            if cancelled.poll() is None:
+                cancelled.terminate()
+                cancelled.wait(timeout=10)
+            cancelled.stdout.close()
+            cancelled.stderr.close()
         assert config.read_bytes() == original_config
         print('PASS: native Windows private ACLs, Unicode config, credential isolation, progressive SSE, literal agent arguments, npm launchers, stdio, exit code and cleanup', flush=True)
 

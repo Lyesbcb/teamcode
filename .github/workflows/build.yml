@@ -129,7 +129,7 @@ jobs:
           node-version: '22'
       - uses: gradle/actions/setup-gradle@v4
       - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
-      - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+      - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe --allow-machine-test-certificate
       - uses: actions/upload-artifact@v4
         with:
           name: teamcode-windows-x64
