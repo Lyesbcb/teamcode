@@ -17,6 +17,7 @@ class CliConfig(val serverUrl: String, val accessToken: String) {
 }
 
 fun validateServerUrl(value: String): String {
+    require(value.isNotBlank()) { "A TeamCode server URL is required." }
     val url = Url(value)
     require(url.protocol == URLProtocol.HTTPS ||
         (url.protocol == URLProtocol.HTTP && url.host in setOf("localhost", "127.0.0.1", "::1"))) {

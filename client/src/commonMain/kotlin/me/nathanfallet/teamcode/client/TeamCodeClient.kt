@@ -22,7 +22,7 @@ class TeamCodeClient(
     private val token: suspend () -> String?,
     createHttpClient: (io.ktor.client.HttpClientConfig<*>.() -> Unit) -> HttpClient,
 ) : AutoCloseable {
-    private val origin = Url(serverUrl).also {
+    private val origin = Url(serverUrl.also { require(it.isNotBlank()) { "A TeamCode server URL is required." } }).also {
         require(it.protocol == URLProtocol.HTTPS ||
             (it.protocol == URLProtocol.HTTP && it.host in setOf("localhost", "127.0.0.1", "::1"))) {
             "TeamCode requires HTTPS except on loopback."
