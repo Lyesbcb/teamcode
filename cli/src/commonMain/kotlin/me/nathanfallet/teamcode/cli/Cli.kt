@@ -1,0 +1,95 @@
+package me.nathanfallet.teamcode.cli
+
+import com.github.ajalt.clikt.command.*
+import com.github.ajalt.clikt.core.*
+import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.int
+import io.ktor.client.HttpClient
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.embeddedServer
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import me.nathanfallet.teamcode.cli.config.*
+import me.nathanfallet.teamcode.cli.platform.*
+import me.nathanfallet.teamcode.cli.proxy.localProxy
+import me.nathanfallet.teamcode.client.TeamCodeClient
+
+const val VERSION = "0.1.0-SNAPSHOT"
+
+class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
+    override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode configure. Provider enrollment is not implemented yet."
+    init { subcommands(Configure(), Status(), Version(), Proxy()) }
+}
+
+private class Version : SuspendingCliktCommand(name = "version") {
+    override suspend fun run() { echo("TeamCode $VERSION") }
+}
+
+private class Configure : SuspendingCliktCommand(name = "configure") {
+    private val server by option("--server", help = "Your self-hosted TeamCode origin; prompted when omitted.")
+    override fun help(context: Context) = "Save a server URL and an existing access token. Reads the token from stdin; browser login is planned."
+    override suspend fun run() {
+        val origin = server ?: run {
+            echo("TeamCode server URL: ", trailingNewline = false)
+            readlnOrNull()?.trim().orEmpty()
+        }
+        val normalized = validateServerUrl(origin)
+        echo("TeamCode access token (stdin; do not pass secrets as command arguments):", err = true)
+        val accessToken = readlnOrNull()?.trim().orEmpty()
+        val config = CliConfig(normalized, accessToken)
+        sdk(config).use { client ->
+            client.capabilities() // Do not save an unverified credential or arbitrary redirect target.
+        }
+        ConfigStore().save(config)
+        echo("Configuration saved to ${configPath()}.")
+    }
+}
+
+private class Status : SuspendingCliktCommand(name = "status") {
+    override suspend fun run() {
+        sdk(loadConfig()).use { client ->
+            val status = client.status()
+            echo("Mode: ${status.mode} | Active: ${status.activeRequests} | Completed: ${status.completedRequests}")
+        }
+    }
+}
+
+private class Proxy : SuspendingNoOpCliktCommand(name = "proxy") {
+    init { subcommands(ProxyStart()) }
+}
+private class ProxyStart : SuspendingCliktCommand(name = "start") {
+    private val port by option("--port").int().default(8789)
+    override fun help(context: Context) = "Start the authenticated loopback Messages proxy in the foreground. TEAMCODE_LOCAL_TOKEN is required."
+    override suspend fun run() {
+        require(port in 1..65535) { "Port must be between 1 and 65535." }
+        val localToken = requireNotNull(environment("TEAMCODE_LOCAL_TOKEN")) { "Set TEAMCODE_LOCAL_TOKEN (at least 32 characters)." }
+        require(localToken.length >= 32) { "The local token must contain at least 32 characters." }
+        val client = sdk(loadConfig())
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) { localProxy(client, localToken) }
+        try {
+            server.start(wait = false)
+            echo("TeamCode proxy listening on http://127.0.0.1:$port (authentication required).")
+            awaitCancellation()
+        } finally {
+            server.stop(500, 5_000)
+            client.close()
+        }
+    }
+}
+
+private fun loadConfig() = ConfigStore().load() ?: error("No configuration found. Run teamcode configure first.")
+private fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.accessToken }) { configure ->
+    HttpClient(httpEngine()) { configure(this) }
+}
+
+fun main(args: Array<String>): Unit = runBlocking {
+    try { Cli().main(args) }
+    catch (error: CancellationException) { throw error }
+    catch (_: Exception) {
+        // Never print exception chains from TLS, JSON, file paths or remote servers: they may carry credentials.
+        SystemExit.fail("TeamCode command failed. Check the server URL, authentication, file permissions and server availability.")
+    }
+}
+
+expect object SystemExit { fun fail(message: String): Nothing }

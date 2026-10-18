@@ -1,0 +1,52 @@
+name: Build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  jvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: python3 scripts/check-module-graph.py
+      - run: ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:buildFatJar
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Linux transport dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Select native target
+        shell: bash
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64) target=MacosArm64; directory=macosArm64 ;;
+            Darwin-x86_64) target=MacosX64; directory=macosX64 ;;
+            Linux-x86_64) target=LinuxX64; directory=linuxX64 ;;
+            *) echo 'Unsupported runner architecture'; exit 1 ;;
+          esac
+          echo "NATIVE_TARGET=$target" >> "$GITHUB_ENV"
+          echo "NATIVE_DIRECTORY=$directory" >> "$GITHUB_ENV"
+      - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
+      - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar

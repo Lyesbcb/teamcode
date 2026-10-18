@@ -32,7 +32,7 @@ teamcode service start|stop|restart|status|logs|uninstall
 
 ### Two authentication lifecycles
 
-`login` authenticates a team member through browser/device authorization. Store short-lived access tokens and rotating device refresh tokens using the OS credential store. Do not silently fall back to plaintext. CLI configuration contains server URL and non-secret settings.
+`login` authenticates a team member through browser/device authorization. Persist the selected self-hosted server URL and TeamCode authentication under `$XDG_CONFIG_HOME/teamcode/`, falling back to `~/.config/teamcode/`. Ask for the server URL during first setup; subsequent invocations reuse the saved origin and authentication. Use an owner-only directory (0700) and configuration file (0600) on POSIX, and an equivalent owner-only DACL on Windows. Never store provider pool credentials in this configuration. Browser/device login will supply short-lived access and rotating refresh tokens; storage must protect both. An OS credential-store integration can be added later without changing the public client API.
 
 `accounts add` signs into the provider in a local browser, binds the callback to state/PKCE as supported by that provider, and uploads the necessary authentication to a dedicated HTTPS server operation. The server verifies the account identity, encrypts credentials and becomes their refresh owner. No provider password is sent to TeamCode. The local proxy needs only a TeamCode credential after enrollment. Account enrollment requires an explicit permission, not merely membership.
 
