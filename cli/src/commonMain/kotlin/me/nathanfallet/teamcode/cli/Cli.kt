@@ -65,7 +65,7 @@ private class Logout : SuspendingCliktCommand(name = "logout") {
 
 private class Configure : SuspendingCliktCommand(name = "configure") {
     private val server by option("--server", help = "Your self-hosted TeamCode origin; prompted when omitted.")
-    override fun help(context: Context) = "Save a server URL and an existing access token. Reads the token from stdin; browser login is planned."
+    override fun help(context: Context) = "Save a server URL and an existing access token from stdin. Use teamcode login for ordinary sign-in."
     override suspend fun run() {
         val origin = server ?: run {
             echo("TeamCode server URL: ", trailingNewline = false)
