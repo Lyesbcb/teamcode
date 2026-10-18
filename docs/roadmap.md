@@ -28,3 +28,26 @@ Tests use synthetic fixtures and local fake providers. Real-provider acceptance 
 - Multi-model tool loops and result correctness, not just text responses.
 - Dashboard authorization/CSRF, audit, revocation and route explanations.
 - Service install/uninstall idempotence, boot/logon behavior, locked keychain/offline recovery and draining updates.
+
+## V2: centrally managed MCP servers and skills
+
+TeamCode will extend team administration to agent tools and reusable skills. This is planned V2 scope, not part of the current implementation or release acceptance.
+
+### MCP gateway and access control
+
+- Administrators register remote MCP servers in the dashboard and assign access to members or groups, with optional per-tool restrictions.
+- TeamCode exposes an authenticated MCP gateway. Tool discovery shows only authorized tools, and every tool invocation checks current server-side permissions. Hiding tools in a client configuration is not an authorization boundary.
+- Upstream MCP credentials remain encrypted on the server. Support shared team credentials and, where required by the upstream service, individual delegated authorization with explicit ownership and revocation.
+- `teamcode run claude` and `teamcode run codex` configure the agent's TeamCode MCP connection using scoped credentials, without requiring manual setup on each workstation or overwriting unrelated personal configuration.
+- Add bounded tool execution, concurrency/rate limits, metadata-only audit records and per-member usage visibility. Keep authorization and any required session state compatible with multiple stateless server replicas.
+- Acceptance: two members with different assignments see and can invoke only their authorized tools; direct unauthorized calls fail; revocation takes effect server-side; upstream credentials never reach the workstation.
+
+### Skill catalog and synchronization
+
+- Administrators manage a versioned skill catalog in the dashboard, pin approved versions and assign skills to members or groups. Provide update, rollback and removal controls.
+- The native CLI synchronizes assigned skills into an isolated, agent-compatible local installation before `teamcode run`. Preserve personal skills and report naming conflicts explicitly.
+- Track installation/version status separately from permission to use protected resources. Skills are instructions and files loaded by the agent, not server-executed MCP tools.
+- Do not treat downloaded skill files as an access-control mechanism: users can copy instructions they have received. Enforce access to protected tools, credentials and data at the MCP gateway or backing service.
+- Acceptance: clean setup and subsequent launches install the assigned pinned versions, updates/rollback are reproducible, removed assignments stop being provisioned, and personal configuration is preserved.
+
+The dashboard, team identity, native launcher and shared persistence provide the integration points. The inference proxy alone does not configure an agent's MCP connections or install its skills; these require explicit gateway and CLI capabilities.
