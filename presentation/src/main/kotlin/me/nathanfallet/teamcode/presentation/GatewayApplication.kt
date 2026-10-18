@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -48,7 +48,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         val path = call.request.path()
         if (team != null) {
             if (path.startsWith("/dashboard")) call.response.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-            if (path !in setOf("/health", "/", "/dashboard/login", "/api/v1/auth/login")) {
+            if (path !in setOf("/health", "/ready", "/", "/dashboard/login", "/api/v1/auth/login")) {
                 val credential = if (path.startsWith("/dashboard")) call.request.cookies["teamcode_session"]
                     else call.request.header(HttpHeaders.Authorization)?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
                 val principal = credential?.let { team.authenticate(it) }
@@ -65,7 +65,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     }
                 }
             }
-        } else if (path != "/health") {
+        } else if (path !in setOf("/health", "/ready")) {
             val presented = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ") ?: ""
             val actual = MessageDigest.getInstance("SHA-256").digest(presented.toByteArray())
             if (!MessageDigest.isEqual(expected, actual)) {
@@ -81,9 +81,14 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (directives != null) directiveRoutes(directives)
         if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
         get("/health") { call.respondText("OK") }
+        get("/ready") {
+            if (readiness()) call.respondText("OK")
+            else call.respondText("Unavailable", status = HttpStatusCode.ServiceUnavailable)
+        }
         get<CapabilitiesResource> {
-            call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = gateway.status().mode,
-                features = listOf("status", if (gateway.status().mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
+            val mode = gateway.status().mode
+            call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = mode,
+                features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
         }
         get<StatusResource> {
             val status = gateway.status()

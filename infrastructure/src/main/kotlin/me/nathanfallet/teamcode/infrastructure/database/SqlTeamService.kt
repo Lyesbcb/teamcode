@@ -9,7 +9,8 @@ import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.infrastructure.secrets.Passwords
 
 class SqlTeamService(private val database: Database, private val passwords: Passwords = Passwords()) : TeamService {
-    private val hashing = Semaphore(4)
+    private val hashing = Semaphore(4) // Local CPU protection; the authoritative rate budget is in MySQL.
+    private val loginBudget = SqlLoginBudget(database)
     private val dummyHash = passwords.hash(Passwords.secret())
 
     /** Returns the password only for the transaction that creates the first administrator. */
@@ -22,12 +23,13 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
     }
 
     override suspend fun login(username: String, password: String, device: String): LoginSession {
+        if (!loginBudget.admit()) throw TeamFailure("login_rate_limit", 429, "Too many login attempts. Try again in a minute.")
         if (username.length !in 1..64 || password.length !in 1..1024) throw denied()
         val outcome = hashing.withPermit { database.transaction { c ->
             val row = c.rows("SELECT * FROM members WHERE team_id = ? AND username = ? FOR UPDATE", "default", username.lowercase()) { r ->
                 Triple(member(r), r.getString("password_hash"), r.getLong("locked_until"))
             }.singleOrNull()
-            val now = System.currentTimeMillis()
+            val now = c.nowMillis()
             if (row != null && row.third > now) return@transaction null
             val valid = passwords.verify(password, row?.second ?: dummyHash)
             if (row == null) return@transaction null
@@ -54,7 +56,7 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
         if (token.length !in 32..256) return null
         return database.transaction { c -> c.rows(
             "SELECT m.*, t.id AS token_id FROM tokens t JOIN members m ON m.id = t.member_id WHERE t.token_hash = ? AND t.expires_at > ? AND m.disabled = FALSE",
-            Passwords.digest(token), System.currentTimeMillis(), map = ::principal,
+            Passwords.digest(token), c.nowMillis(), map = ::principal,
         ).singleOrNull() }
     }
     override suspend fun logout(principal: Principal) { database.transaction { it.execute("DELETE FROM tokens WHERE id = ? AND member_id = ?", principal.tokenId, principal.member.id); Unit } }
@@ -117,7 +119,7 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
         ?: throw TeamFailure("not_found", 404, "Member not found.")
     private fun fresh(c: Connection, actor: Principal): Principal = c.rows(
         "SELECT m.*, t.id AS token_id FROM tokens t JOIN members m ON m.id = t.member_id WHERE t.id = ? AND m.team_id = ? AND t.expires_at > ? AND m.disabled = FALSE",
-        actor.tokenId, actor.teamId, System.currentTimeMillis(), map = ::principal,
+        actor.tokenId, actor.teamId, c.nowMillis(), map = ::principal,
     ).singleOrNull() ?: throw denied()
     private fun principal(r: ResultSet) = Principal(member(r), r.getString("token_id"), r.getString("team_id"))
     private fun member(r: ResultSet) = Member(r.getString("id"), r.getString("username"), Role.valueOf(r.getString("role")), r.getBoolean("disabled"), r.getBoolean("must_change_password"))

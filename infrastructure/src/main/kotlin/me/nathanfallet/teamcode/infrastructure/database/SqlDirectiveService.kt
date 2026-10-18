@@ -10,8 +10,8 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
     private val pacing = PacingUseCase()
     suspend fun update() {
         database.transaction { c ->
-            val now = System.currentTimeMillis()
             c.lockTeam("default")
+            val now = c.nowMillis()
             val accounts = c.rows("SELECT * FROM accounts WHERE team_id = 'default' AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ?", now, map = ::accountRecord)
             val samples = c.rows("SELECT h.* FROM quota_history h JOIN accounts a ON a.id = h.account_id WHERE a.team_id = 'default' AND h.observed_at >= ? ORDER BY h.observed_at DESC LIMIT 10000", now - 3_600_000) {
                 AccountQuota(it.getString("account_id"), it.getString("window_name"), it.getDouble("utilization"), it.getLong("observed_at"), it.getLong("resets_at"))
@@ -34,14 +34,14 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
     }
     override suspend fun current(actor: Principal): AgentDirective? {
         actor.requireReady()
-        return database.transaction { c -> c.rows("SELECT * FROM directives WHERE member_id = ? AND expires_at > ?", actor.member.id, System.currentTimeMillis(), map = ::directive).singleOrNull() }
+        return database.transaction { c -> c.rows("SELECT * FROM directives WHERE member_id = ? AND expires_at > ?", actor.member.id, c.nowMillis(), map = ::directive).singleOrNull() }
     }
     override suspend fun acknowledge(actor: Principal, id: String, stage: String) {
         actor.requireReady()
         if (stage !in setOf("RECEIVED_BY_CLI", "EMITTED_TO_HOOK")) throw TeamFailure("invalid_stage", 400, "Unknown delivery stage.")
         database.transaction { c ->
-            if (c.rows("SELECT id FROM directives WHERE member_id = ? AND id = ? AND expires_at > ?", actor.member.id, id, System.currentTimeMillis()) { it.getString(1) }.isEmpty()) throw TeamFailure("directive_expired", 409, "This directive has expired or been replaced.")
-            c.execute("INSERT INTO directive_receipts (directive_id, token_id, stage, received_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE received_at = ?", id, actor.tokenId, stage, System.currentTimeMillis(), System.currentTimeMillis())
+            if (c.rows("SELECT id FROM directives WHERE member_id = ? AND id = ? AND expires_at > ?", actor.member.id, id, c.nowMillis()) { it.getString(1) }.isEmpty()) throw TeamFailure("directive_expired", 409, "This directive has expired or been replaced.")
+            c.execute("INSERT INTO directive_receipts (directive_id, token_id, stage, received_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE received_at = ?", id, actor.tokenId, stage, c.nowMillis(), c.nowMillis())
         }
     }
     private fun directive(r: ResultSet) = AgentDirective(r.getString("id"), r.getString("member_id"), PacingAdvice(Pace.valueOf(r.getString("pace")), r.getInt("max_concurrent"), r.getLong("min_interval"), r.getString("message")), r.getLong("created_at"), r.getLong("expires_at"))

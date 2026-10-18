@@ -13,16 +13,21 @@ import org.flywaydb.core.Flyway
 class Database(url: String, username: String, password: String) : AutoCloseable {
     private val source = HikariDataSource(HikariConfig().apply {
         jdbcUrl = url; this.username = username; this.password = password
+        addDataSourceProperty("connectTimeout", "5000")
+        addDataSourceProperty("socketTimeout", "10000")
+        connectionInitSql = "SET SESSION innodb_lock_wait_timeout = 5"
         maximumPoolSize = 8; connectionTimeout = 5_000; transactionIsolation = "TRANSACTION_READ_COMMITTED"
     })
     fun migrate() { Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate() }
-    suspend fun <T> transaction(block: (Connection) -> T): T = suspendingTransaction { block(it) }
-    suspend fun <T> suspendingTransaction(block: suspend (Connection) -> T): T = withContext(Dispatchers.IO) {
+    suspend fun <T> transaction(block: (Connection) -> T): T = withContext(Dispatchers.IO) {
         source.connection.use { connection ->
             connection.autoCommit = false
             try { val result = block(connection); connection.commit(); result }
             catch (error: Throwable) { connection.rollback(); throw error }
         }
+    }
+    suspend fun ready(): Boolean = withContext(Dispatchers.IO) {
+        try { source.connection.use { it.isValid(2) } } catch (_: java.sql.SQLException) { false }
     }
     override fun close() = source.close()
 }
@@ -35,5 +40,5 @@ internal fun Connection.lockTeam(team: String) {
     check(rows("SELECT id FROM teams WHERE id = ? FOR UPDATE", team) { it.getString(1) }.size == 1)
 }
 internal fun Connection.audit(team: String, actor: String, action: String, subject: String) {
-    execute("INSERT INTO audit_events (team_id, actor_id, action, subject_id, occurred_at) VALUES (?, ?, ?, ?, ?)", team, actor, action, subject, System.currentTimeMillis())
+    execute("INSERT INTO audit_events (team_id, actor_id, action, subject_id, occurred_at) VALUES (?, ?, ?, ?, ?)", team, actor, action, subject, nowMillis())
 }

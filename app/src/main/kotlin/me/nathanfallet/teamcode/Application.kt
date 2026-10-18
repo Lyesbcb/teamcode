@@ -1,6 +1,7 @@
 package me.nathanfallet.teamcode
 
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.engine.EngineConnectorBuilder
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.*
 import io.ktor.client.HttpClient
@@ -8,6 +9,7 @@ import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import java.util.Base64
 import me.nathanfallet.teamcode.domain.accounts.AccountManagement
+import me.nathanfallet.teamcode.infrastructure.database.SqlScheduledWork
 import me.nathanfallet.teamcode.infrastructure.database.SqlAdmissionStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlDirectiveService
 import me.nathanfallet.teamcode.infrastructure.database.SqlModelPolicyStore
@@ -34,6 +36,8 @@ fun main() {
     require(mode in setOf("server", "fixture")) { "TEAMCODE_MODE must be server or fixture." }
     val host = System.getenv("TEAMCODE_HOST") ?: "127.0.0.1"
     val port = (System.getenv("TEAMCODE_PORT") ?: "8080").toInt()
+    val shutdownGrace = (System.getenv("TEAMCODE_SHUTDOWN_GRACE_MS") ?: "1000").toLong()
+    require(shutdownGrace in 0..600_000) { "TEAMCODE_SHUTDOWN_GRACE_MS must be between 0 and 600000." }
     val origin = System.getenv("TEAMCODE_PUBLIC_URL") ?: "http://localhost:$port"
     val database = if (mode == "server") Database(
         requireNotNull(System.getenv("TEAMCODE_DATABASE_URL")) { "Set TEAMCODE_DATABASE_URL (a MySQL JDBC URL)." },
@@ -52,13 +56,18 @@ fun main() {
     val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!) else FixtureGatewayService()
     val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     if (accountStore != null) {
-        val monitor = QuotaMonitor(accountStore, credentialSource!!, admission!!, transports)
+        val work = SqlScheduledWork(database!!)
+        val monitor = QuotaMonitor(accountStore, credentialSource!!, admission!!, transports, work)
         workers.launch {
             while (isActive) {
-                try { monitor.sample(); admission.maintain(); directives!!.update() }
+                try {
+                    work.runDue("maintenance") { admission.maintain(); directives!!.update() }
+                    monitor.sample()
+                }
+                catch (_: TimeoutCancellationException) { System.err.println("TeamCode maintenance deadline exceeded.") }
                 catch (error: CancellationException) { throw error }
                 catch (_: Exception) { System.err.println("TeamCode quota sampling is temporarily unavailable.") }
-                delay(60_000)
+                delay(5_000)
             }
         }
     }
@@ -76,6 +85,9 @@ fun main() {
         if (team != null) single<TeamService> { team }
     }) }
     try {
-        embeddedServer(Netty, host = host, port = port) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies) }.start(wait = true)
+        embeddedServer(Netty, configure = {
+            connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
+            shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

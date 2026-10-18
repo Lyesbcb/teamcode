@@ -27,6 +27,7 @@ parser.add_argument('--jar', required=True)
 parser.add_argument('--source', type=Path, required=True, help='Authorized TeamClaude configuration')
 parser.add_argument('--model', default='claude-haiku-4-5-20251001')
 parser.add_argument('--skip-claude', action='store_true')
+parser.add_argument('--launcher', action='store_true', help='Use teamcode run to manage the agent proxy')
 parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
 args = parser.parse_args()
 binary, jar = str(Path(args.binary).resolve()), str(Path(args.jar).resolve())
@@ -170,7 +171,8 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
         if not args.skip_claude:
             claude = shutil.which('claude')
             assert claude, 'Claude Code must be installed for this acceptance test.'
-            result = subprocess.run([claude, '--bare', '--setting-sources', '', '--strict-mcp-config',
+            launcher = [binary, 'run', 'claude', '--'] if args.launcher else [claude]
+            result = subprocess.run(launcher + ['--bare', '--setting-sources', '', '--strict-mcp-config',
                                      '--tools', '', '--no-session-persistence', '--disable-slash-commands',
                                      '--model', args.model, '--output-format', 'json',
                                      '--system-prompt', 'Reply briefly.', '-p', 'Reply with exactly TEAMCODE_OK.'],
@@ -190,9 +192,10 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             provider_toml = ('model_providers.teamcode={name="TeamCode",base_url="http://127.0.0.1:'
                              + str(local_port) + '/v1",env_key="TEAMCODE_LOCAL_TOKEN",wire_api="responses",'
                              'request_max_retries=0,stream_max_retries=0}')
-            result = subprocess.run([codex, 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+            launcher = [binary, 'run', 'codex', '--'] if args.launcher else [codex]
+            overrides = [] if args.launcher else ['-c', 'model_provider="teamcode"', '-c', provider_toml]
+            result = subprocess.run(launcher + ['exec', *overrides, '--ignore-user-config', '--ignore-rules', '--ephemeral',
                                      '--skip-git-repo-check', '--sandbox', 'read-only', '--json',
-                                     '-c', 'model_provider="teamcode"', '-c', provider_toml,
                                      '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
                                      '--model', args.codex_model, 'Do not use tools. Reply with exactly TEAMCODE_OK.'],
                                     cwd=root, env=agent_env, capture_output=True, text=True, timeout=90)

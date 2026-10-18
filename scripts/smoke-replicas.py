@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Run two independent server processes against one isolated MySQL; no real providers or cluster."""
+import argparse
+import base64
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--jar', required=True)
+args = parser.parse_args()
+jar = str(Path(args.jar).resolve())
+name = 'teamcode-replicas-' + secrets.token_hex(6)
+children = []
+created = False
+
+def command(*args):
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
+
+def request(origin, path, data=None, token=None):
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    req = urllib.request.Request(origin + path, None if data is None else json.dumps(data).encode(), headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode()
+
+def await_ready(origin):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            if request(origin, '/ready')[0] == 200:
+                return
+        except OSError:
+            pass
+        time.sleep(.25)
+    raise RuntimeError('Replica readiness timed out')
+
+with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
+    root = Path(directory)
+    db_password = secrets.token_urlsafe(32)
+    password = secrets.token_urlsafe(32)
+    ports = []
+    for _ in range(2):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            ports.append(listener.getsockname()[1])
+    origins = [f'http://127.0.0.1:{port}' for port in ports]
+    env = dict(os.environ, TEAMCODE_MODE='server', TEAMCODE_HOST='127.0.0.1',
+               TEAMCODE_PUBLIC_URL=origins[0], TEAMCODE_DATABASE_USER='teamcode',
+               TEAMCODE_DATABASE_PASSWORD=db_password,
+               TEAMCODE_ENCRYPTION_KEY=base64.b64encode(secrets.token_bytes(32)).decode())
+    logs = [root / f'replica-{i}.log' for i in range(2)]
+    try:
+        command('docker', 'run', '-d', '--name', name, '--tmpfs', '/var/lib/mysql:rw,nosuid,size=1g',
+                '-p', '127.0.0.1::3306', '-e', 'MYSQL_DATABASE=teamcode', '-e', 'MYSQL_USER=teamcode',
+                '-e', f'MYSQL_PASSWORD={db_password}', '-e', f'MYSQL_ROOT_PASSWORD={db_password}', 'mysql:8.4')
+        created = True
+        db_port = command('docker', 'port', name, '3306/tcp').stdout.strip().rsplit(':', 1)[1]
+        env['TEAMCODE_DATABASE_URL'] = f'jdbc:mysql://127.0.0.1:{db_port}/teamcode'
+        for _ in range(180):
+            probe = subprocess.run(['docker', 'exec', name, 'mysqladmin', 'ping', '-h', '127.0.0.1', '--silent'], capture_output=True)
+            if probe.returncode == 0:
+                break
+            time.sleep(.5)
+        else:
+            raise RuntimeError('Test MySQL did not start')
+
+        def start(index):
+            with logs[index].open('a') as log:
+                child = subprocess.Popen(['java', '-jar', jar], env=dict(env, TEAMCODE_PORT=str(ports[index])), stdout=log, stderr=subprocess.STDOUT)
+            children.append(child)
+            return child
+
+        first = start(0)
+        start(1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(await_ready, origins))
+        bootstrap = [match for log in logs for match in re.findall(r'TeamCode temporary administrator password: (\S+)', log.read_text())]
+        assert len(bootstrap) == 1
+        status, body = request(origins[0], '/api/v1/auth/login', {'username': 'admin', 'password': bootstrap[0]})
+        assert status == 200
+        temporary_token = json.loads(body)['accessToken']
+        assert request(origins[1], '/api/v1/auth/me', token=temporary_token)[0] == 200
+        assert request(origins[1], '/api/v1/auth/password', {'currentPassword': bootstrap[0], 'newPassword': password}, temporary_token)[0] == 200
+        assert request(origins[0], '/api/v1/auth/me', token=temporary_token)[0] == 401
+        status, body = request(origins[0], '/api/v1/auth/login', {'username': 'admin', 'password': password})
+        assert status == 200
+        token = json.loads(body)['accessToken']
+        assert request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)[0] == 201
+        status, body = request(origins[1], '/api/v1/members', token=token)
+        assert status == 200 and len(json.loads(body)) == 2
+        # Kill only our exact child, deliberately bypassing graceful shutdown to exercise recovery.
+        first.kill()
+        first.wait(timeout=10)
+        assert request(origins[1], '/api/v1/status', token=token)[0] == 200
+        start(0)
+        await_ready(origins[0])
+        assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        assert sum(log.read_text().count('TeamCode temporary administrator password:') for log in logs) == 1
+        # Readiness must reflect shared storage availability; liveness must not trigger a database-outage restart storm.
+        command('docker', 'pause', name)
+        for origin in origins:
+            assert request(origin, '/ready')[0] == 503
+            assert request(origin, '/health')[0] == 200
+        command('docker', 'unpause', name)
+        for origin in origins:
+            await_ready(origin)
+        assert request(origins[1], '/api/v1/auth/logout', {}, token)[0] == 200
+        assert request(origins[0], '/api/v1/auth/me', token=token)[0] == 401
+        assert all(password not in log.read_text() and db_password not in log.read_text() for log in logs)
+        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        if created:
+            command('docker', 'rm', '-f', '-v', name)

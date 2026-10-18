@@ -2,8 +2,6 @@ package me.nathanfallet.teamcode.infrastructure.gateway
 
 import io.ktor.client.statement.*
 import io.ktor.utils.io.*
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flow
@@ -17,9 +15,7 @@ import me.nathanfallet.teamcode.infrastructure.providers.ProviderTransport
 
 /** Native subscription passthrough with durable admission, one bounded attempt and no replay after dispatch. */
 class PoolGateway(private val admission: AdmissionStore, private val credentials: CredentialSource, private val transports: List<ProviderTransport>, private val modelPolicies: ModelPolicyStore) : GatewayService {
-    private val active = AtomicInteger()
-    private val completed = AtomicLong()
-    override fun status() = GatewaySnapshot("subscription-pool", active.get(), completed.get())
+    override suspend fun status(): GatewaySnapshot = admission.statistics().let { GatewaySnapshot("subscription-pool", it.active, it.completed) }
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
         val actor = request.principal ?: throw TeamFailure("authentication_required", 401, "Sign in to TeamCode.")
         actor.requireReady()
@@ -48,7 +44,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
         var knownCharge: Long? = null
         var dispatched = false
         var committed = false
-        active.incrementAndGet()
+        var completed = false
         try {
             val token = credentials.fresh(reservation.account)
             System.out.println("TeamCode inference dispatch request=${reservation.id} account=${reservation.account.id} provider=${transport.provider} model=$model")
@@ -91,7 +87,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                             emit(chunk)
                         }
                     })
-                    completed.incrementAndGet()
+                    completed = meter.settledUnits != null
                 }
             }
         } catch (error: CancellationException) { throw error }
@@ -100,11 +96,10 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             if (error is TeamFailure) throw error
             throw TeamFailure("upstream_unavailable", 502, "The provider request could not complete.")
         } finally {
-            active.decrementAndGet()
             withContext(NonCancellable) {
                 val charge = if (!dispatched) 0 else knownCharge ?: meter.settledUnits
                 try {
-                    withTimeout(5_000) { admission.settle(reservation, charge) }
+                    withTimeout(5_000) { admission.settle(reservation, charge, completed) }
                     System.out.println("TeamCode inference settled request=${reservation.id} units=${charge ?: "unknown"} terminal=${meter.lastEvent} failure=${meter.failureCategory}")
                 } catch (_: Exception) {
                     // The durable reservation remains charged; never mask cancellation or a stream failure.

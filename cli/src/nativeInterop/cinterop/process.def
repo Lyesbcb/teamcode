@@ -1,0 +1,2 @@
+headers = process.h
+package = me.nathanfallet.teamcode.cli.interop.process

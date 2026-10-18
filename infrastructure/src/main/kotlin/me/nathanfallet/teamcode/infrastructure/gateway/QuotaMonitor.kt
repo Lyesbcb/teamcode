@@ -1,21 +1,23 @@
 package me.nathanfallet.teamcode.infrastructure.gateway
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import me.nathanfallet.teamcode.infrastructure.database.SqlScheduledWork
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.capacity.AdmissionStore
 import me.nathanfallet.teamcode.infrastructure.providers.ProviderTransport
 
 /** Sequential bounded sampling; stale data stays visible as stale instead of being replaced by zero. */
-class QuotaMonitor(private val accounts: AccountStore, private val credentials: CredentialSource, private val admission: AdmissionStore, private val transports: List<ProviderTransport>) {
-    private var offset = 0
+class QuotaMonitor(private val accounts: AccountStore, private val credentials: CredentialSource, private val admission: AdmissionStore, private val transports: List<ProviderTransport>, private val work: SqlScheduledWork) {
     suspend fun sample(): Int {
-        val candidates = accounts.list("default").filter { !it.disabled && it.state.canServe }
-        if (candidates.isEmpty()) return 0
+        val accountsById = accounts.list("default").associateBy { it.id }
         var failures = 0
-        repeat(minOf(candidates.size, 8)) {
-            val account = candidates[offset % candidates.size]
-            offset = (offset + 1) % candidates.size
-            try { admission.observe(account.id, transports.single { it.provider == account.identity.provider }.usage(account, credentials.fresh(account))) }
+        for (id in work.dueAccounts()) {
+            val account = accountsById[id] ?: continue
+            try { work.runDue("quota/$id") {
+                admission.observe(id, transports.single { it.provider == account.identity.provider }.usage(account, credentials.fresh(account)))
+            } }
+            catch (_: TimeoutCancellationException) { failures++ }
             catch (error: CancellationException) { throw error }
             catch (_: Exception) { failures++ }
         }

@@ -102,12 +102,13 @@ class PoolGatewayTest {
     }
 }
 private class FakeAdmission(private val account: AccountRecord) : AdmissionStore {
+    override suspend fun statistics() = AdmissionStatistics(0, 0)
     var settled: Long? = null
     var didSettle = false
     var cooled = false
     var selectedProvider: String? = null
     override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String): Reservation { selectedProvider = provider; return Reservation("request", account, units) }
-    override suspend fun settle(reservation: Reservation, actualUnits: Long?) { didSettle = true; settled = actualUnits }
+    override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) { didSettle = true; settled = actualUnits }
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = error("unused")
     override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = error("unused")
     override suspend fun poolBudgets(actor: Principal) = emptyList<PoolBudget>()

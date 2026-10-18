@@ -1,0 +1,6 @@
+TeamCode Helm chart
+
+Chart helpers and deployment conventions are adapted from Guimauve Digital pkg:
+https://github.com/guimauvedigital/pkg (helm/pkg), licensed under Apache-2.0.
+Modified for TeamCode: names, provider configuration, secrets, MySQL 8.4,
+replica coordination, probes, stream draining, ingress and container security.

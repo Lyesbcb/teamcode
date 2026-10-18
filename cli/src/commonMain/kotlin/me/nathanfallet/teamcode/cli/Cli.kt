@@ -5,24 +5,23 @@ import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.int
 import io.ktor.client.HttpClient
-import io.ktor.server.cio.CIO
-import io.ktor.server.engine.embeddedServer
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import me.nathanfallet.teamcode.cli.config.*
 import me.nathanfallet.teamcode.cli.platform.*
-import me.nathanfallet.teamcode.cli.proxy.localProxy
+import me.nathanfallet.teamcode.cli.proxy.proxyServer
 import me.nathanfallet.teamcode.client.TeamCodeClient
 import com.github.ajalt.mordant.terminal.Terminal
 import me.nathanfallet.teamcode.cli.accounts.Accounts
 import me.nathanfallet.teamcode.cli.agents.Agents
+import me.nathanfallet.teamcode.cli.launch.Run
 
 const val VERSION = "0.1.0-SNAPSHOT"
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {
@@ -103,7 +102,7 @@ private class ProxyStart : SuspendingCliktCommand(name = "start") {
         val localToken = requireNotNull(environment("TEAMCODE_LOCAL_TOKEN")) { "Set TEAMCODE_LOCAL_TOKEN (at least 32 characters)." }
         require(localToken.length >= 32) { "The local token must contain at least 32 characters." }
         val client = sdk(loadConfig())
-        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) { localProxy(client, localToken) }
+        val server = proxyServer(client, localToken, port) { echo(it, err = true) }
         try {
             server.start(wait = false)
             echo("TeamCode proxy listening on http://127.0.0.1:$port (authentication required).")
@@ -117,7 +116,7 @@ private class ProxyStart : SuspendingCliktCommand(name = "start") {
 
 internal fun loadConfig() = ConfigStore().load() ?: error("No configuration found. Run teamcode login first.")
 internal fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.accessToken }) { configure ->
-    HttpClient(httpEngine()) { configure(this) }
+    HttpClient() { configure(this) }
 }
 
 fun main(args: Array<String>): Unit = runBlocking {
@@ -129,4 +128,4 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
 }
 
-expect object SystemExit { fun fail(message: String): Nothing }
+expect object SystemExit { fun fail(message: String): Nothing; fun exit(code: Int): Nothing }

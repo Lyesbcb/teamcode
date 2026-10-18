@@ -24,7 +24,7 @@ class FixtureGatewayService(private val chunkDelayMillis: Long = 20) : GatewaySe
         } finally { active.decrementAndGet() }
     }
 
-    override fun status() = GatewaySnapshot("fixture", active.get(), completed.get())
+    override suspend fun status() = GatewaySnapshot("fixture", active.get(), completed.get())
 
     companion object {
         val EVENTS = listOf(

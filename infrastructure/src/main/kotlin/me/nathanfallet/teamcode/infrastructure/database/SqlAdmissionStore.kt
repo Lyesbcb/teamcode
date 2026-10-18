@@ -8,11 +8,16 @@ import me.nathanfallet.teamcode.domain.team.*
 
 /** Admission is serialized per team; both member and physical account slots are reserved atomically. */
 class SqlAdmissionStore(private val database: Database) : AdmissionStore {
+    override suspend fun statistics(): AdmissionStatistics = database.transaction { c ->
+        val active = c.rows("SELECT COUNT(*) FROM reservations WHERE team_id = 'default' AND state = 'ACTIVE' AND expires_at > ?", c.nowMillis()) { it.getInt(1) }.single()
+        val completed = c.rows("SELECT completed FROM gateway_totals WHERE team_id = 'default'") { it.getLong(1) }.single()
+        AdmissionStatistics(active, completed)
+    }
     override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String): Reservation = database.transaction { c ->
         actor.requireReady()
         require(units in 1..100_000_000)
-        val now = System.currentTimeMillis()
         c.lockTeam(actor.teamId)
+        val now = c.nowMillis()
         requireCurrent(c, actor)
         val policy = policy(c, actor.member.id)
         val current = capacity(c, policy, now, actor.teamId)
@@ -40,12 +45,13 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         c.execute("INSERT INTO reservations (id, team_id, member_id, account_id, day_number, units, state, expires_at, created_at, pool_id) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)", id, actor.teamId, actor.member.id, chosen.id, now / DAY, units, now + 15 * 60_000, now, policy.poolId.orEmpty())
         Reservation(id, chosen, units)
     }
-    override suspend fun settle(reservation: Reservation, actualUnits: Long?) {
+    override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {
         require(actualUnits == null || actualUnits in 0..100_000_000)
         database.transaction { c ->
             c.lockTeam(reservation.account.identity.teamId)
             // Exactly-once settlement. An orphan keeps its reserved units until reconciled.
-            c.execute("UPDATE reservations SET state = ?, units = ? WHERE id = ? AND state = 'ACTIVE'", if (actualUnits == null) "UNCERTAIN" else "SETTLED", actualUnits ?: reservation.units, reservation.id)
+            val changed = c.execute("UPDATE reservations SET state = ?, units = ? WHERE id = ? AND state = 'ACTIVE'", if (actualUnits == null) "UNCERTAIN" else "SETTLED", actualUnits ?: reservation.units, reservation.id)
+            if (changed == 1 && completed) c.execute("UPDATE gateway_totals SET completed = completed + 1 WHERE team_id = ?", reservation.account.identity.teamId)
         }
     }
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = database.transaction { c ->
@@ -53,7 +59,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         requireCurrent(c, actor)
         if (memberId != actor.member.id) actor.requireAdmin()
         ensureMember(c, actor.teamId, memberId)
-        capacity(c, policy(c, memberId), System.currentTimeMillis(), actor.teamId)
+        capacity(c, policy(c, memberId), c.nowMillis(), actor.teamId)
     }
     override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = database.transaction { c ->
         actor.requireAdmin()
@@ -95,8 +101,8 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     }
     suspend fun maintain() {
         database.transaction { c ->
-            c.execute("DELETE FROM quota_history WHERE observed_at < ? LIMIT 1000", System.currentTimeMillis() - 7 * DAY)
-            c.execute("DELETE FROM reservations WHERE day_number < ? LIMIT 1000", System.currentTimeMillis() / DAY - 90)
+            c.execute("DELETE FROM quota_history WHERE observed_at < ? LIMIT 1000", c.nowMillis() - 7 * DAY)
+            c.execute("DELETE FROM reservations WHERE day_number < ? LIMIT 1000", c.nowMillis() / DAY - 90)
         }
     }
     private fun policy(c: Connection, member: String): MemberPolicy = c.rows("SELECT * FROM member_policies WHERE member_id = ?", member) { MemberPolicy(member, it.getLong("daily_units"), it.getInt("max_concurrent"), it.getString("pool_id"), it.getInt("weight")) }.singleOrNull() ?: MemberPolicy(member)
@@ -113,7 +119,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         if (c.rows("SELECT id FROM members WHERE team_id = ? AND id = ?", team, member) { it.getString(1) }.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")
     }
     private fun requireCurrent(c: Connection, actor: Principal) {
-        val row = c.rows("SELECT m.role FROM tokens t JOIN members m ON m.id = t.member_id WHERE t.id = ? AND m.id = ? AND m.team_id = ? AND m.disabled = FALSE AND m.must_change_password = FALSE AND t.expires_at > ?", actor.tokenId, actor.member.id, actor.teamId, System.currentTimeMillis()) { it.getString(1) }.singleOrNull()
+        val row = c.rows("SELECT m.role FROM tokens t JOIN members m ON m.id = t.member_id WHERE t.id = ? AND m.id = ? AND m.team_id = ? AND m.disabled = FALSE AND m.must_change_password = FALSE AND t.expires_at > ?", actor.tokenId, actor.member.id, actor.teamId, c.nowMillis()) { it.getString(1) }.singleOrNull()
         if (row == null || row != actor.member.role.name) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
     }
     private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.getLong("resets_at"))

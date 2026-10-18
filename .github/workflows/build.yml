@@ -21,6 +21,54 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: python3 scripts/check-module-graph.py
       - run: ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:buildFatJar
+      - run: python3 scripts/smoke-replicas.py --jar app/build/libs/app-all.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-jar
+          path: app/build/libs/app-all.jar
+          retention-days: 1
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v3.19.0
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 scripts/check-helm.py
+      - name: Validate Kubernetes schemas
+        run: |
+          curl --fail --location --retry 2 https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
+          helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
+  image:
+    needs: [jvm, helm, native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-jar
+          path: app/build/libs
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          username: nathanfallet
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            nathanfallet/teamcode:latest
+            nathanfallet/teamcode:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/nathanfallet/teamcode
+            org.opencontainers.image.licenses=Apache-2.0
   native:
     strategy:
       fail-fast: false
@@ -50,6 +98,7 @@ jobs:
           echo "NATIVE_DIRECTORY=$directory" >> "$GITHUB_ENV"
       - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
       - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-run.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
       - name: Verify persistent team setup with the native CLI
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-team.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar

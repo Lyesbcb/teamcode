@@ -25,12 +25,16 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
             val account = c.rows("SELECT * FROM accounts WHERE id = ? AND team_id = ?", previous.second, identity.teamId, map = ::accountRecord).single()
             return@transaction if (previous.third) EnrollmentResult.Created(account) else EnrollmentResult.Updated(account)
         }
-        val existing = c.rows("SELECT * FROM accounts WHERE team_id = ? AND provider = ? AND provider_account_id = ? AND organization_id = ?", identity.teamId, identity.provider, identity.accountId, identity.organizationId, map = ::accountRecord).singleOrNull()
+        val existing = c.rows("SELECT * FROM accounts WHERE team_id = ? AND provider = ? AND provider_account_id = ? AND organization_id = ? FOR UPDATE", identity.teamId, identity.provider, identity.accountId, identity.organizationId, map = ::accountRecord).singleOrNull()
+        if (existing != null) {
+            val pending = c.rows("SELECT refresh_pending, refresh_started_at FROM accounts WHERE id = ?", existing.id) { it.getBoolean(1) to it.getLong(2) }.single()
+            if (pending.first && existing.state != AccountState.RECONNECT_REQUIRED && pending.second + 60_000 > c.nowMillis()) return@transaction EnrollmentResult.Conflict
+        }
         if (existing?.credentialVersion != expectedVersion) return@transaction EnrollmentResult.Conflict
         val account = existing?.let { merge.merge(it, verified, expectedVersion!!) } ?: AccountRecord(UUID.randomUUID().toString(), identity, verified.displayName.take(120), 1, false, null, 0, AccountState.PENDING_HANDOVER)
         val envelope = cipher.encrypt(payload.toByteArray(), "${identity.teamId}:${account.id}")
         if (existing == null) c.execute("INSERT INTO accounts (id, team_id, provider, provider_account_id, organization_id, display_name, credential_version, credential_envelope, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", account.id, identity.teamId, identity.provider, identity.accountId, identity.organizationId, account.displayName, account.credentialVersion, envelope, account.state.name)
-        else c.execute("UPDATE accounts SET credential_version = ?, credential_envelope = ? WHERE id = ?", account.credentialVersion, envelope, account.id)
+        else c.execute("UPDATE accounts SET credential_version = ?, credential_envelope = ?, refresh_pending = FALSE WHERE id = ?", account.credentialVersion, envelope, account.id)
         c.execute("INSERT INTO enrollment_operations (team_id, operation_id, request_hash, account_id, created) VALUES (?, ?, ?, ?, ?)", identity.teamId, operationId, hash, account.id, existing == null)
         if (existing == null) EnrollmentResult.Created(account) else EnrollmentResult.Updated(account)
     }
@@ -44,7 +48,8 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
     }
     override suspend fun handover(teamId: String, id: String, accessOnly: Boolean): AccountRecord = database.transaction { c ->
         c.lockTeam(teamId)
-        val account = c.rows("SELECT * FROM accounts WHERE team_id = ? AND id = ?", teamId, id, map = ::accountRecord).singleOrNull() ?: throw missing()
+        val account = c.rows("SELECT * FROM accounts WHERE team_id = ? AND id = ? FOR UPDATE", teamId, id, map = ::accountRecord).singleOrNull() ?: throw missing()
+        if (c.rows("SELECT refresh_pending FROM accounts WHERE id = ?", id) { it.getBoolean(1) }.single()) throw TeamFailure("provider_reconnect", 409, "Import verified current credentials before changing refresh ownership.")
         val state = if (accessOnly) AccountState.ACCESS_ONLY else AccountState.READY
         c.execute("UPDATE accounts SET state = ? WHERE team_id = ? AND id = ?", state.name, teamId, id)
         account.copy(state = state)

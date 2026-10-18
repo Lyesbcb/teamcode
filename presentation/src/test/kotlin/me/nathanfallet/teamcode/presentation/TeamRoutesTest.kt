@@ -49,7 +49,7 @@ class TeamRoutesTest {
 }
 private class NoGateway : GatewayService {
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) { error("No inference expected") }
-    override fun status() = GatewaySnapshot("test", 0, 0)
+    override suspend fun status() = GatewaySnapshot("test", 0, 0)
 }
 private class FakeTeam : TeamService {
     var created = 0

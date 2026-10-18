@@ -1,0 +1,116 @@
+# All server replicas share MySQL and the same encryption key; no sticky sessions or Redis required.
+replicaCount: 2
+image:
+  repository: nathanfallet/teamcode
+  tag: latest
+  pullPolicy: Always
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Required: the external origin, with no trailing slash, used for dashboard form validation.
+publicUrl: ""
+# Provision separately. Helm never generates or rotates provider encryption keys.
+# Keys: mysql-username, mysql-password, encryption-key; mysql-root-password when bundled MySQL is enabled.
+existingSecret: teamcode-secrets
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  fsGroup: 10001
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+initContainers: []
+service:
+  type: ClusterIP
+  port: 8080
+# Allows a 10-minute stream plus load-balancer propagation and shutdown overhead.
+terminationGracePeriodSeconds: 660
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+ingress:
+  enabled: false
+  className: ""
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "660"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "660"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+  hosts: []
+  tls: []
+resources:
+  requests:
+    cpu: 250m
+    memory: 1Gi
+  limits:
+    memory: 1Gi
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  periodSeconds: 5
+  failureThreshold: 60
+  timeoutSeconds: 2
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  periodSeconds: 15
+  failureThreshold: 3
+  timeoutSeconds: 2
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  periodSeconds: 10
+  failureThreshold: 2
+  timeoutSeconds: 8
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+extraEnv: []
+javaToolOptions: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError"
+
+# Optional single MySQL instance for a self-contained installation, using the tested official 8.4 image.
+# For production HA, disable this and supply an externally managed MySQL 8.4 JDBC URL below.
+mysql:
+  enabled: true
+  image: mysql:8.4
+  database: teamcode
+  jdbcUrl: ""
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi

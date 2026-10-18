@@ -10,7 +10,7 @@ data class GenerationHead(val status: Int, val contentType: String, val headers:
 
 interface GatewayService {
     suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, Flow<ByteArray>) -> Unit)
-    fun status(): GatewaySnapshot
+    suspend fun status(): GatewaySnapshot
 }
 
 data class GatewaySnapshot(val mode: String, val active: Int, val completed: Long)

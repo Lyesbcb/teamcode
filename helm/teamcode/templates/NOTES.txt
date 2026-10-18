@@ -1,0 +1,9 @@
+TeamCode is available on port {{ .Values.service.port }} through {{ include "teamcode.fullname" . }}.
+
+Public URL: {{ .Values.publicUrl }}
+The initial administrator password appears once in the logs of the creating pod:
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/name={{ include "teamcode.name" . }} --all-containers --prefix --tail=-1
+
+Sign in as admin and replace the temporary password. There is no public registration.
+All replicas must use the same database and encryption-key. Back up both.
+See helm/teamcode/README.md for deployment, TLS, backups and upgrades.

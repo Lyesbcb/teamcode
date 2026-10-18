@@ -24,13 +24,11 @@ private fun ApplicationCall.sessionCookie(value: String, origin: String, maxAge:
 }
 internal fun Route.dashboardRoutes(team: TeamService, publicOrigin: String) {
     val origin = publicOrigin.trimEnd('/')
-    val throttle = LoginThrottle()
     get("/") { call.respondRedirect("/dashboard") }
     get("/dashboard/login") {
         call.respondText(page("Sign in", """<p>Use the account created by your administrator.</p><form method="post"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label><button>Sign in</button></form>"""), ContentType.Text.Html)
     }
     post("/dashboard/login") {
-        throttle.admit()
         val input = call.form(origin, authenticated = false)
         val session = team.login(input["username"].orEmpty(), input["password"].orEmpty(), "Web dashboard")
         call.sessionCookie(session.token, origin)

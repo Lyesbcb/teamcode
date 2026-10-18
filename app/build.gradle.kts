@@ -15,7 +15,19 @@ dependencies {
     implementation(libs.koin.core)
     implementation(libs.logback)
 }
-ktor { docker { jreVersion.set(JavaVersion.VERSION_21); localImageName.set("teamcode") } }
+ktor {
+    docker {
+        jreVersion.set(JavaVersion.VERSION_21)
+        localImageName.set("teamcode")
+        findProperty("imageTag")?.let { imageTag.set(it.toString()) }
+        externalRegistry.set(io.ktor.plugin.features.DockerImageRegistry.externalRegistry(
+            username = provider { "nathanfallet" },
+            password = providers.environmentVariable("DOCKER_HUB_PASSWORD"),
+            project = provider { "teamcode" },
+            namespace = provider { "nathanfallet" },
+        ))
+    }
+}
 tasks.shadowJar {
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()

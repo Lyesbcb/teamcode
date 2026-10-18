@@ -45,7 +45,7 @@ private class AddAccount : SuspendingCliktCommand(name = "add") {
             echo(url)
             val paste = Terminal().readLineOrNull(hideInput = true)?.trim().orEmpty()
             val code = parseLoginCode(paste, state)
-            val input = ClaudeEnrollmentClient { configure -> HttpClient(httpEngine()) { configure(this) } }.use { it.exchange(code, state, verifier, randomCode()) }
+            val input = ClaudeEnrollmentClient { configure -> HttpClient() { configure(this) } }.use { it.exchange(code, state, verifier, randomCode()) }
             val result = client.enrollAccount(input)
             echo("${if (result.created) "Added" else "Updated"} ${result.account.displayName} (${result.account.id}).")
             echo("Stop any other refresher for this account, then run: teamcode accounts handover ${result.account.id} --confirm")

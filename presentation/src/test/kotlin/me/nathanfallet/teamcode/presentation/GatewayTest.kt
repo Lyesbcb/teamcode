@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.presentation
 
 import io.ktor.client.*
 import io.ktor.client.request.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.testing.testApplication
@@ -15,7 +16,7 @@ class GatewayTest {
     private val accessToken = "synthetic-teamcode-token-for-tests-only"
     private class StubGateway : GatewayService {
         var requests = 0
-        override fun status() = GatewaySnapshot("fixture", 0, requests.toLong())
+        override suspend fun status() = GatewaySnapshot("fixture", 0, requests.toLong())
         override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
             requests++
             assertFalse(request.headers.containsKey("authorization"))
@@ -25,7 +26,12 @@ class GatewayTest {
     @Test fun `real SDK authenticates and reads typed status and capabilities`() = testApplication {
         val gateway = StubGateway()
         application { configureGateway(gateway, accessToken) }
-        val sdk = TeamCodeClient("http://localhost", { accessToken }) { config -> createClient { config(this) } }
+        val sdk = TeamCodeClient("http://localhost", { accessToken }) { config -> createClient {
+            config(this)
+            // Ktor 3.6 test-host's writer timeout child waits for its own parent completion.
+            // Real socket timeouts remain enabled in the SDK and native smoke tests.
+            install(HttpTimeout) { socketTimeoutMillis = null }
+        } }
         try {
             assertEquals(1, sdk.capabilities().apiVersion)
             assertEquals(GatewayStatus("fixture", 0, 0), sdk.status())
@@ -41,7 +47,12 @@ class GatewayTest {
     }
     @Test fun `stream traverses SDK unchanged and private headers do not reach gateway`() = testApplication {
         application { configureGateway(StubGateway(), accessToken) }
-        val sdk = TeamCodeClient("http://localhost", { accessToken }) { config -> createClient { config(this) } }
+        val sdk = TeamCodeClient("http://localhost", { accessToken }) { config -> createClient {
+            config(this)
+            // Ktor 3.6 test-host's writer timeout child waits for its own parent completion.
+            // Real socket timeouts remain enabled in the SDK and native smoke tests.
+            install(HttpTimeout) { socketTimeoutMillis = null }
+        } }
         try {
             sdk.forwardMessages("""{"model":"fixture","stream":true,"messages":[]}""".encodeToByteArray()) {
                 assertEquals(HttpStatusCode.OK, it.status)

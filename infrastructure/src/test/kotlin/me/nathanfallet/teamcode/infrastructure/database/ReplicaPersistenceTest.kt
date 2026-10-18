@@ -1,0 +1,121 @@
+package me.nathanfallet.teamcode.infrastructure.database
+
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.*
+import me.nathanfallet.teamcode.domain.accounts.*
+import me.nathanfallet.teamcode.domain.capacity.*
+import me.nathanfallet.teamcode.domain.team.TeamFailure
+import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
+import org.testcontainers.mysql.MySQLContainer
+import kotlin.test.*
+
+class ReplicaPersistenceTest {
+    @Test fun independentReplicasShareAdmissionRefreshLeasesAndAuthentication() = runBlocking {
+        MySQLContainer("mysql:8.4").withDatabaseName("teamcode")
+            .withTmpFs(mapOf("/var/lib/mysql" to "rw,nosuid,size=1g")).use { container ->
+            container.start()
+            Database(container.jdbcUrl, container.username, container.password).use { a ->
+            Database(container.jdbcUrl, container.username, container.password).use { b ->
+                coroutineScope { listOf(a, b).map { async(Dispatchers.IO) { it.migrate() } }.awaitAll() }
+                val teamA = SqlTeamService(a)
+                val teamB = SqlTeamService(b)
+                val password = coroutineScope { listOf(teamA, teamB).map { async { it.bootstrap() } }.awaitAll() }.filterNotNull().single()
+                val initial = teamA.login("admin", password, "replica test")
+                assertNotNull(teamB.authenticate(initial.token))
+                teamB.changePassword(initial.principal, password, "replica test replacement password")
+                assertNull(teamA.authenticate(initial.token))
+                val admin = teamA.login("admin", "replica test replacement password", "replica test")
+                val cipher = CredentialCipher(ByteArray(32) { 17 })
+                val store = SqlAccountStore(a, cipher)
+                val verified = VerifiedProviderAccount(AccountIdentity("default", "anthropic", "synthetic-user", "synthetic-org"), "Replica test")
+                val valid = ProviderCredentials("synthetic-access", "synthetic-refresh", System.currentTimeMillis() + 3_600_000)
+                var account = (store.upsert(verified, valid, null, "replica-enroll-0001") as EnrollmentResult.Created).account
+                account = store.handover("default", account.id)
+                val admissionA = SqlAdmissionStore(a)
+                val admissionB = SqlAdmissionStore(b)
+                admissionA.configure(admin.principal, MemberPolicy(admin.principal.member.id, 1000, 1))
+                val raced = coroutineScope { (0..7).map { n -> async {
+                    runCatching { (if (n % 2 == 0) admissionA else admissionB).reserve(admin.principal, 100, "claude-test") }
+                } }.awaitAll() }
+                assertEquals(1, raced.count { it.isSuccess })
+                val reservation = raced.single { it.isSuccess }.getOrThrow()
+                assertEquals(1, admissionB.statistics().active)
+                assertEquals(100, admissionB.capacity(admin.principal).chargedAndReservedUnits)
+                admissionB.settle(reservation, 30, true)
+                admissionA.settle(reservation, 0, true)
+                assertEquals(AdmissionStatistics(0, 1), admissionA.statistics())
+                assertEquals(30, admissionB.capacity(admin.principal).chargedAndReservedUnits)
+                val abandoned = admissionA.reserve(admin.principal, 100, "claude-test")
+                a.transaction { it.execute("UPDATE reservations SET expires_at = 0 WHERE id = ?", abandoned.id) }
+                assertEquals(0, admissionB.statistics().active)
+                assertEquals(130, admissionB.capacity(admin.principal).chargedAndReservedUnits) // A dead pod cannot refund spend.
+
+                val expired = ProviderCredentials("expired-access", "rotating-refresh", 1)
+                account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0001") as EnrollmentResult.Updated).account
+                val renewals = AtomicInteger()
+                val entered = CompletableDeferred<Unit>()
+                val release = CompletableDeferred<Unit>()
+                val renew: suspend (AccountRecord, ProviderCredentials) -> ProviderCredentials = { _, _ -> renewals.incrementAndGet(); entered.complete(Unit); release.await(); valid }
+                val sourceA = SqlCredentialSource(a, cipher, renew)
+                val sourceB = SqlCredentialSource(b, cipher, renew)
+                coroutineScope {
+                    val first = async { sourceA.fresh(account) }
+                    entered.await()
+                    assertEquals(EnrollmentResult.Conflict, store.upsert(verified, valid, account.credentialVersion, "replica-race-000001"))
+                    assertFailsWith<TeamFailure> { store.handover("default", account.id) }
+                    val second = async { sourceB.fresh(account) }
+                    release.complete(Unit)
+                    assertEquals(valid.accessToken, first.await().accessToken)
+                    assertEquals(valid.accessToken, second.await().accessToken)
+                }
+                assertEquals(1, renewals.get())
+                account = store.find(verified.identity)!!
+                account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0002") as EnrollmentResult.Updated).account
+                // Simulate a process killed after committing refresh intent, before persisting the rotated token.
+                a.transaction { it.execute("UPDATE accounts SET refresh_pending = TRUE, refresh_started_at = 0 WHERE id = ?", account.id) }
+                assertEquals("provider_reconnect", assertFailsWith<TeamFailure> { sourceB.fresh(account) }.code)
+                assertEquals(1, renewals.get())
+                assertEquals(AccountState.RECONNECT_REQUIRED, store.find(verified.identity)!!.state)
+                assertFailsWith<TeamFailure> { store.handover("default", account.id) }
+                store.upsert(verified, valid, account.credentialVersion, "replica-reconnect-01")
+                account = store.handover("default", account.id)
+                assertEquals(valid.accessToken, sourceA.fresh(account).accessToken)
+
+                val workA = SqlScheduledWork(a)
+                val workB = SqlScheduledWork(b)
+                val ownerEntered = CompletableDeferred<Unit>()
+                val ownerRelease = CompletableDeferred<Unit>()
+                coroutineScope {
+                    val owner = async { workA.runDue("maintenance") { ownerEntered.complete(Unit); ownerRelease.await() } }
+                    ownerEntered.await()
+                    assertFalse(workB.runDue("maintenance") { fail("Lease must be exclusive across connection pools") })
+                    // Reclaim an expired lease and ensure the old owner cannot release the new lease.
+                    b.transaction { it.execute("UPDATE scheduled_work SET available_at = 0 WHERE name = 'maintenance'") }
+                    val newEntered = CompletableDeferred<Unit>()
+                    val newRelease = CompletableDeferred<Unit>()
+                    val successor = async { workB.runDue("maintenance") { newEntered.complete(Unit); newRelease.await() } }
+                    newEntered.await()
+                    ownerRelease.complete(Unit); assertTrue(owner.await())
+                    assertFalse(workA.runDue("maintenance") { fail("Stale owner released successor") })
+                    newRelease.complete(Unit); assertTrue(successor.await())
+                }
+                assertFalse(SqlScheduledWork(a).runDue("maintenance") { fail("Schedule must survive worker restart") })
+                assertTrue(account.id in workB.dueAccounts())
+                workA.runDue("quota/${account.id}") { }
+                assertFalse(account.id in workB.dueAccounts())
+
+                // Both API and dashboard call this same database budget; pod count does not multiply it.
+                a.transaction { it.execute("UPDATE login_budget SET attempts = 0, window_number = 0") }
+                // Avoid a legitimate fixed-window rollover while asserting exactly 120 concurrent admits.
+                val elapsed = a.transaction { it.nowMillis() % 60_000 }
+                if (elapsed > 50_000) delay(60_000 - elapsed + 50)
+                val budgets = listOf(SqlLoginBudget(a), SqlLoginBudget(b))
+                val allowed = coroutineScope { (0..139).map { n -> async { budgets[n % 2].admit() } }.awaitAll() }
+                assertEquals(120, allowed.count { it })
+                assertFalse(SqlLoginBudget(b).admit())
+                teamB.logout(admin.principal)
+                assertNull(teamA.authenticate(admin.token))
+            } }
+        }
+    }
+}

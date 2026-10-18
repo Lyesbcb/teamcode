@@ -8,10 +8,12 @@ data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits:
 data class PoolBudget(val poolId: String, val dailyUnits: Long)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
 data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long)
+data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {
+    suspend fun statistics(): AdmissionStatistics
     suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic"): Reservation
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
-    suspend fun settle(reservation: Reservation, actualUnits: Long?)
+    suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean = false)
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity
     suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy
     suspend fun poolBudgets(actor: Principal): List<PoolBudget>

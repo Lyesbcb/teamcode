@@ -20,20 +20,8 @@ internal suspend inline fun <reified T> ApplicationCall.jsonBody(): T {
     return try { Serialization.json.decodeFromString<T>(receiveChannel().readBounded(32_768).decodeToString()) }
     catch (_: IllegalArgumentException) { throw TeamFailure("invalid_body", 400, "Invalid request body.") }
 }
-/** A fixed global bound prevents unauthenticated password hashing and database work from growing without limit. */
-internal class LoginThrottle {
-    private var window = 0L
-    private var attempts = 0
-    @Synchronized fun admit() {
-        val now = System.currentTimeMillis() / 60_000
-        if (now != window) { window = now; attempts = 0 }
-        if (++attempts > 120) throw TeamFailure("login_rate_limit", 429, "Too many login attempts. Try again in a minute.")
-    }
-}
 internal fun Route.teamRoutes(team: TeamService) {
-    val throttle = LoginThrottle()
     post("/api/v1/auth/login") {
-        throttle.admit()
         val input = call.jsonBody<LoginRequest>()
         val session = team.login(input.username, input.password, input.device)
         call.respond(LoginResponse(session.token, session.expiresAt, session.principal.member.view()))

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "teamcode.fullname" . | trunc 47 | trimSuffix "-" }}-test-connection"
+  labels:
+    {{- include "teamcode.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command: [wget]
+      args: ["-T", "10", "-O", "-", "http://{{ include "teamcode.fullname" . }}:{{ .Values.service.port }}/ready"]
+  restartPolicy: Never

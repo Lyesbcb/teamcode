@@ -35,6 +35,10 @@ teamcode logout
 
 The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` into the hidden prompt. Credentials are sent to TeamCode, where the Claude profile/Max subscription or Codex authenticated subscription identity is checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Expired Claude credentials require `accounts add`; expired Codex credentials currently require signing in with Codex/TeamClaude and importing again. Direct Codex OAuth enrollment is pending. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
 
+## Kubernetes
+
+The [Helm chart](helm/teamcode/README.md) follows the `pkg` chart conventions, with two stateless server replicas, streaming ingress settings, a persistent optional MySQL 8.4 instance, external database support, HPA, probes and draining. All replicas share database-backed sessions, quotas, refresh ownership and worker leases; see [replica behavior](docs/replicas.md). Redis and sticky sessions are not required. The image workflow publishes `nathanfallet/teamcode:latest` and immutable commit tags after verification.
+
 ## Try the transport fixture
 
 Build with JDK 21 using the checked-in Gradle wrapper:
@@ -105,9 +109,40 @@ python3 scripts/acceptance-provider.py \
 
 It starts its own MySQL/server/proxy, imports in access-only mode, verifies a repeated import, asks an isolated real Claude Code process for one short Haiku response, checks metadata-only server logs and destroys its own test database. It never edits the source config or refreshes provider credentials.
 
+## Claude Code through the local proxy
+
+After signing in to TeamCode and importing/activating an eligible Claude Max account:
+
+```sh
+teamcode run claude -- --dangerously-skip-permissions
+teamcode run claude -- --model claude-haiku-4-5-20251001 -p "Hello"
+```
+
+`run` starts a dedicated authenticated proxy on a free loopback port, launches the installed agent from your PATH, forwards the arguments after `--` literally, preserves your working directory and terminal, and closes the proxy when the agent exits. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each simultaneous launch gets its own local capability. Native `run` is implemented for macOS/Linux; Windows remains pending with the private configuration adapter.
+
+For a manually managed proxy:
+
+```sh
+export TEAMCODE_LOCAL_TOKEN="$(openssl rand -hex 32)"
+teamcode proxy start
+# In another terminal with the same TEAMCODE_LOCAL_TOKEN:
+ANTHROPIC_BASE_URL=http://127.0.0.1:8789 \
+ANTHROPIC_API_KEY="$TEAMCODE_LOCAL_TOKEN" \
+claude --model claude-haiku-4-5-20251001
+```
+
+Remove conflicting `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` environment overrides before using this manual setup. The local capability protects the loopback proxy; the proxy uses your saved TeamCode session to reach the team server. Provider credentials remain on the server. The requested model and effort must satisfy your team's policy. Native Messages fields and tool definitions pass through unchanged.
+
 ## Codex through the local proxy
 
-Use a custom provider pointed at `http://127.0.0.1:8789/v1`, with `wire_api = "responses"` and `env_key = "TEAMCODE_LOCAL_TOKEN"`. Select `model_provider = "teamcode"` and an explicit model available on the imported account. These settings can be passed per invocation without editing personal configuration. The [official custom provider documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers) describes the client configuration.
+```sh
+teamcode run codex --
+teamcode run codex -- exec --model gpt-6-luna "Explain this repository"
+```
+
+The launcher supplies the custom TeamCode provider for this invocation, using your saved server configuration and a temporary loopback capability. All remaining CLI arguments are passed through. An explicit client-side provider override can override these launch settings; server policy applies only to requests sent through TeamCode.
+
+For a manually managed proxy, use a custom provider pointed at `http://127.0.0.1:8789/v1`, with `wire_api = "responses"` and `env_key = "TEAMCODE_LOCAL_TOKEN"`. Select `model_provider = "teamcode"` and an explicit model available on the imported account. These settings can be passed per invocation without editing personal configuration. The [official custom provider documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers) describes the client configuration.
 
 The subscription adapter uses ChatGPT's Codex endpoint, never the metered OpenAI API. It requires streamed requests with complete conversation input; provider-managed previous-response/thread state is currently rejected. Tool definitions and native Responses fields are preserved. Usage accounting includes cached input and reasoning output exactly once.
 
