@@ -62,6 +62,10 @@ Do not silently discard signed/encrypted reasoning, tool state or unknown requir
 
 Conceptual tables: teams, members, memberships, devices, sessions, service keys, provider accounts, pools, policies, quota observations, reservations, requests, upstream attempts, usage events, route versions, directives, receipts and audit events. Identity and events are team-scoped. IDs, tokens and session names are not metric labels. Telemetry is optional and content-free by default.
 
-Provider credentials are encrypted at rest with the encryption key outside the database. Member/device credentials are revocable and scope-limited. Web sessions use Secure/HttpOnly/SameSite cookies and CSRF protection. Bootstrap is closed by default. No public GitHub login automatically grants membership.
+Provider credentials are encrypted at rest with the encryption key outside the database. Member/device credentials are revocable and scope-limited. Web sessions use Secure/HttpOnly/SameSite cookies and CSRF protection. Bootstrap is closed by default. There is no public registration. First-run bootstrap creates the administrator once; administrators create other users through the dashboard. Temporary passwords must be replaced before using the gateway.
 
 Metrics describe bounded operational outcomes; individual usage is protected management data. Do not log prompts, responses, credentials or raw provider error bodies. Store only metadata unless an operator explicitly opts into a documented, short-lived diagnostic mode.
+
+### Transaction boundaries
+
+The first durable adapters use HikariCP and explicit prepared JDBC statements behind domain ports, with Flyway-owned MySQL migrations. This makes row locks, idempotency checks and affected-row checks visible without exporting database types to other modules. It is an implementation detail of infrastructure; Exposed can be introduced for query-heavy repositories without changing the domain or public client.

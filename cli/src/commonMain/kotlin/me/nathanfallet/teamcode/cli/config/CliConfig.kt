@@ -47,6 +47,7 @@ class ConfigStore(private val path: String = configPath()) {
         return try { Serialization.json.decodeFromString<CliConfig>(FileSystem.SYSTEM.read(file) { readUtf8() }) }
         catch (_: IllegalArgumentException) { error("Cannot read TeamCode configuration. Run configure to replace it.") }
     }
+    fun delete() { FileSystem.SYSTEM.delete(path.toPath(), mustExist = false) }
     fun save(config: CliConfig) {
         writePrivateFile(path, Serialization.json.encodeToString(CliConfig.serializer(), config))
     }

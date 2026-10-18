@@ -10,6 +10,7 @@ dependencies {
     implementation(projects.domain)
     implementation(projects.infrastructure)
     implementation(projects.presentation)
+    implementation(libs.ktor.client.cio)
     implementation(libs.ktor.server.netty)
     implementation(libs.koin.core)
     implementation(libs.logback)

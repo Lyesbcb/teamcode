@@ -8,3 +8,5 @@ import platform.posix.getenv
 
 actual fun environment(name: String): String? = getenv(name)?.toKString()
 actual fun httpEngine(): HttpClientEngineFactory<*> = WinHttp
+
+actual fun secureRandomBytes(count: Int): ByteArray = error("Windows secure random support is not released yet.")

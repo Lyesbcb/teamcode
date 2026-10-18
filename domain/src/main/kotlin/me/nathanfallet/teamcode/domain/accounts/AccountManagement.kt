@@ -1,0 +1,32 @@
+package me.nathanfallet.teamcode.domain.accounts
+
+import me.nathanfallet.teamcode.domain.team.*
+
+interface AccountStore : AccountsRepository {
+    suspend fun list(teamId: String): List<AccountRecord>
+    suspend fun configure(teamId: String, id: String, displayName: String, disabled: Boolean, priority: Int): AccountRecord
+    suspend fun handover(teamId: String, id: String): AccountRecord
+    suspend fun credentials(teamId: String, id: String): ProviderCredentials
+}
+class AccountManagement(private val store: AccountStore, private val verifier: AccountVerifier) {
+    suspend fun list(actor: Principal): List<AccountRecord> { actor.requireAdmin(); return store.list(actor.teamId) }
+    suspend fun enroll(actor: Principal, credentials: ProviderCredentials, operationId: String): EnrollmentResult {
+        actor.requireAdmin()
+        if (!Regex("[a-zA-Z0-9_-]{16,64}").matches(operationId)) throw TeamFailure("invalid_operation", 400, "A unique enrollment operation identifier is required.")
+        if (credentials.accessToken.length > 16_384 || credentials.refreshToken.length > 16_384) throw TeamFailure("invalid_credentials", 400, "Invalid provider credentials.")
+        // Import must never rotate credentials while the source is still their refresh owner.
+        if (credentials.expiresAtMillis <= System.currentTimeMillis()) throw TeamFailure("provider_reconnect", 409, "These credentials have expired. Add the account again through the CLI.")
+        val verified = verifier.verify(actor.teamId, credentials)
+        val existing = store.find(verified.identity)
+        return store.upsert(verified, credentials, existing?.credentialVersion, operationId)
+    }
+    suspend fun configure(actor: Principal, id: String, name: String, disabled: Boolean, priority: Int): AccountRecord {
+        actor.requireAdmin()
+        if (name.isBlank() || name.length > 120 || name.any { it.isISOControl() } || priority !in -100..100) throw TeamFailure("invalid_account", 400, "Use a name up to 120 characters and a priority between -100 and 100.")
+        return store.configure(actor.teamId, id, name, disabled, priority)
+    }
+    suspend fun handover(actor: Principal, id: String): AccountRecord {
+        actor.requireAdmin()
+        return store.handover(actor.teamId, id)
+    }
+}

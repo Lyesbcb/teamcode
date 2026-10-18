@@ -11,6 +11,8 @@ import io.ktor.server.routing.*
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.*
 import java.security.MessageDigest
+import me.nathanfallet.teamcode.domain.team.*
+import me.nathanfallet.teamcode.domain.accounts.AccountManagement
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
@@ -21,18 +23,45 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String) {
-    require(accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null) {
+    require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
     install(ContentNegotiation) { json(Serialization.json) }
     install(StatusPages) {
+        exception<TeamFailure> { call, error ->
+            if (call.request.path().startsWith("/dashboard")) call.respondText(page("Request failed", "<p>${escape(error.message ?: "Request failed.")}</p><a href='/dashboard'>Back to dashboard</a>"), ContentType.Text.Html, HttpStatusCode.fromValue(error.status))
+            else call.respond(HttpStatusCode.fromValue(error.status), ApiError(ErrorDetail(error.code, error.message ?: "Request failed.")))
+        }
         exception<CancellationException> { _, error -> throw error }
         exception<InvalidRequest> { call, error -> call.respond(HttpStatusCode.BadRequest, ApiError(ErrorDetail("invalid_request", error.message ?: "Invalid request."))) }
         exception<PayloadTooLarge> { call, _ -> call.respond(HttpStatusCode.PayloadTooLarge, ApiError(ErrorDetail("payload_too_large", "Request exceeds the configured limit."))) }
     }
     intercept(ApplicationCallPipeline.Plugins) {
-        if (call.request.path() != "/health") {
+        call.response.header(HttpHeaders.CacheControl, "no-store")
+        call.response.header("X-Content-Type-Options", "nosniff")
+        call.response.header("Referrer-Policy", "no-referrer")
+        val path = call.request.path()
+        if (team != null) {
+            if (path.startsWith("/dashboard")) call.response.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+            if (path !in setOf("/health", "/", "/dashboard/login", "/api/v1/auth/login")) {
+                val credential = if (path.startsWith("/dashboard")) call.request.cookies["teamcode_session"]
+                    else call.request.header(HttpHeaders.Authorization)?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
+                val principal = credential?.let { team.authenticate(it) }
+                if (principal == null) {
+                    if (path.startsWith("/dashboard")) call.respondRedirect("/dashboard/login")
+                    else call.respond(HttpStatusCode.Unauthorized, ApiError(ErrorDetail("authentication_required", "Sign in to TeamCode.")))
+                    finish()
+                } else {
+                    call.attributes.put(PRINCIPAL, principal)
+                    if (path !in setOf("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout", "/dashboard/password", "/dashboard/logout")) {
+                        if (principal.member.passwordChangeRequired && path.startsWith("/dashboard")) {
+                            call.respondRedirect("/dashboard/password"); finish()
+                        } else principal.requireReady()
+                    }
+                }
+            }
+        } else if (path != "/health") {
             val presented = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ") ?: ""
             val actual = MessageDigest.getInstance("SHA-256").digest(presented.toByteArray())
             if (!MessageDigest.isEqual(expected, actual)) {
@@ -42,10 +71,12 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String) {
         }
     }
     routing {
+        if (team != null) { teamRoutes(team); dashboardRoutes(team, publicOrigin) }
+        if (accounts != null) accountRoutes(accounts, publicOrigin)
         get("/health") { call.respondText("OK") }
         get<CapabilitiesResource> {
             call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = gateway.status().mode,
-                features = listOf("status", "messages.fixture.streaming")))
+                features = listOf("status", "messages.fixture.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
         }
         get<StatusResource> {
             val status = gateway.status()

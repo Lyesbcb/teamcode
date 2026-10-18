@@ -54,6 +54,31 @@ class TeamCodeClient(
         return response.body()
     }
 
+    suspend fun login(username: String, password: String, device: String = "TeamCode CLI"): LoginResponse =
+        request("/api/v1/auth/login", HttpMethod.Post, LoginRequest(username, password, device))
+    suspend fun me(): MemberView = request("/api/v1/auth/me", HttpMethod.Get)
+    suspend fun changePassword(current: String, replacement: String): SuccessResponse =
+        request("/api/v1/auth/password", HttpMethod.Post, PasswordRequest(current, replacement))
+    suspend fun logout(): SuccessResponse = request("/api/v1/auth/logout", HttpMethod.Post)
+    suspend fun accounts(): List<AccountView> = request("/api/v1/accounts", HttpMethod.Get)
+    suspend fun enrollAccount(input: EnrollAccountRequest): EnrollAccountResponse = request("/api/v1/accounts", HttpMethod.Post, input)
+    suspend fun handoverAccount(id: String): AccountView {
+        require(Regex("[a-zA-Z0-9-]{1,36}").matches(id))
+        return request("/api/v1/accounts/$id/handover", HttpMethod.Post)
+    }
+    suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
+
+    private suspend inline fun <reified R> request(path: String, method: HttpMethod): R {
+        val response = http.request("$origin$path") { this.method = method; authenticate(); timeout { requestTimeoutMillis = 10_000 } }
+        checkResponse(response)
+        return response.body()
+    }
+    private suspend inline fun <reified R, reified B> request(path: String, method: HttpMethod, body: B): R {
+        val response = http.request("$origin$path") { this.method = method; contentType(ContentType.Application.Json); setBody(body); authenticate(); timeout { requestTimeoutMillis = 30_000 } }
+        checkResponse(response)
+        return response.body()
+    }
+
     /** The body must be consumed inside [receive]; no full response is buffered by this SDK. */
     suspend fun forwardMessages(
         body: ByteArray,

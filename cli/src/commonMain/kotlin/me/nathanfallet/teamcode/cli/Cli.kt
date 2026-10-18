@@ -14,16 +14,52 @@ import me.nathanfallet.teamcode.cli.config.*
 import me.nathanfallet.teamcode.cli.platform.*
 import me.nathanfallet.teamcode.cli.proxy.localProxy
 import me.nathanfallet.teamcode.client.TeamCodeClient
+import com.github.ajalt.mordant.terminal.Terminal
+import me.nathanfallet.teamcode.cli.accounts.Accounts
 
 const val VERSION = "0.1.0-SNAPSHOT"
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
-    override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode configure. Provider enrollment is not implemented yet."
-    init { subcommands(Configure(), Status(), Version(), Proxy()) }
+    override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {
     override suspend fun run() { echo("TeamCode $VERSION") }
+}
+
+private class Login : SuspendingCliktCommand(name = "login") {
+    private val server by option("--server", help = "Your self-hosted server origin; saved after login.")
+    private val username by option("--username", help = "Your TeamCode username; prompted when omitted.")
+    private val passwordStdin by option("--password-stdin", help = "Read passwords from stdin for automation.").flag()
+    override suspend fun run() {
+        val terminal by lazy { Terminal() }
+        fun read(label: String, secret: Boolean = false): String {
+            echo("$label: ", trailingNewline = false, err = true)
+            return (if (passwordStdin) readlnOrNull() else terminal.readLineOrNull(hideInput = secret)) ?: error("Input ended.")
+        }
+        val origin = validateServerUrl(server ?: ConfigStore().load()?.serverUrl ?: read("TeamCode server URL"))
+        val name = username ?: read("Username")
+        var password = read("Password", secret = true)
+        var session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password) }
+        if (session.member.passwordChangeRequired) {
+            echo("Choose a new password with at least 14 characters. This will sign out all existing sessions.")
+            val replacement = read("New password", secret = true)
+            require(replacement == read("Confirm new password", secret = true)) { "Passwords do not match." }
+            sdk(CliConfig(origin, session.accessToken)).use { it.changePassword(password, replacement) }
+            password = replacement
+            session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password) }
+        }
+        ConfigStore().save(CliConfig(origin, session.accessToken))
+        echo("Signed in as ${session.member.username}. Configuration saved to ${configPath()}.")
+    }
+}
+private class Logout : SuspendingCliktCommand(name = "logout") {
+    override suspend fun run() {
+        sdk(loadConfig()).use { it.logout() }
+        ConfigStore().delete()
+        echo("Session revoked and local configuration removed.")
+    }
 }
 
 private class Configure : SuspendingCliktCommand(name = "configure") {
@@ -78,8 +114,8 @@ private class ProxyStart : SuspendingCliktCommand(name = "start") {
     }
 }
 
-private fun loadConfig() = ConfigStore().load() ?: error("No configuration found. Run teamcode configure first.")
-private fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.accessToken }) { configure ->
+internal fun loadConfig() = ConfigStore().load() ?: error("No configuration found. Run teamcode login first.")
+internal fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.accessToken }) { configure ->
     HttpClient(httpEngine()) { configure(this) }
 }
 

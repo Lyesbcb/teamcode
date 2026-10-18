@@ -32,7 +32,7 @@ teamcode service start|stop|restart|status|logs|uninstall
 
 ### Two authentication lifecycles
 
-`login` authenticates a team member through browser/device authorization. Persist the selected self-hosted server URL and TeamCode authentication under `$XDG_CONFIG_HOME/teamcode/`, falling back to `~/.config/teamcode/`. Ask for the server URL during first setup; subsequent invocations reuse the saved origin and authentication. Use an owner-only directory (0700) and configuration file (0600) on POSIX, and an equivalent owner-only DACL on Windows. Never store provider pool credentials in this configuration. Browser/device login will supply short-lived access and rotating refresh tokens; storage must protect both. An OS credential-store integration can be added later without changing the public client API.
+`login` asks for a username/password created by the team administrator, handles the required initial password change, and stores only a revocable session token. Persist the selected self-hosted server URL and TeamCode authentication under `$XDG_CONFIG_HOME/teamcode/`, falling back to `~/.config/teamcode/`. Ask for the server URL during first setup; subsequent invocations reuse the saved origin and authentication. Use an owner-only directory (0700) and configuration file (0600) on POSIX, and an equivalent owner-only DACL on Windows. Never store provider pool credentials or the user's password in this configuration.
 
 `accounts add` signs into the provider in a local browser, binds the callback to state/PKCE as supported by that provider, and uploads the necessary authentication to a dedicated HTTPS server operation. The server verifies the account identity, encrypts credentials and becomes their refresh owner. No provider password is sent to TeamCode. The local proxy needs only a TeamCode credential after enrollment. Account enrollment requires an explicit permission, not merely membership.
 
@@ -54,14 +54,14 @@ Track installed/running/authenticated/connected states separately. Retry network
 
 - Overview: usable capacity, 5-hour/weekly windows, reset times, forecast confidence, waiting work and controller decisions.
 - Provider accounts: CLI enrollment instructions, connection/refresh health, ownership, pools, permissions, pause/drain and reconnection status; no secret display.
-- Team: invitations, members, groups, roles, devices and CI credentials.
+- Team: administrator-created users, groups, roles, devices and CI credentials.
 - Budgets: member/group/run limits, concurrency, protected reserves and audited temporary overrides.
 - Model routing: requested aliases, actual targets, capabilities, explicit fallbacks and a why-this-route explanation.
 - Sessions: activity metadata, directives, delivery/acknowledgment status; private content is not a team leaderboard.
 - Personal account: own usage, reservations, device management, CLI integration and refusal explanations.
 - Operations: audit history, versions, provider failures and dependency health.
 
-Proposed first UI: server-rendered FreeMarker with targeted client-side updates and SSE charts. Backend API remains usable independently. Roles: owner, admin, group manager, member and service identity. Proposed web authentication: GitHub OAuth with invitations/allowlist, then generic OIDC.
+Proposed first UI: server-rendered FreeMarker with targeted client-side updates and SSE charts. Backend API remains usable independently. Roles: owner, admin, group manager, member and service identity. Team authentication uses administrator-created usernames and passwords, with no public registration, email infrastructure or mandatory external identity provider. First startup on an empty database creates `admin` and prints its temporary password once. It must be changed before other actions. Admin-created accounts follow the same temporary-password flow; password resets and role changes revoke sessions.
 
 ## Capacity and fairness
 
