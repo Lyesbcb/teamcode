@@ -15,4 +15,4 @@ The end-to-end foundation works, including real Claude Max and Codex subscriptio
 
 The immediate sequence is Windows acceptance, complete agent-compatible routing, then predictive control and the remaining release gates. This sequence does not remove the other V1 requirements. Centralized MCP and skills management remains V2.
 
-See [detailed evidence](status.md), the [original milestone and acceptance checklist](roadmap.md), and the [Windows setup guide](windows.md). CI failures block new Docker image publication; a newer source commit does not imply that `latest` has been republished.
+See the [TeamClaude comparison and gap ledger](teamclaude-comparison.md), [detailed evidence](status.md), the [original milestone and acceptance checklist](roadmap.md), and the [Windows setup guide](windows.md). CI failures block new Docker image publication; a newer source commit does not imply that `latest` has been republished.

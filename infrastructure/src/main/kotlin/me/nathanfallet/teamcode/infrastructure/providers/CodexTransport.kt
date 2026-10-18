@@ -54,14 +54,21 @@ class CodexTransport(private val http: HttpClient) : ProviderTransport {
             setBody(JsonObject(body + ("store" to JsonPrimitive(false))).toString())
         }.execute { receive(it) }
     }
-    override fun quotas(accountId: String, headers: Headers, now: Long): List<AccountQuota> = listOf("primary", "secondary").mapNotNull { key ->
-        val percent = headers["x-codex-$key-used-percent"]?.toDoubleOrNull()
-        val minutes = headers["x-codex-$key-window-minutes"]?.toLongOrNull()
-        val reset = headers["x-codex-$key-reset-at"]?.toLongOrNull()
-        bucket(accountId, percent, minutes?.times(60), reset, now)
-    }
+    override fun quotas(accountId: String, headers: Headers, now: Long): List<AccountQuota> = headerQuotas(accountId, headers, now)
     companion object {
-        fun parseUsage(accountId: String, value: JsonObject, now: Long): List<AccountQuota> = buildList {
+        fun headerQuotas(accountId: String, headers: Headers, now: Long): List<AccountQuota> = normalize(buildList {
+            val pattern = Regex("^x-codex-(?:(.+)-)?(primary|secondary)-used-percent$")
+            for (name in headers.names()) {
+                val match = pattern.matchEntire(name.lowercase()) ?: continue
+                val slug = match.groupValues[1].takeIf { it.isNotEmpty() }
+                val prefix = name.lowercase().removeSuffix("-used-percent")
+                val family = slug?.let { headers["x-codex-$it-limit-name"]?.trim()?.takeIf(String::isNotEmpty) ?: it }
+                bucket(accountId, headers[name]?.toDoubleOrNull(),
+                    headers["$prefix-window-minutes"]?.toLongOrNull()?.takeIf { it in 1..Long.MAX_VALUE / 60 }?.times(60),
+                    headers["$prefix-reset-at"]?.toLongOrNull(), now, family?.lowercase())?.let(::add)
+            }
+        })
+        fun parseUsage(accountId: String, value: JsonObject, now: Long): List<AccountQuota> = normalize(buildList {
             fun read(limit: JsonObject?, family: String? = null) {
                 limit?.values?.forEach { element ->
                     val w = element as? JsonObject ?: return@forEach
@@ -80,11 +87,22 @@ class CodexTransport(private val http: HttpClient) : ProviderTransport {
                 is JsonObject -> additional.forEach { (name, entry) -> read((entry as? JsonObject)?.get("rate_limit") as? JsonObject ?: entry as? JsonObject, name.lowercase().removePrefix("codex_")) }
                 else -> Unit
             }
+        })
+        // TeamClaude's subscription observations: the named 5h window is the shared
+        // session allowance when the unnamed family only states a weekly allowance.
+        // An explicit shared 5h reading wins. Named weekly limits remain model-scoped.
+        private fun normalize(windows: List<AccountQuota>): List<AccountQuota> {
+            val shared = windows.filterNot { it.window.startsWith("model:") }
+            val session = if (shared.none { it.window == "five_hour" }) windows
+                .filter { it.window.endsWith(":five_hour") }.maxByOrNull { it.utilization }
+                ?.copy(window = "five_hour") else null
+            return shared + listOfNotNull(session) + windows.filter { it.window.startsWith("model:") && it.window.endsWith(":seven_day") }
         }
         private fun bucket(account: String, percent: Double?, seconds: Long?, reset: Long?, now: Long, family: String? = null): AccountQuota? {
             val window = when (seconds) { 18_000L -> "five_hour"; 604_800L -> "seven_day"; else -> return null }
-            if (percent == null || !percent.isFinite() || percent !in 0.0..100.0 || reset == null || reset !in 1..Long.MAX_VALUE / 1000 || reset * 1000 <= now) return null
-            return AccountQuota(account, if (family == null) window else "model:$family:$window", percent / 100, now, reset * 1000)
+            if (percent == null || !percent.isFinite() || percent < 0 || reset == null || reset !in 1..Long.MAX_VALUE / 1000 || reset * 1000 <= now) return null
+            // Upstream may keep counting past 100%; persistence stores bounded utilization.
+            return AccountQuota(account, if (family == null) window else "model:$family:$window", (percent / 100).coerceAtMost(1.0), now, reset * 1000)
         }
     }
 }

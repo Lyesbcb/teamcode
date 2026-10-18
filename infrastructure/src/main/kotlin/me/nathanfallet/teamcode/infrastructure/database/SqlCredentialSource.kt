@@ -12,7 +12,7 @@ class SqlCredentialSource(
     private val cipher: CredentialCipher,
     private val renew: suspend (AccountRecord, ProviderCredentials) -> ProviderCredentials,
 ) : CredentialSource {
-    override suspend fun fresh(account: AccountRecord): ProviderCredentials {
+    override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?): ProviderCredentials {
         // Other replicas can briefly wait for the refresh owner. They never take over an uncertain refresh.
         repeat(400) {
             val attempt = database.transaction { c ->
@@ -30,7 +30,7 @@ class SqlCredentialSource(
                 }
                 val payload = Json.decodeFromString<CredentialPayload>(cipher.decrypt(row.envelope, "${account.identity.teamId}:${account.id}").decodeToString())
                 val credentials = ProviderCredentials(payload.accessToken, payload.refreshToken, payload.expiresAtMillis)
-                if (credentials.expiresAtMillis > now + 60_000) return@transaction Attempt.Ready(credentials)
+                if (credentials.expiresAtMillis > now + 60_000 && credentials.accessToken != rejectedAccessToken) return@transaction Attempt.Ready(credentials)
                 if (row.account.state == AccountState.ACCESS_ONLY) throw TeamFailure("access_token_expired", 503, "Access-only credentials expired. Import current credentials again; TeamCode will not refresh this account.")
                 c.execute("UPDATE accounts SET refresh_pending = TRUE, refresh_started_at = ? WHERE id = ?", now, account.id)
                 Attempt.Owner(row.account, credentials)

@@ -64,7 +64,46 @@ class CodexProviderTest {
     @Test fun subscriptionWindowsKeepDurationsAndModelScopesDistinct() {
         val value = Json.parseToJsonElement("""{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":2000},"secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":3000}},"additional_rate_limits":[{"limit_name":"gpt-6-luna","rate_limit":{"primary_window":{"used_percent":99,"limit_window_seconds":18000,"reset_at":2000}}}]}""").jsonObject
         val quotas = CodexTransport.parseUsage("account", value, 1000)
-        assertEquals(listOf("five_hour", "seven_day", "model:gpt-6-luna:five_hour"), quotas.map { it.window })
-        assertEquals(listOf(.2, .4, .99), quotas.map { it.utilization })
+        assertEquals(listOf("five_hour", "seven_day"), quotas.map { it.window })
+        assertEquals(listOf(.2, .4), quotas.map { it.utilization })
     }
+    @Test fun namedHeadersSupplySharedSessionAndScopedWeeklyExhaustion() {
+        val headers = headersOf(
+            "X-Codex-Primary-Used-Percent" to listOf("42"),
+            "x-codex-primary-window-minutes" to listOf("10080"),
+            "x-codex-primary-reset-at" to listOf("3000"),
+            "x-codex-secondary-used-percent" to listOf("0"),
+            "x-codex-secondary-window-minutes" to listOf("0"),
+            "x-codex-gpt-6-limit-name" to listOf("GPT-6"),
+            "x-codex-gpt-6-primary-used-percent" to listOf("104.2"),
+            "x-codex-gpt-6-primary-window-minutes" to listOf("300"),
+            "x-codex-gpt-6-primary-reset-at" to listOf("2000"),
+            "x-codex-gpt-6-secondary-used-percent" to listOf("100"),
+            "x-codex-gpt-6-secondary-window-minutes" to listOf("10080"),
+            "x-codex-gpt-6-secondary-reset-at" to listOf("3000"),
+        )
+        val quotas = CodexTransport.headerQuotas("account", headers, 1000).associateBy { it.window }
+        assertEquals(setOf("five_hour", "seven_day", "model:gpt-6:seven_day"), quotas.keys)
+        assertEquals(.42, quotas.getValue("seven_day").utilization)
+        assertEquals(1.0, quotas.getValue("five_hour").utilization)
+        assertEquals(2_000_000, quotas.getValue("five_hour").resetsAtMillis)
+        assertEquals(1.0, quotas.getValue("model:gpt-6:seven_day").utilization)
+        assertTrue(CodexTransport.headerQuotas("account", headersOf("x-codex-primary-used-percent", "100"), 1000).isEmpty())
+    }
+    @Test fun namedUsageSessionFillsOnlyMissingSharedWindow() {
+        val value = Json.parseToJsonElement("""{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_at":3000}},"additional_rate_limits":[{"limit_name":"gpt-6","rate_limit":{"primary_window":{"used_percent":99,"limit_window_seconds":18000,"reset_at":2000},"secondary_window":{"used_percent":105,"limit_window_seconds":604800,"reset_at":3000}}}]}""").jsonObject
+        val quotas = CodexTransport.parseUsage("account", value, 1000).associateBy { it.window }
+        assertEquals(.99, quotas.getValue("five_hour").utilization)
+        assertEquals(1.0, quotas.getValue("model:gpt-6:seven_day").utilization)
+    }
+    @Test fun claudeRejectedStatusPersistsExhaustionWithoutUtilization() {
+        val quotas = ClaudeTransport.headerQuotas("account", headersOf(
+            "anthropic-ratelimit-unified-7d_oi-status" to listOf("rejected"),
+            "anthropic-ratelimit-unified-7d_oi-reset" to listOf("3000"),
+        ), 1000)
+        assertEquals("model:fable", quotas.single().window)
+        assertEquals(1.0, quotas.single().utilization)
+        assertEquals(3_000_000, quotas.single().resetsAtMillis)
+    }
+
 }

@@ -69,3 +69,27 @@ Metrics describe bounded operational outcomes; individual usage is protected man
 ### Transaction boundaries
 
 The first durable adapters use HikariCP and explicit prepared JDBC statements behind domain ports, with Flyway-owned MySQL migrations. This makes row locks, idempotency checks and affected-row checks visible without exporting database types to other modules. It is an implementation detail of infrastructure; Exposed can be introduced for query-heavy repositories without changing the domain or public client.
+
+## Implemented provider and protocol extension points
+
+Three independent contracts keep subscription hosting separate from client wire formats:
+
+- `ProviderTransport` in infrastructure: provider identity, wire protocol, credential renewal, usage probing, quota headers and request dispatch. `ClaudeTransport` and `CodexTransport` implement it. Adding an OpenAI-compatible self-hosted target requires its own configured transport and credential policy; it does not imply reusing Codex subscription authentication.
+- `InboundProtocol` in presentation: HTTP path, wire-protocol identity and conversation-envelope validation. `MessagesInboundProtocol` and `ResponsesInboundProtocol` implement it. Authentication, body bounds and streaming response plumbing remain shared.
+- `ProtocolAdapter` in infrastructure: request decode/encode plus factories for a fresh `StreamDecoder` and `StreamEncoder` per stream. `MessagesProtocolAdapter` and `ResponsesProtocolAdapter` implement it. `ConversationCodec` registers adapters and rejects duplicate registrations; `StreamTranslation` handles bounded SSE framing and cancellation independently of the format.
+
+```mermaid
+flowchart LR
+    Client[Claude Code / Codex / future client] --> Inbound[InboundProtocol]
+    Inbound --> Gateway[Shared authorization, policy and account routing]
+    Gateway --> Transport[ProviderTransport]
+    Gateway -. protocol changes .-> Codec[ProtocolAdapter / common conversation]
+    Codec --> Transport
+    Transport --> Provider[Claude Max / Codex / future provider]
+    Provider --> Stream[Native stream or protocol event conversion]
+    Stream --> Client
+```
+
+A new provider speaking an existing format adds a transport and account verifier, then registers them in composition. A new format adds a wire-protocol identifier, inbound adapter and request/stream adapter, with explicit capability and policy inspection coverage. It is not necessary to add a conversion for every pair: adapters use the common conversation/events only on cross-protocol routes. Native passthrough bypasses these codecs to preserve provider-specific fields. Protocol-specific policy-envelope inspection in the gateway and model/catalog validation still need extending when adding a new format; adding one class alone is not a promise of full compatibility.
+
+See the [TeamClaude comparison](teamclaude-comparison.md) for behavioral differences and remaining acceptance gaps.

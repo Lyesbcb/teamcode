@@ -126,3 +126,11 @@ The next Windows execution passed those checks, actual owner-only ACL inspection
 
 - Windows CI run `39177066176` passed the native login/password-change, private ACL, Unicode configuration/binary path, HTTPS trust/rejection, progressive SSE, Claude/Codex npm launcher, literal arguments/stdin/stdout, exit-code and descendant-cleanup checks. The first reached service installation failed while Task Scheduler parsed its XML encoding declaration.
 - Windows registrations now use UTF-16LE with a BOM and a matching declaration; registration ownership compares the actual encoded bytes. The JVM manifest test parses those exact bytes, including the Unicode configuration path. Local CLI tests and MinGW linking passed; Task Scheduler runtime acceptance is still pending the next Windows run.
+
+### TeamClaude parity review and protocol extension points
+
+- Added `docs/teamclaude-comparison.md`, pinned to the reference checkout, with corrected differences, intentional shared-server adaptations and remaining acceptance gaps. Incomplete quota readings, model aliases, affinity, forecast relevance and full real-agent compatibility remain explicit open work.
+- Corrected named Codex quota headers, shared named session windows, utilization above 100%, Claude status-only exhaustion, per-model fallback exclusions and temporary 403 cooldowns. A model-only rejection can now fall back to another model on the same subscription without cooling the whole account.
+- Added bounded forced renewal after a rejected unexpired access token. Two independent SQL-backed credential sources renew the same rejected token once; a delayed rejection reuses the newer saved token. Existing pending-refresh/crash fencing remains enforced. A rejected first attempt does not refund an ambiguous second attempt.
+- Split HTTP ingress, request codecs and SSE decoders/encoders into protocol adapters. Provider transports remain independent. Native passthrough skips translation; existing cross-protocol stream and tool tests pass after the split.
+- Local verification: `:domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:buildFatJar` passed, including actual MySQL replica tests: 11 domain, 35 infrastructure, 7 presentation and 14 CLI tests, zero failures/skips. No real provider calls were made for this review. Windows service acceptance remains a separate live CI gate.

@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol())) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -95,8 +95,8 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             val status = gateway.status()
             call.respond(GatewayStatus(status.mode, status.active, status.completed))
         }
-        for ((path, protocol) in listOf("/v1/messages" to WireProtocol.MESSAGES, "/v1/responses" to WireProtocol.RESPONSES)) {
-        post(path) {
+        for (inbound in inboundProtocols) {
+        post(inbound.path) {
             if (call.request.contentType().withoutParameters() != ContentType.Application.Json) throw InvalidRequest("A JSON request body is required.")
             val bytes = call.receiveChannel().readBounded(MAX_BODY_BYTES)
             val value = try { Serialization.json.parseToJsonElement(bytes.decodeToString()) as? JsonObject }
@@ -104,11 +104,10 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             if (value["stream"] != JsonPrimitive(true)) throw InvalidRequest("This endpoint requires stream=true.")
             val model = value["model"] as? JsonPrimitive
             if (model?.isString != true || model.content.isBlank()) throw InvalidRequest("A model name is required.")
-            if (protocol == WireProtocol.MESSAGES && value["messages"] !is JsonArray) throw InvalidRequest("A messages array is required.")
-            if (protocol == WireProtocol.RESPONSES && value["input"] !is JsonArray && (value["input"] as? JsonPrimitive)?.isString != true) throw InvalidRequest("An input string or array is required.")
+            inbound.validateConversation(value)
             val headers = listOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id", "user-agent")
                 .mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
-            gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null, protocol)) { head, chunks ->
+            gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null, inbound.protocol)) { head, chunks ->
                 head.headers.filterKeys { it.lowercase() in setOf("retry-after", "x-teamcode-request-id", "x-teamcode-model", "x-teamcode-provider") }.forEach { (name, value) -> call.response.header(name, value) }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")

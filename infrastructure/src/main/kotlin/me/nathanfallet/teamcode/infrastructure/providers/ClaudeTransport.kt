@@ -60,7 +60,7 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
             fun addBucket(name: String, utilization: JsonElement?, reset: JsonElement?) {
                 val percent = (utilization as? JsonPrimitive)?.doubleOrNull ?: return
                 val resets = (reset as? JsonPrimitive)?.contentOrNull?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() } ?: return
-                if (percent.isFinite() && percent in 0.0..100.0 && resets > now) add(AccountQuota(accountId, name, percent / 100, now, resets))
+                if (percent.isFinite() && percent >= 0 && resets > now) add(AccountQuota(accountId, name, (percent / 100).coerceAtMost(1.0), now, resets))
             }
             for ((name, element) in value) {
                 val bucket = element as? JsonObject ?: continue
@@ -79,9 +79,10 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
             }
         }.distinctBy { it.window }
         fun headerQuotas(accountId: String, headers: Headers, now: Long): List<AccountQuota> = listOf("5h" to "five_hour", "7d" to "seven_day", "7d_oi" to "model:fable").mapNotNull { (key, name) ->
-            val used = headers["anthropic-ratelimit-unified-$key-utilization"]?.toDoubleOrNull()
+            val used = if (headers["anthropic-ratelimit-unified-$key-status"] == "rejected") 1.0
+                else headers["anthropic-ratelimit-unified-$key-utilization"]?.toDoubleOrNull()
             val reset = headers["anthropic-ratelimit-unified-$key-reset"]?.toLongOrNull()?.takeIf { it in 1..Long.MAX_VALUE / 1000 }?.times(1000)
-            if (used != null && used.isFinite() && used in 0.0..1.0 && reset != null && reset > now) AccountQuota(accountId, name, used, now, reset) else null
+            if (used != null && used.isFinite() && used >= 0 && reset != null && reset > now) AccountQuota(accountId, name, used.coerceAtMost(1.0), now, reset) else null
         }
     }
 }

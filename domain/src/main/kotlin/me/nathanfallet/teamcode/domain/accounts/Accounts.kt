@@ -43,4 +43,7 @@ sealed interface EnrollmentResult {
 
 class CredentialVersionConflict : Exception("Account credentials changed during enrollment. Retry using current credentials.")
 
-interface CredentialSource { suspend fun fresh(account: AccountRecord): ProviderCredentials }
+interface CredentialSource {
+    /** Rejected access tokens force renewal only if they are still current in shared storage. */
+    suspend fun fresh(account: AccountRecord, rejectedAccessToken: String? = null): ProviderCredentials
+}

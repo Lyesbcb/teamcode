@@ -8,6 +8,7 @@ data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits:
 data class PoolBudget(val poolId: String, val dailyUnits: Long)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
 data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long)
+fun AccountQuota.appliesTo(model: String): Boolean = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
 data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {
     suspend fun statistics(): AdmissionStatistics

@@ -17,7 +17,7 @@ import me.nathanfallet.teamcode.infrastructure.protocols.ConversationCodec
 import me.nathanfallet.teamcode.infrastructure.protocols.StreamTranslation
 
 /** Native passthrough by default; explicit routes translate only when the destination protocol changes. */
-class PoolGateway(private val admission: AdmissionStore, private val credentials: CredentialSource, private val transports: List<ProviderTransport>, private val modelPolicies: ModelPolicyStore, private val routes: RoutingStore? = null) : GatewayService {
+class PoolGateway(private val admission: AdmissionStore, private val credentials: CredentialSource, private val transports: List<ProviderTransport>, private val modelPolicies: ModelPolicyStore, private val routes: RoutingStore? = null, private val codecs: ConversationCodec = ConversationCodec()) : GatewayService {
     override suspend fun status(): GatewaySnapshot = admission.statistics().let { GatewaySnapshot("subscription-pool", it.active, it.completed) }
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) = withTimeout(10 * 60_000L) {
         route(request, receive)
@@ -44,15 +44,18 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
         if (maximumOutput == null || maximumOutput !in 1..65_536) throw TeamFailure("invalid_max_tokens", 400, "max_tokens must be between 1 and 65536.")
         if (listOf("thread", "previous_response_id", "conversation").any { body[it] != null && body[it] != JsonNull }) throw TeamFailure("thread_unsupported", 400, "Send the complete conversation; provider-managed message threads are not supported by this pool.")
         val targets = ResolveRouteUseCase().resolve(routes?.list(actor.teamId).orEmpty(), model, request.protocol)
-        val attemptedAccounts = mutableSetOf<String>()
+        val attemptedTargets = mutableMapOf<Pair<String, String>, MutableSet<String>>()
+        var attempts = 0
+        val reauthenticatedAccounts = mutableSetOf<String>()
         // Exhaust eligible accounts for each preferred target before trying the next configured provider/model.
         for (target in targets) {
             val resolved = target.model ?: model
+            val attemptedAccounts = attemptedTargets.getOrPut(target.provider to resolved) { mutableSetOf() }
             CheckModelPolicyUseCase().check(policy, model, resolved, effort, thinkingBudget)
             val transport = transports.singleOrNull { it.provider == target.provider }
                 ?: throw TeamFailure("unsupported_provider", 400, "The configured route provider is unavailable.")
             val translated = transport.protocol != request.protocol
-            val outgoing = if (translated) ConversationCodec().encode(ConversationCodec().decode(body, request.protocol), transport.protocol, resolved)
+            val outgoing = if (translated) codecs.encode(codecs.decode(body, request.protocol), transport.protocol, resolved)
                 else JsonObject(body + ("model" to JsonPrimitive(resolved)))
             if (transport.provider == "codex" && outgoing["store"] != null && outgoing["store"] != JsonPrimitive(false)) {
                 throw TeamFailure("unsupported_storage", 400, "The Codex subscription endpoint requires store=false.")
@@ -65,12 +68,13 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             // Credits are team policy, not an asserted exchange rate for subscription percentages.
             val estimate = maxOf(request.body.size, outgoing.toString().toByteArray().size).toLong() + 16_384 + maximumOutput * 5
             while (true) {
-                if (attemptedAccounts.size >= 64) throw TeamFailure("routing_attempt_limit", 503, "The request reached its bounded routing limit. Retry shortly; available capacity has not been ruled out.")
+                if (attempts >= 64) throw TeamFailure("routing_attempt_limit", 503, "The request reached its bounded routing limit. Retry shortly; available capacity has not been ruled out.")
                 val reservation = try { admission.reserve(actor, estimate, resolved, transport.provider, attemptedAccounts) }
                 catch (error: TeamFailure) { if (error.code != "pool_unavailable") throw error; break }
                 attemptedAccounts += reservation.account.id
+                attempts++
                 try {
-                    attempt(request, receive, transport, outgoing, resolved, model, reservation, translated)
+                    attempt(request, receive, transport, outgoing, resolved, model, reservation, translated, reauthenticatedAccounts)
                     return
                 } catch (_: SafeRetry) { /* This definite rejection settled with zero charge; select another account. */ }
             }
@@ -80,62 +84,81 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
 
     private class SafeRetry(val failure: TeamFailure) : RuntimeException()
     private suspend fun attempt(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit,
-        transport: ProviderTransport, body: JsonObject, model: String, requestedModel: String, reservation: Reservation, translated: Boolean) {
+        transport: ProviderTransport, body: JsonObject, model: String, requestedModel: String, reservation: Reservation, translated: Boolean, reauthenticatedAccounts: MutableSet<String>) {
         val meter = SseUsageMeter()
         var knownCharge: Long? = null
         var dispatched = false
         var committed = false
         var completed = false
         try {
-            val token = try { credentials.fresh(reservation.account) } catch (error: TeamFailure) {
+            suspend fun credential(rejected: String? = null): ProviderCredentials = try {
+                credentials.fresh(reservation.account, rejected)
+            } catch (error: TeamFailure) {
                 if (error.code !in setOf("provider_reconnect", "access_token_expired", "account_unavailable", "refresh_in_progress")) throw error
                 admission.coolDown(reservation.account.id, System.currentTimeMillis() + 60_000)
                 throw SafeRetry(error)
             }
+            var token = credential()
             System.out.println("TeamCode inference dispatch request=${reservation.id} account=${reservation.account.id} provider=${transport.provider} model=$model")
             dispatched = true
             withTimeout(10 * 60_000L) {
-                transport.send(reservation.account, token, body, request.headers) { response ->
-                    val now = System.currentTimeMillis()
-                    admission.observe(reservation.account.id, transport.quotas(reservation.account.id, response.headers, now))
-                    val status = response.status.value
-                    val encoding = response.headers["content-encoding"]?.takeIf { it in setOf("gzip", "br", "deflate", "zstd", "identity") } ?: "none"
-                    System.out.println("TeamCode inference upstream request=${reservation.id} status=$status encoding=$encoding")
-                    if (status !in 200..299) {
-                        if (status in 400..499) knownCharge = 0
-                        val retry = response.headers["retry-after"]?.toLongOrNull()?.coerceIn(1, 3600) ?: 60
-                        if (status == 429 || status >= 500 || status == 401 || status == 403) admission.coolDown(reservation.account.id, now + retry * 1000, reconnect = status in setOf(401, 403))
-                        if (status in setOf(401, 403, 429)) throw SafeRetry(TeamFailure("pool_unavailable", 429, "Configured subscriptions are unavailable or rate-limited. Retry shortly."))
-                        val publicStatus = if (status in setOf(400, 413, 429)) status else 502
-                        val publicError = if (status == 429) "The selected subscription is rate-limited. Retry after the indicated delay." else "The provider rejected this request. Check the model and account status."
-                        val error = buildJsonObject { put("type", "error"); putJsonObject("error") { put("type", "upstream_error"); put("message", publicError) } }.toString().toByteArray()
-                        committed = true
-                        receive(GenerationHead(publicStatus, "application/json", mapOf("retry-after" to retry.toString(), "x-teamcode-request-id" to reservation.id)), flow { emit(error) })
-                        return@send
-                    }
-                    val reportedType = response.headers["content-type"].orEmpty()
-                    // The subscription Responses endpoint can omit Content-Type on a valid SSE stream.
-                    // Its destination and stream=true contract are fixed; an explicit incompatible type still fails.
-                    if (!reportedType.startsWith("text/event-stream") && !(reportedType.isEmpty() && transport.protocol == WireProtocol.RESPONSES)) throw TeamFailure("upstream_protocol", 502, "The provider did not return a stream.")
-                    committed = true
-                    val source = flow {
-                        val channel = response.bodyAsChannel()
-                        val buffer = ByteArray(8192)
-                        var bytes = 0L
-                        while (true) {
-                            val count = channel.readAvailable(buffer)
-                            if (count < 0) break
-                            if (count == 0) continue
-                            bytes += count
-                            if (bytes > 64 * 1024 * 1024) throw TeamFailure("stream_limit", 502, "The response exceeded the stream limit.")
-                            val chunk = buffer.copyOf(count)
-                            meter.accept(chunk)
-                            emit(chunk)
+                while (true) {
+                    var refreshRejected = false
+                    knownCharge = null
+                    transport.send(reservation.account, token, body, request.headers) { response ->
+                        val now = System.currentTimeMillis()
+                        val observations = transport.quotas(reservation.account.id, response.headers, now)
+                        admission.observe(reservation.account.id, observations)
+                        val status = response.status.value
+                        val encoding = response.headers["content-encoding"]?.takeIf { it in setOf("gzip", "br", "deflate", "zstd", "identity") } ?: "none"
+                        System.out.println("TeamCode inference upstream request=${reservation.id} status=$status encoding=$encoding")
+                        if (status !in 200..299) {
+                            if (status in 400..499) knownCharge = 0
+                            if (status == 401 && reauthenticatedAccounts.add(reservation.account.id)) {
+                                refreshRejected = true
+                                return@send
+                            }
+                            val retry = response.headers["retry-after"]?.toLongOrNull()?.coerceIn(1, 3600) ?: 60
+                            val spent = observations.filter { it.utilization >= 1.0 && it.appliesTo(model) }
+                            // A durable model limit is already enforced in SQL. Do not park the
+                            // entire subscription: another configured model may still be available.
+                            if ((status == 429 && spent.isEmpty()) || status >= 500 || status == 401 || status == 403) admission.coolDown(reservation.account.id, now + retry * 1000, reconnect = status == 401)
+                            if (status in setOf(401, 403, 429)) throw SafeRetry(TeamFailure("pool_unavailable", 429, "Configured subscriptions are unavailable or rate-limited. Retry shortly."))
+                            val publicStatus = if (status in setOf(400, 413, 429)) status else 502
+                            val publicError = if (status == 429) "The selected subscription is rate-limited. Retry after the indicated delay." else "The provider rejected this request. Check the model and account status."
+                            val error = buildJsonObject { put("type", "error"); putJsonObject("error") { put("type", "upstream_error"); put("message", publicError) } }.toString().toByteArray()
+                            committed = true
+                            receive(GenerationHead(publicStatus, "application/json", mapOf("retry-after" to retry.toString(), "x-teamcode-request-id" to reservation.id)), flow { emit(error) })
+                            return@send
                         }
+                        val reportedType = response.headers["content-type"].orEmpty()
+                        // The subscription Responses endpoint can omit Content-Type on a valid SSE stream.
+                        // Its destination and stream=true contract are fixed; an explicit incompatible type still fails.
+                        if (!reportedType.startsWith("text/event-stream") && !(reportedType.isEmpty() && transport.protocol == WireProtocol.RESPONSES)) throw TeamFailure("upstream_protocol", 502, "The provider did not return a stream.")
+                        committed = true
+                        val source = flow {
+                            val channel = response.bodyAsChannel()
+                            val buffer = ByteArray(8192)
+                            var bytes = 0L
+                            while (true) {
+                                val count = channel.readAvailable(buffer)
+                                if (count < 0) break
+                                if (count == 0) continue
+                                bytes += count
+                                if (bytes > 64 * 1024 * 1024) throw TeamFailure("stream_limit", 502, "The response exceeded the stream limit.")
+                                val chunk = buffer.copyOf(count)
+                                meter.accept(chunk)
+                                emit(chunk)
+                            }
+                        }
+                        val chunks = if (translated) StreamTranslation(codecs).translate(source, transport.protocol, request.protocol, requestedModel) else source
+                        receive(GenerationHead(status, "text/event-stream", mapOf("x-teamcode-request-id" to reservation.id, "x-teamcode-model" to model, "x-teamcode-provider" to transport.provider)), chunks)
+                        completed = meter.settledUnits != null
                     }
-                    val chunks = if (translated) StreamTranslation().translate(source, transport.protocol, request.protocol, requestedModel) else source
-                    receive(GenerationHead(status, "text/event-stream", mapOf("x-teamcode-request-id" to reservation.id, "x-teamcode-model" to model, "x-teamcode-provider" to transport.provider)), chunks)
-                    completed = meter.settledUnits != null
+                    if (!refreshRejected) break
+                    // execute has closed the rejected response before renewing or retrying.
+                    // The shared credential source fences concurrent replicas and rotating tokens.
+                    token = credential(token.accessToken)
                 }
             }
         } catch (error: CancellationException) { throw error }

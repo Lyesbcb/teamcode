@@ -95,6 +95,31 @@ class ReplicaPersistenceTest {
                 }
                 assertEquals(1, renewals.get())
                 account = store.find(verified.identity)!!
+                // A 401 can reject an unexpired token. Two replicas must rotate it only once;
+                // a late 401 from the old token must reuse the already committed replacement.
+                val forcedCount = AtomicInteger()
+                val replacement = ProviderCredentials("new-access", "new-refresh", System.currentTimeMillis() + 3_600_000)
+                val forced: suspend (AccountRecord, ProviderCredentials) -> ProviderCredentials = { _, old ->
+                    assertEquals(valid.accessToken, old.accessToken)
+                    forcedCount.incrementAndGet(); delay(100); replacement
+                }
+                val forcedA = SqlCredentialSource(a, cipher, forced)
+                val forcedB = SqlCredentialSource(b, cipher, forced)
+                val refreshed = coroutineScope {
+                    listOf(forcedA, forcedB).map { source -> async { source.fresh(account, valid.accessToken) } }.awaitAll()
+                }
+                assertTrue(refreshed.all { it.accessToken == replacement.accessToken })
+                assertEquals(replacement.accessToken, forcedA.fresh(account, valid.accessToken).accessToken)
+                assertEquals(1, forcedCount.get())
+                account = store.find(verified.identity)!!
+
+                // Model exhaustion is visible on every replica without parking other models.
+                val now = a.transaction { it.nowMillis() }
+                admissionA.observe(account.id, listOf(AccountQuota(account.id, "model:opus", 1.0, now, now + 3_600_000)))
+                assertEquals("pool_unavailable", assertFailsWith<TeamFailure> {
+                    admissionB.reserve(admin.principal, 100, "claude-opus-test")
+                }.code)
+                admissionA.settle(admissionB.reserve(admin.principal, 100, "claude-sonnet-test"), 0, false)
                 account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0002") as EnrollmentResult.Updated).account
                 // Simulate a process killed after committing refresh intent, before persisting the rotated token.
                 a.transaction { it.execute("UPDATE accounts SET refresh_pending = TRUE, refresh_started_at = 0 WHERE id = ?", account.id) }

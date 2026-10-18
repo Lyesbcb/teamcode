@@ -35,7 +35,7 @@ class PoolGatewayTest {
             respond(events, headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
         }) { install(HttpTimeout) }
         http.use {
-            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
+            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
             val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             val output = StringBuilder()
             gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect { output.append(it.decodeToString()) } }
@@ -50,7 +50,7 @@ class PoolGatewayTest {
         var calls = 0
         val http = HttpClient(MockEngine { calls++; respond(FixtureGatewayService.EVENTS.first(), headers = headersOf(HttpHeaders.ContentType, "text/event-stream")) }) { install(HttpTimeout) }
         http.use {
-            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
+            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
             val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             val cancelled = assertFailsWith<CancellationException> { gateway.forward(request()) { _, chunks -> chunks.collect { throw CancellationException("downstream disconnected") } } }
             assertEquals("downstream disconnected", cancelled.message)
@@ -64,7 +64,7 @@ class PoolGatewayTest {
         val store = FakeAdmission(account)
         val http = HttpClient(MockEngine { respond("provider-secret", HttpStatusCode.TooManyRequests, headersOf("retry-after", "10")) }) { install(HttpTimeout) }
         http.use {
-            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
+            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
             val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             val error = assertFailsWith<TeamFailure> { gateway.forward(request()) { _, _ -> fail("Rejected attempts must not commit output") } }
             assertEquals(429, error.status)
@@ -81,7 +81,7 @@ class PoolGatewayTest {
         val events = """data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":2}}}""" + "\n\n"
         val http = HttpClient(MockEngine { respond(events, headers = Headers.Empty) }) { install(HttpTimeout) }
         http.use {
-            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
+            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
             val gateway = PoolGateway(store, source, listOf(CodexTransport(it)), FakeModelPolicies())
             val request = GenerationRequest("""{"model":"gpt-6-luna","stream":true,"instructions":"brief","input":[]}""".toByteArray(), emptyMap(), actor, WireProtocol.RESPONSES)
             val output = StringBuilder()
@@ -100,7 +100,7 @@ class PoolGatewayTest {
         override suspend fun delete(actor: Principal, id: String, version: Long) = error("unused")
     }
     private val credentials = object : CredentialSource {
-        override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE)
+        override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE)
     }
     @Test fun definiteRejectionFallsBackAndTranslatesWithoutLosingToolConversation() = runBlocking {
         val store = FakeAdmission(account)
@@ -154,6 +154,77 @@ class PoolGatewayTest {
             assertEquals(7, calls)
             assertEquals(List(6) { 0L }, store.charges.take(6))
             assertEquals(6L, store.charges.last())
+        }
+    }
+
+    @Test fun modelScopedRejectionAllowsAnotherModelOnTheSameAccount() = runBlocking {
+        val store = FakeAdmission(account)
+        val seen = mutableListOf<String>()
+        HttpClient(MockEngine { req ->
+            val model = Json.parseToJsonElement((req.body as TextContent).text).jsonObject["model"]!!.jsonPrimitive.content
+            seen += model
+            if (model == "gpt-6-astra") respond("limited", HttpStatusCode.TooManyRequests, headersOf(
+                "x-codex-gpt-6-astra-limit-name" to listOf("gpt-6-astra"),
+                "x-codex-gpt-6-astra-secondary-used-percent" to listOf("100"),
+                "x-codex-gpt-6-astra-secondary-window-minutes" to listOf("10080"),
+                "x-codex-gpt-6-astra-secondary-reset-at" to listOf((System.currentTimeMillis() / 1000 + 86400).toString()),
+            )) else respond("data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("codex", "gpt-6-astra"), RouteTarget("codex", "gpt-6-sol")))
+            gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect {} }
+            assertEquals(listOf("gpt-6-astra", "gpt-6-sol"), seen)
+            assertFalse(store.cooled, "A model-scoped rejection must not cool the entire account")
+            assertEquals<List<Long?>>(listOf(0L, 6L), store.charges)
+        }
+    }
+    @Test fun forbiddenResponseUsesTemporaryCooldownWithoutRevokingCredentials() = runBlocking {
+        val store = FakeAdmission(account)
+        HttpClient(MockEngine { respond("forbidden", HttpStatusCode.Forbidden) }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), FakeModelPolicies())
+            assertFailsWith<TeamFailure> { gateway.forward(request()) { _, _ -> fail() } }
+            assertTrue(store.cooled)
+            assertFalse(store.reconnect)
+        }
+    }
+    @Test fun rejectedUnexpiredTokenRefreshesOnceBeforeReplayingTheRejectedRequest() = runBlocking {
+        val store = FakeAdmission(account)
+        val tokens = mutableListOf<String>()
+        val rejectedTokens = mutableListOf<String?>()
+        val source = object : CredentialSource {
+            override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?): ProviderCredentials {
+                rejectedTokens += rejectedAccessToken
+                return ProviderCredentials(if (rejectedAccessToken == null) "old-token" else "new-token", "refresh", Long.MAX_VALUE)
+            }
+        }
+        HttpClient(MockEngine { req ->
+            tokens += req.headers[HttpHeaders.Authorization]!!
+            if (tokens.size == 1) respond("revoked", HttpStatusCode.Unauthorized)
+            else respond(FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, source, listOf(ClaudeTransport(http)), FakeModelPolicies())
+            gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect {} }
+            assertEquals(listOf(null, "old-token"), rejectedTokens)
+            assertEquals(listOf("Bearer old-token", "Bearer new-token"), tokens)
+            assertFalse(store.cooled)
+            assertEquals<List<Long?>>(listOf(6L), store.charges)
+        }
+    }
+    @Test fun repeatedUnauthorizedIsBoundedAndAmbiguousRetryKeepsItsReservation() = runBlocking {
+        for (second in listOf(HttpStatusCode.Unauthorized, HttpStatusCode.InternalServerError)) {
+            val store = FakeAdmission(account)
+            var calls = 0
+            HttpClient(MockEngine { calls++; respond("rejected", if (calls == 1) HttpStatusCode.Unauthorized else second) }) { install(HttpTimeout) }.use { http ->
+                val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), FakeModelPolicies())
+                if (second == HttpStatusCode.Unauthorized) {
+                    assertFailsWith<TeamFailure> { gateway.forward(request()) { _, _ -> fail() } }
+                    assertEquals(0L, store.settled)
+                    assertTrue(store.reconnect)
+                } else {
+                    gateway.forward(request()) { head, chunks -> assertEquals(502, head.status); chunks.collect {} }
+                    assertNull(store.settled, "A rejected first attempt must not refund a later ambiguous attempt")
+                }
+                assertEquals(2, calls)
+            }
         }
     }
     @Test fun boundedSearchIsNotMisreportedAsExhaustedCapacity() = runBlocking {
@@ -212,6 +283,7 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     var settled: Long? = null
     var didSettle = false
     var cooled = false
+    var reconnect = false
     var selectedProvider: String? = null
     override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>): Reservation {
         val id = (0 until accountsPerProvider).map { "$provider-$it" }.firstOrNull { it !in excludedAccountIds }
@@ -226,7 +298,7 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     override suspend fun configurePool(actor: Principal, budget: PoolBudget) = budget
     override suspend fun quotas(actor: Principal) = emptyList<AccountQuota>()
     override suspend fun observe(accountId: String, observations: List<AccountQuota>) = Unit
-    override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) { cooled = true }
+    override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) { cooled = true; this.reconnect = reconnect }
 }
 
 private class FakeModelPolicies : ModelPolicyStore {

@@ -34,11 +34,11 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.resets_at > ?", actor.teamId, now, map = ::quota)
         val active = c.rows("SELECT account_id, COUNT(*) AS n FROM reservations WHERE team_id = ? AND state = 'ACTIVE' AND expires_at > ? GROUP BY account_id", actor.teamId, now) { it.getString(1) to it.getInt(2) }.toMap()
         val eligible = candidates.filter { account ->
-            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && relevant(it.window, model) && it.utilization >= .95 }
+            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model) && it.utilization >= .95 }
         }
         val chosen = eligible.minWithOrNull(compareBy<me.nathanfallet.teamcode.domain.accounts.AccountRecord>(
             { active[it.id] ?: 0 }, { -it.priority },
-            { a -> usage.filter { it.accountId == a.id && relevant(it.window, model) }.maxOfOrNull { it.utilization } ?: 0.0 },
+            { a -> usage.filter { it.accountId == a.id && it.appliesTo(model) }.maxOfOrNull { it.utilization } ?: 0.0 },
             { it.id },
         )) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
         val id = UUID.randomUUID().toString()
@@ -123,6 +123,5 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         if (row == null || row != actor.member.role.name) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
     }
     private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.getLong("resets_at"))
-    private fun relevant(window: String, model: String) = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
     companion object { private const val DAY = 86_400_000L }
 }
