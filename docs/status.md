@@ -143,3 +143,18 @@ The next Windows execution passed those checks, actual owner-only ACL inspection
 - Live Codex browser consent/enrollment has not been performed; it remains an acceptance step requiring the account owner's interactive login. Existing real Codex import/inference evidence is separate from this new login path.
 
 - Windows CI `39177857445` reached and passed actual Task Scheduler installation, authenticated health, idempotent install and service status. It then failed because the test still decoded the new UTF-16 registration as UTF-8; the fixture now reads the declared encoding. Native macOS/Linux, JVM/MySQL and Helm jobs passed in that run. Remaining Windows drain/reuse/restart checks require the next run.
+
+
+### Windows native lifecycle accepted
+
+CI run `39178163269`, commit `45b43fd`, passed all Windows native acceptance stages on the actual Windows runner:
+
+- Login, required password change, configuration persistence, private NTFS ACLs, Unicode paths and HTTPS trust/rejection.
+- Progressive authenticated SSE, Claude/Codex npm launchers, literal arguments/stdin, inherited stdout/stderr, exit codes, normal descendant cleanup and abrupt launcher termination.
+- Task Scheduler installation/idempotence, authenticated service discovery and reuse, graceful drain during a live stream, start/restart, uninstall and logout.
+
+The tested `teamcode-windows-x64` development artifact was uploaded after acceptance. This is runtime evidence, not just a successful cross-compilation. Actual workstation reboot/logon, system services before login and versioned distribution remain open V1 acceptance work.
+
+The entire run completed successfully: JVM/MySQL, Helm, macOS native, Linux native, Windows native and Docker publication. Docker Hub inspection confirmed that `latest` and `sha-45b43fd59eea4451dee5fea6e95a3f8b3e8f0c30` resolve to the same OCI index, `sha256:818221e05ebcdb04f9df00bf98ebe6b551ac84966bd5d87bb82308a5e5205cb6`, with `linux/amd64` and `linux/arm64` images. The Helm default remains `nathanfallet/teamcode:latest`.
+
+See [V1 review](v1-review.md) for the product walkthrough and the remaining release gates; this successful build does not close the full V1 roadmap.

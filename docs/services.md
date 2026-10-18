@@ -1,6 +1,6 @@
 # Native local proxy services
 
-The native CLI can register a per-user local proxy. macOS and Linux runtime acceptance has passed; Windows Task Scheduler acceptance is in progress as part of V1. Install the binary at a stable absolute path, sign in, and run:
+The native CLI can register a per-user local proxy. Native runtime acceptance has passed on macOS, Linux and Windows, including Task Scheduler installation, reuse, draining, restart and uninstall. Install the binary at a stable absolute path, sign in, and run:
 
 ```sh
 teamcode login --server https://teamcode.example.org

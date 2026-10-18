@@ -46,7 +46,7 @@ Administrators can configure ordered model replacements and fallbacks in **Dashb
 
 ## Local service
 
-After login, `teamcode service install` starts a local proxy automatically at user login on macOS/Linux. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Windows runtime acceptance is in progress; startup before login remains planned. See the [Windows workstation guide](docs/windows.md).
+After login, `teamcode service install` starts a local proxy automatically at user login on macOS, Linux and Windows. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Native Windows Task Scheduler acceptance has passed; actual workstation reboot/logon checks and startup before login remain planned. See the [Windows workstation guide](docs/windows.md).
 
 ## Try the transport fixture
 
@@ -84,7 +84,7 @@ python3 scripts/smoke-native.py \
   --jar app/build/libs/app-all.jar
 ```
 
-The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows. macOS and Linux native runtime checks pass; Windows has native configuration, process and service adapters under runtime acceptance. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. CI verifies the JVM and runs native transport and service checks on macOS/Linux/Windows; it does not use provider credentials. Each platform uploads its development binary only after its acceptance tests pass.
+The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows. Native runtime checks pass on macOS, Linux and Windows, including configuration, TLS, streaming, agent launchers and user services. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. CI verifies the JVM and runs native transport and service checks on macOS/Linux/Windows; it does not use provider credentials. Each platform uploads its development binary only after its acceptance tests pass.
 
 ## Architecture
 
