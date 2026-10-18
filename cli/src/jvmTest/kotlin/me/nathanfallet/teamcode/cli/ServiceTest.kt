@@ -56,7 +56,7 @@ class ServiceTest {
     @Test fun windowsTaskUsesTheCurrentUserWithoutEmbeddingCredentialsOrRequiringElevation() {
         val windows = ServiceSettings("a".repeat(32), 8789, token, "C:\\Program Files\\TeamCode\\teamcode.exe",
             "C:\\Users\\équipe\\.config\\teamcode\\config.json", "C:\\Users\\équipe\\.config\\teamcode\\service-task.xml", "windows", "S-1-5-21-123-456-789-1001")
-        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(ByteArrayInputStream(serviceDefinition(windows).toByteArray()))
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(ByteArrayInputStream(registrationBytes(windows)))
         assertEquals(windows.executable, document.getElementsByTagName("Command").item(0).textContent)
         assertEquals("\"service\" \"serve\" \"--config\" \"${windows.config}\"", document.getElementsByTagName("Arguments").item(0).textContent)
         assertEquals("InteractiveToken", document.getElementsByTagName("LogonType").item(0).textContent)

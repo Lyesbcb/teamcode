@@ -3,6 +3,7 @@ package me.nathanfallet.teamcode.cli.service
 import kotlinx.serialization.Serializable
 import me.nathanfallet.teamcode.api.Serialization
 import me.nathanfallet.teamcode.cli.platform.*
+import okio.Buffer
 import okio.FileSystem
 import okio.Path.Companion.toPath
 
@@ -49,7 +50,7 @@ internal fun serviceDefinition(settings: ServiceSettings): String {
     fun unit(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%").replace("$", "$$") + "\""
     val arguments = listOf(settings.executable, "service", "serve", "--config", settings.config)
     return if (settings.os == "windows") """
-        <?xml version="1.0" encoding="UTF-8"?>
+        <?xml version="1.0" encoding="UTF-16"?>
         <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
         <RegistrationInfo><Description>TeamCode local authenticated proxy</Description></RegistrationInfo>
         <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(settings.userId)}</UserId></LogonTrigger></Triggers>
@@ -108,7 +109,7 @@ internal fun ownsRegistration(settings: ServiceSettings): Boolean {
     val path = settings.registration.toPath()
     val meta = FileSystem.SYSTEM.metadataOrNull(path) ?: return false
     require(meta.isRegularFile && meta.symlinkTarget == null && (meta.size ?: 0) <= 65_536)
-    require(FileSystem.SYSTEM.read(path) { readUtf8() } == serviceDefinition(settings)) {
+    require(FileSystem.SYSTEM.read(path) { readByteArray() }.contentEquals(registrationBytes(settings))) {
         "The service registration was modified externally; refusing to replace or remove it."
     }
     return true
@@ -121,5 +122,15 @@ internal fun writeRegistration(settings: ServiceSettings) {
     fs.createDirectories(path.parent!!)
     if (ownsRegistration(settings)) return
     // Do not chmod a shared LaunchAgents/systemd directory. The manifest contains no credentials.
-    fs.write(path, mustCreate = true) { writeUtf8(serviceDefinition(settings)) }
+    fs.write(path, mustCreate = true) { write(registrationBytes(settings)) }
+}
+
+/** Task Scheduler consumes a Unicode XML document; match its declaration and BOM. */
+internal fun registrationBytes(settings: ServiceSettings): ByteArray {
+    val xml = serviceDefinition(settings)
+    if (settings.os != "windows") return xml.encodeToByteArray()
+    return Buffer().apply {
+        writeShortLe(0xfeff)
+        xml.forEach { writeShortLe(it.code) }
+    }.readByteArray()
 }
