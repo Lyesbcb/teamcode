@@ -110,6 +110,8 @@ private suspend fun manager(settings: ServiceSettings, action: String, checkResu
     val result = withTimeout(if (action in setOf("stop", "restart")) 670_000L else 15_000L) {
         runInteractiveProcess(command, args, if (settings.os == "windows") mapOf(
             "TEAMCODE_SERVICE_TASK" to settings.label, "TEAMCODE_SERVICE_OPERATION" to action,
+            // A caller running PowerShell 7 may export modules incompatible with Windows PowerShell 5.1.
+            "PSModulePath" to "${requireNotNull(environment("SystemRoot"))}\\System32\\WindowsPowerShell\\v1.0\\Modules",
         ) else emptyMap(), quiet = action in setOf("status", "active"))
     }
     if (checkResult) check(result == 0) { "The OS service manager rejected the operation." }

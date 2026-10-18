@@ -117,6 +117,7 @@ try:
     with contextlib.nullcontext(directory):
         root = Path(directory) / 'Unicode équipe with spaces'
         root.mkdir()
+        binary = str(shutil.copy2(binary, root / 'teamcode.exe'))
         env = dict(os.environ, XDG_CONFIG_HOME=str(root / 'configuration'), TEAMCODE_LOCAL_TOKEN=local_token)
         config = Path(env['XDG_CONFIG_HOME']) / 'teamcode/config.json'
 
@@ -127,6 +128,16 @@ try:
                        (team_token, local_token, initial_team_token, initial_password, replacement_password))
             if check:
                 assert result.returncode == 0, f'{arguments} (upstream checks: {len(checks)}): {result.stdout}\n{result.stderr}'
+            return result
+
+        def powershell_command(script, variables, executable=powershell):
+            if executable == 'powershell.exe':
+                variables = dict(variables, PSModulePath=str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/Modules'))
+            result = subprocess.run([executable, '-NoProfile', '-NonInteractive', '-Command', script],
+                                    env=variables, capture_output=True, encoding='utf-8', errors='replace', timeout=30)
+            assert all(secret not in result.stdout + result.stderr for secret in
+                       (team_token, local_token, initial_team_token, initial_password, replacement_password))
+            assert result.returncode == 0, 'Synthetic PowerShell fixture failed: ' + result.stderr
             return result
 
         command('configure', '--server', origin, stdin=team_token + '\n')
@@ -156,9 +167,7 @@ try:
         } | ConvertTo-Json -Depth 4 -Compress
         '''
         for path in (config, config.parent):
-            result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', acl_script],
-                                    env=dict(env, TEAMCODE_ACL_PATH=str(path)), capture_output=True, text=True, timeout=30)
-            assert result.returncode == 0, 'Synthetic ACL inspection failed: ' + result.stderr
+            result = powershell_command(acl_script, dict(env, TEAMCODE_ACL_PATH=str(path)), 'powershell.exe')
             acl = json.loads(result.stdout)
             assert acl['owner'] == acl['user'] and acl['protected'], 'Ownership or protected DACL is incorrect'
             assert len(acl['rules']) == 1, 'Unexpected users/groups can access the private configuration'
@@ -183,8 +192,7 @@ try:
         [IO.File]::WriteAllBytes((Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'cert.cer'), $certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
         [IO.File]::WriteAllText((Join-Path $env:TEAMCODE_TEST_CERT_DIRECTORY 'key.pem'), $rsa.ExportPkcs8PrivateKeyPem())
         '''
-        subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', generate_certificate],
-                       env=cert_env, capture_output=True, check=True, timeout=30)
+        powershell_command(generate_certificate, cert_env)
         trust_certificate = r'''
         $ErrorActionPreference = 'Stop'
         $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
@@ -209,16 +217,14 @@ try:
             rejected = command('configure', '--server', tls_origin, stdin=team_token + '\n', check=False)
             assert rejected.returncode != 0 and len(checks) == checks_before, 'Untrusted HTTPS peer received a request'
             assert not (Path(env['XDG_CONFIG_HOME']) / 'teamcode/config.json').exists()
-            subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', trust_certificate],
-                           env=dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='add'), capture_output=True, check=True, timeout=30)
+            powershell_command(trust_certificate, dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='add'))
             command('configure', '--server', tls_origin, stdin=team_token + '\n')
             assert 'Mode: fixture' in command('status').stdout
         finally:
             env['XDG_CONFIG_HOME'] = previous_config_home
             tls.shutdown()
             tls.server_close()
-            subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', trust_certificate],
-                           env=dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='remove'), capture_output=True, check=True, timeout=30)
+            powershell_command(trust_certificate, dict(cert_env, TEAMCODE_TEST_CERT_OPERATION='remove'))
         print('PASS: native Windows login/password change and HTTPS trust/rejection', flush=True)
 
         with socket.socket() as listener:

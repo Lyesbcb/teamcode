@@ -1,6 +1,6 @@
 # Implementation roadmap
 
-This is the target sequence; see [status](status.md) for actual evidence. Estimates are planning ranges for a developer familiar with Kotlin/KMP, not a deadline or a claim about agent throughput.
+This is the target sequence; see [V1 progress](progress.md) for the current overview and [status](status.md) for actual evidence. Estimates are planning ranges for a developer familiar with Kotlin/KMP, not a deadline or a claim about agent throughput.
 
 | Milestone | Deliverable | Exit evidence | Rough effort |
 | --- | --- | --- | --- |
