@@ -5,7 +5,7 @@ import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.cli.interop.process.*
 
-actual suspend fun runInteractiveProcess(command: String, arguments: List<String>, overrides: Map<String, String?>): Int {
+actual suspend fun runInteractiveProcess(command: String, arguments: List<String>, overrides: Map<String, String?>, quiet: Boolean): Int {
     val child = memScoped {
         val values = mutableMapOf<String, String>()
         val inherited = teamcode_environment()!!
@@ -24,7 +24,7 @@ actual suspend fun runInteractiveProcess(command: String, arguments: List<String
             }
         }
         val pid = alloc<IntVar>()
-        val result = teamcode_spawn(command, vector(listOf(command) + arguments), vector(values.map { "${it.key}=${it.value}" }), pid.ptr)
+        val result = teamcode_spawn(command, vector(listOf(command) + arguments), vector(values.map { "${it.key}=${it.value}" }), pid.ptr, if (quiet) 1 else 0)
         check(result == 0) { "Cannot start the requested agent. Install it and make it available on PATH." }
         pid.value
     }

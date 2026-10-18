@@ -2,8 +2,9 @@ package me.nathanfallet.teamcode.cli.platform
 
 import kotlinx.coroutines.*
 
-actual suspend fun runInteractiveProcess(command: String, arguments: List<String>, overrides: Map<String, String?>): Int {
+actual suspend fun runInteractiveProcess(command: String, arguments: List<String>, overrides: Map<String, String?>, quiet: Boolean): Int {
     val builder = ProcessBuilder(listOf(command) + arguments).inheritIO()
+    if (quiet) { builder.redirectOutput(ProcessBuilder.Redirect.DISCARD); builder.redirectError(ProcessBuilder.Redirect.DISCARD) }
     overrides.forEach { (name, value) -> if (value == null) builder.environment().remove(name) else builder.environment()[name] = value }
     val child = builder.start()
     try {

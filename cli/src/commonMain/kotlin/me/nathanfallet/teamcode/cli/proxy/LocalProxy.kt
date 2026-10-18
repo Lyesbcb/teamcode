@@ -8,12 +8,23 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.client.TeamCodeClient
 
 /** Fixed Messages/Responses routes only. No CONNECT or arbitrary destination. */
-fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBodyBytes: Int = 2 * 1024 * 1024) {
+fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBodyBytes: Int = 2 * 1024 * 1024, serviceId: String? = null, serverUrl: String? = null) {
     require(localToken.length >= 32) { "A local proxy token of at least 32 characters is required." }
     routing {
+        if (serviceId != null) get("/_teamcode/service") {
+            if (!equalToken(call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer "), localToken)) {
+                call.respond(HttpStatusCode.Unauthorized)
+            } else if (call.request.local.serverHost !in setOf("localhost", "127.0.0.1", "::1") || call.request.header(HttpHeaders.Origin) != null) {
+                call.respond(HttpStatusCode.Forbidden)
+            } else {
+                call.response.header(HttpHeaders.CacheControl, "no-store")
+                call.respondText(buildJsonObject { put("id", serviceId); put("serverUrl", serverUrl) }.toString(), ContentType.Application.Json)
+            }
+        }
         for (path in listOf("/v1/messages", "/v1/responses")) {
         post(path) {
             val auth = call.request.header(HttpHeaders.Authorization)

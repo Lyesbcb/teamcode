@@ -2,7 +2,7 @@
 
 An open-source, self-hosted model gateway for teams: pooled provider accounts, fair access, predictive capacity management, a web dashboard, and a native Kotlin Multiplatform CLI.
 
-**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit model routes and a limited cross-provider function-tool profile are implemented; opaque reasoning compatibility and OS service installation remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
+**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit model routes, a limited cross-provider function-tool profile and macOS/Linux user service installation are implemented; opaque reasoning compatibility, Windows and system services remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
 
 ## Run the team server
 
@@ -42,6 +42,10 @@ The [Helm chart](helm/teamcode/README.md) follows the `pkg` chart conventions, w
 ## Model routes
 
 Administrators can configure ordered model replacements and fallbacks in **Dashboard → Routes**, such as `claude-opus-*` to `anthropic` then `codex:gpt-6-astra`. Requests without a matching rule retain their native provider. Both requested and resolved models must pass the team's policy. See [routing and compatibility](docs/routing.md) for the supported translation profile, bounded retries and limitations; a cross-provider route does not imply every agent tool or reasoning format is portable.
+
+## Local service
+
+After login, `teamcode service install` starts a local proxy automatically at user login on macOS/Linux. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Windows and startup before login remain planned.
 
 ## Try the transport fixture
 

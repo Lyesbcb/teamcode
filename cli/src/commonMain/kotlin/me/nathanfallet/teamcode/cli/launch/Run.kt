@@ -8,6 +8,9 @@ import me.nathanfallet.teamcode.cli.loadConfig
 import me.nathanfallet.teamcode.cli.sdk
 import me.nathanfallet.teamcode.cli.platform.*
 import me.nathanfallet.teamcode.cli.proxy.proxyServer
+import me.nathanfallet.teamcode.cli.config.configPath
+import me.nathanfallet.teamcode.cli.service.loadService
+import me.nathanfallet.teamcode.cli.service.serviceResponds
 
 class Run : SuspendingNoOpCliktCommand(name = "run") {
     override fun help(context: Context) = "Run Claude Code or Codex through an automatically managed local proxy. Pass agent arguments after --."
@@ -17,7 +20,17 @@ class Run : SuspendingNoOpCliktCommand(name = "run") {
 private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(name = agent) {
     private val arguments by argument("AGENT_ARGS").multiple()
     override suspend fun run() {
-        val client = sdk(loadConfig())
+        val config = loadConfig()
+        val service = loadService(configPath())
+        if (service != null && serviceResponds(service, config.serverUrl)) {
+            sdk(config).use { it.capabilities() }
+            val plan = agentLaunch(agent, arguments, service.port, service.localToken)
+            echo("Running $agent through the TeamCode user service.", err = true)
+            val code = runInteractiveProcess(agent, plan.arguments, plan.environment)
+            if (code != 0) SystemExit.exit(code)
+            return
+        }
+        val client = sdk(config)
         val token = secureRandomBytes(32).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
         // A dedicated ephemeral listener avoids collisions between concurrent launches or a user service.
         val server = proxyServer(client, token, 0) { echo(it, err = true) }

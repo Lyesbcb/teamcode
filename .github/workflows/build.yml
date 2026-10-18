@@ -99,6 +99,15 @@ jobs:
       - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
       - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
       - run: python3 scripts/smoke-run.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - name: Start Linux user service manager
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - run: python3 scripts/smoke-service.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
       - name: Verify persistent team setup with the native CLI
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-team.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
