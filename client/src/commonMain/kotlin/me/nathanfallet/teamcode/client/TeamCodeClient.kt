@@ -2,6 +2,9 @@ package me.nathanfallet.teamcode.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.HttpTimeoutConfig
+import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.resources.Resources
 import io.ktor.client.plugins.resources.get
@@ -30,18 +33,23 @@ class TeamCodeClient(
     private val http = createHttpClient {
         expectSuccess = false
         followRedirects = false // A redirect must not carry a team credential to another origin.
+        install(HttpTimeout) {
+            connectTimeoutMillis = 10_000
+            socketTimeoutMillis = 300_000
+            requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+        }
         install(Resources)
         install(ContentNegotiation) { json(Serialization.json) }
     }
 
     suspend fun capabilities(): Capabilities {
-        val response = http.get(CapabilitiesResource()) { url.takeFrom("$origin/api/v1/capabilities"); authenticate() }
+        val response = http.get(CapabilitiesResource()) { url.takeFrom("$origin/api/v1/capabilities"); authenticate(); timeout { requestTimeoutMillis = 10_000 } }
         checkResponse(response)
         return response.body()
     }
 
     suspend fun status(): GatewayStatus {
-        val response = http.get(StatusResource()) { url.takeFrom("$origin/api/v1/status"); authenticate() }
+        val response = http.get(StatusResource()) { url.takeFrom("$origin/api/v1/status"); authenticate(); timeout { requestTimeoutMillis = 10_000 } }
         checkResponse(response)
         return response.body()
     }

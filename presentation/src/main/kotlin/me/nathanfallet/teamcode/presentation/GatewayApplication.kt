@@ -11,6 +11,7 @@ import io.ktor.server.routing.*
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.*
 import java.security.MessageDigest
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.Serialization
@@ -64,9 +65,17 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String) {
             gateway.forward(GenerationRequest(bytes, headers)) { head, chunks ->
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
+                val consumed = CompletableDeferred<Unit>()
                 call.respondBytesWriter(ContentType.parse(head.contentType), HttpStatusCode.fromValue(head.status)) {
-                    chunks.collect { chunk -> writeFully(chunk); flush() }
+                    try {
+                        chunks.collect { chunk -> writeFully(chunk); flush() }
+                        consumed.complete(Unit)
+                    } catch (error: Throwable) {
+                        consumed.completeExceptionally(error)
+                        throw error
+                    }
                 }
+                consumed.await()
             }
         }
     }

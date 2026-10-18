@@ -7,6 +7,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.CompletableDeferred
 import me.nathanfallet.teamcode.client.TeamCodeClient
 
 /** Only the Messages path is supported in the first transport slice. No CONNECT or arbitrary destination. */
@@ -51,9 +52,19 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             client.forwardMessages(body, headers) { upstream ->
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
+                // Ktor may schedule the writer after respond returns. Keep the SDK response
+                // scope open until the downstream has actually consumed/cancelled the body.
+                val consumed = CompletableDeferred<Unit>()
                 call.respondBytesWriter(upstream.contentType() ?: ContentType.Application.OctetStream, upstream.status) {
-                    upstream.bodyAsChannel().copyTo(this)
+                    try {
+                        upstream.bodyAsChannel().copyTo(this)
+                        consumed.complete(Unit)
+                    } catch (error: Throwable) {
+                        consumed.completeExceptionally(error)
+                        throw error
+                    }
                 }
+                consumed.await()
             }
         }
     }
