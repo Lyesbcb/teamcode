@@ -11,7 +11,7 @@ data class AccountQuota(val accountId: String, val window: String, val utilizati
 data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {
     suspend fun statistics(): AdmissionStatistics
-    suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic"): Reservation
+    suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic", excludedAccountIds: Set<String> = emptySet()): Reservation
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
     suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean = false)
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity

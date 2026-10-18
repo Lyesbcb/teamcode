@@ -69,6 +69,15 @@ class TeamCodeClient(
         require(Regex("[a-zA-Z0-9-]{1,36}").matches(id))
         return request("/api/v1/accounts/$id/${if (accessOnly) "access-only" else "handover"}", HttpMethod.Post)
     }
+    suspend fun routes(): List<RouteRuleView> = request("/api/v1/routes", HttpMethod.Get)
+    suspend fun saveRoute(rule: RouteRuleView): RouteRuleView {
+        require(Regex("[a-zA-Z0-9_-]{1,36}").matches(rule.id))
+        return request("/api/v1/routes/${rule.id}", HttpMethod.Put, rule)
+    }
+    suspend fun deleteRoute(id: String, version: Long): SuccessResponse {
+        require(Regex("[a-zA-Z0-9_-]{1,36}").matches(id) && version > 0)
+        return request("/api/v1/routes/$id", HttpMethod.Delete, RouteDeleteRequest(version))
+    }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
 
     private suspend inline fun <reified R> request(path: String, method: HttpMethod): R {

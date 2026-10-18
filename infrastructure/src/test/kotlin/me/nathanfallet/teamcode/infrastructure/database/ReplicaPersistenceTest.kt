@@ -3,6 +3,7 @@ package me.nathanfallet.teamcode.infrastructure.database
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.domain.accounts.*
+import me.nathanfallet.teamcode.domain.routing.*
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
@@ -25,6 +26,16 @@ class ReplicaPersistenceTest {
                 teamB.changePassword(initial.principal, password, "replica test replacement password")
                 assertNull(teamA.authenticate(initial.token))
                 val admin = teamA.login("admin", "replica test replacement password", "replica test")
+                val routingA = SqlRoutingStore(a)
+                val routingB = SqlRoutingStore(b)
+                val route = routingA.save(admin.principal, RouteRule("opus", "claude-opus-*", listOf(RouteTarget("anthropic"), RouteTarget("codex", "gpt-6-astra"))))
+                assertEquals(listOf(route), routingB.list("default"))
+                assertTrue(routingB.list("another-team").isEmpty())
+                val updated = routingB.save(admin.principal, route.copy(priority = 10))
+                assertEquals("route_conflict", assertFailsWith<TeamFailure> { routingA.save(admin.principal, route) }.code)
+                assertEquals("route_conflict", assertFailsWith<TeamFailure> { routingA.delete(admin.principal, route.id, route.version) }.code)
+                routingA.delete(admin.principal, updated.id, updated.version)
+                assertTrue(routingB.list("default").isEmpty())
                 val cipher = CredentialCipher(ByteArray(32) { 17 })
                 val store = SqlAccountStore(a, cipher)
                 val verified = VerifiedProviderAccount(AccountIdentity("default", "anthropic", "synthetic-user", "synthetic-org"), "Replica test")
@@ -34,6 +45,20 @@ class ReplicaPersistenceTest {
                 val admissionA = SqlAdmissionStore(a)
                 val admissionB = SqlAdmissionStore(b)
                 admissionA.configure(admin.principal, MemberPolicy(admin.principal.member.id, 1000, 1))
+                // Definite provider rejection releases admission without making an internal retry wait.
+                a.transaction { c ->
+                    val now = c.nowMillis()
+                    c.execute("INSERT INTO directives (member_id, id, pace, max_concurrent, min_interval, message, created_at, expires_at) VALUES (?, ?, 'SLOW_DOWN', 1, 60000, 'Synthetic pacing test', ?, ?)", admin.principal.member.id, "retry-pacing", now, now + 120_000)
+                }
+                val rejected = admissionA.reserve(admin.principal, 100, "claude-test")
+                admissionA.settle(rejected, 0, false)
+                val retried = admissionB.reserve(admin.principal, 100, "claude-test")
+                admissionB.settle(retried, 0, false)
+                assertEquals("pool_unavailable", assertFailsWith<TeamFailure> {
+                    admissionA.reserve(admin.principal, 100, "claude-test", excludedAccountIds = setOf(account.id))
+                }.code)
+                assertEquals(0, admissionB.capacity(admin.principal).chargedAndReservedUnits)
+                a.transaction { it.execute("DELETE FROM directives WHERE member_id = ?", admin.principal.member.id) }
                 val raced = coroutineScope { (0..7).map { n -> async {
                     runCatching { (if (n % 2 == 0) admissionA else admissionB).reserve(admin.principal, 100, "claude-test") }
                 } }.awaitAll() }

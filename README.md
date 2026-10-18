@@ -2,7 +2,7 @@
 
 An open-source, self-hosted model gateway for teams: pooled provider accounts, fair access, predictive capacity management, a web dashboard, and a native Kotlin Multiplatform CLI.
 
-**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Cross-provider translation and OS service installation remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
+**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit model routes and a limited cross-provider function-tool profile are implemented; opaque reasoning compatibility and OS service installation remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
 
 ## Run the team server
 
@@ -38,6 +38,10 @@ The CLI prompts for username/password, handles required password changes, and sa
 ## Kubernetes
 
 The [Helm chart](helm/teamcode/README.md) follows the `pkg` chart conventions, with two stateless server replicas, streaming ingress settings, a persistent optional MySQL 8.4 instance, external database support, HPA, probes and draining. All replicas share database-backed sessions, quotas, refresh ownership and worker leases; see [replica behavior](docs/replicas.md). Redis and sticky sessions are not required. The image workflow publishes `nathanfallet/teamcode:latest` and immutable commit tags after verification.
+
+## Model routes
+
+Administrators can configure ordered model replacements and fallbacks in **Dashboard → Routes**, such as `claude-opus-*` to `anthropic` then `codex:gpt-6-astra`. Requests without a matching rule retain their native provider. Both requested and resolved models must pass the team's policy. See [routing and compatibility](docs/routing.md) for the supported translation profile, bounded retries and limitations; a cross-provider route does not imply every agent tool or reasoning format is portable.
 
 ## Try the transport fixture
 

@@ -13,9 +13,9 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val completed = c.rows("SELECT completed FROM gateway_totals WHERE team_id = 'default'") { it.getLong(1) }.single()
         AdmissionStatistics(active, completed)
     }
-    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String): Reservation = database.transaction { c ->
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>): Reservation = database.transaction { c ->
         actor.requireReady()
-        require(units in 1..100_000_000)
+        require(units in 1..100_000_000 && excludedAccountIds.size <= 64)
         c.lockTeam(actor.teamId)
         val now = c.nowMillis()
         requireCurrent(c, actor)
@@ -23,7 +23,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val current = capacity(c, policy, now, actor.teamId)
         val directive = c.rows("SELECT max_concurrent, min_interval FROM directives WHERE member_id = ? AND expires_at > ? AND pace IN ('SLOW_DOWN', 'PAUSE')", actor.member.id, now) { it.getInt(1) to it.getLong(2) }.singleOrNull()
         if (directive != null) {
-            val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ?", actor.member.id, now / DAY) { it.getLong(1) }.single()
+            val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ? AND units > 0", actor.member.id, now / DAY) { it.getLong(1) }.single()
             if (now - last < directive.second) throw TeamFailure("pacing_delay", 429, "Quota burn is high. Wait briefly before the next request.")
         }
         if (current.activeRequests >= minOf(policy.maxConcurrent, directive?.first ?: policy.maxConcurrent)) throw TeamFailure("member_concurrency", 429, "Your concurrent request limit has been reached.")
@@ -34,7 +34,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.resets_at > ?", actor.teamId, now, map = ::quota)
         val active = c.rows("SELECT account_id, COUNT(*) AS n FROM reservations WHERE team_id = ? AND state = 'ACTIVE' AND expires_at > ? GROUP BY account_id", actor.teamId, now) { it.getString(1) to it.getInt(2) }.toMap()
         val eligible = candidates.filter { account ->
-            (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && relevant(it.window, model) && it.utilization >= .95 }
+            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && relevant(it.window, model) && it.utilization >= .95 }
         }
         val chosen = eligible.minWithOrNull(compareBy<me.nathanfallet.teamcode.domain.accounts.AccountRecord>(
             { active[it.id] ?: 0 }, { -it.priority },

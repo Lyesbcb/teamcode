@@ -50,10 +50,11 @@ fun main() {
     val accounts = accountStore?.let { AccountManagement(it, ClaudeAccountVerifier(providerHttp), mapOf("codex" to CodexAccountVerifier(providerHttp))) }
     val admission = database?.let { SqlAdmissionStore(it) }
     val modelPolicies = database?.let { SqlModelPolicyStore(it) }
+    val routes = database?.let { me.nathanfallet.teamcode.infrastructure.database.SqlRoutingStore(it) }
     val directives = database?.let { SqlDirectiveService(it) }
     val transports = listOf(ClaudeTransport(providerHttp), CodexTransport(providerHttp))
     val credentialSource = database?.let { SqlCredentialSource(it, cipher!!) { account, token -> transports.single { it.provider == account.identity.provider }.refresh(token) } }
-    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!) else FixtureGatewayService()
+    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!, routes) else FixtureGatewayService()
     val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     if (accountStore != null) {
         val work = SqlScheduledWork(database!!)
@@ -88,6 +89,6 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

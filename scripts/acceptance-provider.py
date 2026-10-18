@@ -27,6 +27,9 @@ parser.add_argument('--jar', required=True)
 parser.add_argument('--source', type=Path, required=True, help='Authorized TeamClaude configuration')
 parser.add_argument('--model', default='claude-haiku-4-5-20251001')
 parser.add_argument('--skip-claude', action='store_true')
+parser.add_argument('--skip-reimport', action='store_true', help='Skip the previously verified upsert check during routing diagnostics')
+parser.add_argument('--translation-smoke', action='store_true', help='Run two small translated function-tool turns in each direction')
+parser.add_argument('--translation-direction', choices=('both','messages','responses'), default='both')
 parser.add_argument('--launcher', action='store_true', help='Use teamcode run to manage the agent proxy')
 parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
 args = parser.parse_args()
@@ -99,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
                     time.sleep(.25)
             raise RuntimeError('TeamCode readiness timed out')
 
-        def request(path, data=None, token=None, opener=None, form=False, csrf_origin=None):
+        def request(path, data=None, token=None, opener=None, form=False, csrf_origin=None, method=None):
             headers = {}
             body = None
             if data is not None:
@@ -109,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
                 headers['Authorization'] = 'Bearer ' + token
             if csrf_origin:
                 headers['Origin'] = csrf_origin
-            req = urllib.request.Request(origin + path, body, headers)
+            req = urllib.request.Request(origin + path, body, headers, method=method)
             try:
                 with (opener or urllib.request.build_opener()).open(req, timeout=20) as response:
                     return response.status, response.read().decode()
@@ -137,14 +140,15 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
         first = {a['id']: a for a in json.loads(raw_accounts)}
         assert first and all(a['state'] == 'ACCESS_ONLY' for a in first.values())
         print(f'Native import: {len(first)} verified accounts; partial failure={imported.returncode != 0}.', flush=True)
-        repeated = subprocess.run([binary, 'accounts', 'import', '--from', 'teamclaude', '--config',
-                                   str(args.source.resolve()), '--access-only'], env=env, text=True,
-                                  capture_output=True, timeout=180)
-        second = {a['id']: a for a in json.loads(request('/api/v1/accounts', token=token)[1])}
-        assert first.keys() == second.keys()
-        assert all(second[key]['credentialVersion'] == first[key]['credentialVersion'] + 1 for key in first)
-        assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest, 'Source changed during acceptance.'
-        print('Repeated native import preserved account IDs and increased credential versions.', flush=True)
+        if not args.skip_reimport:
+            repeated = subprocess.run([binary, 'accounts', 'import', '--from', 'teamclaude', '--config',
+                                       str(args.source.resolve()), '--access-only'], env=env, text=True,
+                                      capture_output=True, timeout=180)
+            second = {a['id']: a for a in json.loads(request('/api/v1/accounts', token=token)[1])}
+            assert first.keys() == second.keys()
+            assert all(second[key]['credentialVersion'] == first[key]['credentialVersion'] + 1 for key in first)
+            assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest, 'Source changed during acceptance.'
+            print('Repeated native import preserved account IDs and increased credential versions.', flush=True)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             local_port = listener.getsockname()[1]
@@ -220,7 +224,76 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             request_id = re.search(r'request=([a-zA-Z0-9-]+)', dispatch).group(1)
             assert any('settled request=' + request_id in line and 'units=unknown' not in line for line in metadata)
             print('Real Codex CLI acceptance passed through native proxy and subscription pool.', flush=True)
-        events = [line for line in log.read_text().splitlines() if line.startswith('TeamCode inference ')]
+        if args.translation_smoke:
+            # This portable profile explicitly disables reasoning. Opaque reasoning replay is tested separately.
+            policy = json.loads(request('/api/v1/policy/models', token=token)[1])
+            policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
+            assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
+            schema = {'type':'object', 'properties':{'a':{'type':'integer'}, 'b':{'type':'integer'}}, 'required':['a','b'], 'additionalProperties':False}
+            for incoming, target in ((args.model, 'gpt-6-luna'), ('gpt-6-luna', args.model)):
+                messages = incoming.startswith('claude-')
+                if args.translation_direction != 'both' and messages != (args.translation_direction == 'messages'): continue
+                rule = {'id':'test-messages' if messages else 'test-responses', 'pattern':incoming,
+                        'targets':[{'provider':'codex' if messages else 'anthropic', 'model':target}]}
+                assert request('/api/v1/routes/' + rule['id'], rule, token, method='PUT')[0] == 200
+                prompt = 'Call sum with a=2 and b=3. After its result, reply with exactly 5.'
+                tool = {'name':'sum','description':'Add two integers.', 'input_schema':schema} if messages else {'type':'function','name':'sum','description':'Add two integers.','parameters':schema}
+                body = {'model':incoming,'stream':True,'tools':[tool]}
+                if messages:
+                    body.update(max_tokens=256, thinking={'type':'disabled'}, system='Reply with only the computed integer after the tool result. No formatting.', messages=[{'role':'user','content':prompt}], tool_choice={'type':'tool','name':'sum'})
+                else:
+                    body.update(max_output_tokens=256, reasoning={'effort':'none'}, instructions='Reply with only the computed integer after the tool result. No formatting.', input=[{'role':'user','content':prompt}], tool_choice={'type':'function','name':'sum'})
+                def translated_call():
+                    url = f'http://127.0.0.1:{local_port}/v1/' + ('messages' if messages else 'responses')
+                    req = urllib.request.Request(url, json.dumps(body).encode(), {'Content-Type':'application/json','Authorization':'Bearer '+local_token})
+                    try:
+                        with urllib.request.urlopen(req, timeout=90) as response:
+                            raw = response.read().decode()
+                    except urllib.error.HTTPError as error:
+                        diagnostic = error.read().decode()
+                        try:
+                            category = json.loads(diagnostic).get('error', {}).get('code', 'upstream_error')
+                        except ValueError:
+                            category = 'invalid_response'
+                        raise RuntimeError(f'Translated request rejected: HTTP {error.code}, category {category}') from None
+                    events = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith('data: ') and line[6:] != '[DONE]']
+                    if not events or any(event.get('type') in ('error','response.failed') for event in events) or events[-1]['type'] != ('message_stop' if messages else 'response.completed'):
+                        time.sleep(.2)  # Let settlement metadata reach the isolated log.
+                        print('Translated event types:', sorted({event.get('type', 'unknown') for event in events}), flush=True)
+                        for line in log.read_text().splitlines():
+                            if line.startswith('TeamCode inference '): print(line, flush=True)
+                    assert not any(event.get('type') in ('error','response.failed') for event in events), 'Translated stream failed'
+                    assert events[-1]['type'] == ('message_stop' if messages else 'response.completed')
+                    return events
+                events = translated_call()
+                if messages:
+                    starts = [event['content_block'] for event in events if event['type'] == 'content_block_start' and event['content_block']['type'] == 'tool_use']
+                    assert len(starts) == 1 and starts[0]['name'] == 'sum'
+                    arguments = json.loads(''.join(event['delta']['partial_json'] for event in events if event['type'] == 'content_block_delta' and event['delta']['type'] == 'input_json_delta'))
+                    call_id = starts[0]['id']
+                    assert arguments == {'a':2,'b':3}
+                    body['messages'] += [{'role':'assistant','content':[{'type':'tool_use','id':call_id,'name':'sum','input':arguments}]}, {'role':'user','content':[{'type':'tool_result','tool_use_id':call_id,'content':'5'}]}]
+                    body['tool_choice'] = {'type':'none'}
+                else:
+                    output = events[-1]['response']['output']
+                    calls = [item for item in output if item['type'] == 'function_call']
+                    assert len(calls) == 1 and calls[0]['name'] == 'sum'
+                    assert json.loads(calls[0]['arguments']) == {'a':2,'b':3}
+                    body['input'] += output + [{'type':'function_call_output','call_id':calls[0]['call_id'],'output':'5'}]
+                    body['tool_choice'] = 'none'
+                final = translated_call()
+                text = ''.join(event.get('delta', {}).get('text', '') for event in final if event['type'] == 'content_block_delta') if messages else ''.join(part.get('text','') for item in final[-1]['response']['output'] if item['type'] == 'message' for part in item['content'])
+                assert text.strip() == '5', 'Translated tool result did not round-trip'
+                print(f'Real translated tool loop passed: {incoming} -> {target}.', flush=True)
+        # Raw SSE consumers can finish just before the server commits usage settlement.
+        deadline = time.monotonic() + 5
+        while True:
+            events = [line for line in log.read_text().splitlines() if line.startswith('TeamCode inference ')]
+            dispatched = {re.search(r'request=([a-zA-Z0-9-]+)', line).group(1) for line in events if ' dispatch ' in line}
+            settled = {re.search(r'request=([a-zA-Z0-9-]+)', line).group(1) for line in events if ' settled ' in line}
+            if dispatched <= settled: break
+            assert time.monotonic() < deadline, 'An acceptance request did not settle'
+            time.sleep(.05)
         if not args.codex_model:
             for event in events:
                 print(event, flush=True)

@@ -7,6 +7,7 @@ import io.ktor.server.testing.testApplication
 import me.nathanfallet.teamcode.domain.gateway.*
 import me.nathanfallet.teamcode.domain.team.*
 import kotlin.test.*
+import me.nathanfallet.teamcode.domain.routing.*
 
 class TeamRoutesTest {
     @Test fun registrationIsAbsentAndTemporaryPasswordCannotReachInference() = testApplication {
@@ -17,6 +18,28 @@ class TeamRoutesTest {
         assertEquals(HttpStatusCode.OK, client.get("/api/v1/auth/me") { bearerAuth("temporary") }.status)
         assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/members") { bearerAuth("member") }.status)
         assertEquals(HttpStatusCode.OK, client.get("/api/v1/members") { bearerAuth("admin") }.status)
+    }
+    @Test fun routeManagementRequiresAdminAndBrowserCsrf() = testApplication {
+        var saved = 0
+        val store = object : RoutingStore {
+            override suspend fun list(teamId: String) = emptyList<RouteRule>()
+            override suspend fun save(actor: Principal, rule: RouteRule): RouteRule {
+                actor.requireAdmin(); ResolveRouteUseCase().validate(rule); saved++; return rule.copy(version = 1)
+            }
+            override suspend fun delete(actor: Principal, id: String, version: Long) { actor.requireAdmin(); saved-- }
+        }
+        application { configureGateway(NoGateway(), team = FakeTeam(), publicOrigin = "http://localhost", routes = store) }
+        assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/routes") { bearerAuth("member") }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/dashboard/routes") { header(HttpHeaders.Cookie, "teamcode_session=admin") }.status)
+        val body = """{"id":"opus","pattern":"claude-opus-*","targets":[{"provider":"codex","model":"gpt-6-astra"}]}"""
+        assertEquals(HttpStatusCode.Forbidden, client.put("/api/v1/routes/opus") { bearerAuth("member"); contentType(ContentType.Application.Json); setBody(body) }.status)
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/routes/opus") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody(body) }.status)
+        assertEquals(HttpStatusCode.BadRequest, client.put("/api/v1/routes/wrong") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody(body) }.status)
+        assertEquals(HttpStatusCode.Forbidden, client.post("/dashboard/routes") {
+            header(HttpHeaders.Cookie, "teamcode_session=admin"); header(HttpHeaders.Origin, "https://attacker.test")
+            contentType(ContentType.Application.FormUrlEncoded); setBody("csrf=session&action=delete&id=opus&version=1")
+        }.status)
+        assertEquals(1, saved)
     }
     @Test fun browserActionsRequireOriginAndCsrfAndApiIgnoresCookies() = testApplication {
         val team = FakeTeam()

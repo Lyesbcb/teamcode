@@ -23,7 +23,7 @@ class CheckModelPolicyUseCase {
     fun check(policy: ModelPolicy, requestedModel: String, resolvedModel: String, effort: String?, thinkingTokens: Long?) {
         validateConfiguration(policy)
         for (model in setOf(requestedModel, resolvedModel)) {
-            if (policy.deniedModels.any { matches(it, model) } || policy.allowedModels.none { matches(it, model) }) {
+            if (policy.deniedModels.any { matchesModelPattern(it, model) } || policy.allowedModels.none { matchesModelPattern(it, model) }) {
                 throw TeamFailure("model_not_allowed", 403, "This model is not allowed. Request an allowed model: ${policy.allowedModels.joinToString()}. Denied patterns: ${policy.deniedModels.joinToString()}.")
             }
         }
@@ -33,6 +33,5 @@ class CheckModelPolicyUseCase {
             throw TeamFailure("thinking_budget_not_allowed", 403, "Explicit thinking budgets are disabled or exceed the configured thinking-token ceiling.")
         }
     }
-    private fun matches(pattern: String, model: String): Boolean = Regex(pattern.split('*').joinToString(".*") { Regex.escape(it) }, RegexOption.IGNORE_CASE).matches(model)
     companion object { val EFFORTS = setOf("provider-default", "none", "minimal", "low", "medium", "high", "max", "xhigh", "budgeted") }
 }

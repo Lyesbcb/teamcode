@@ -51,7 +51,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             for (chunk in chunks) { chunk.copyInto(body, offset); offset += chunk.size }
             val headers = TeamCodeClient.FORWARDED_HEADERS.mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
             client.forwardInference(path, body, headers) { upstream ->
-                listOf("retry-after", "x-teamcode-request-id").forEach { name -> upstream.headers[name]?.let { call.response.header(name, it) } }
+                listOf("retry-after", "x-teamcode-request-id", "x-teamcode-model", "x-teamcode-provider").forEach { name -> upstream.headers[name]?.let { call.response.header(name, it) } }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
                 // Ktor may schedule the writer after respond returns. Keep the SDK response

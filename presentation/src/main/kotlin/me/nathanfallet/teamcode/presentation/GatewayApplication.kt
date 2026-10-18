@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -80,6 +80,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (admission != null && team != null) capacityRoutes(admission, team, publicOrigin)
         if (directives != null) directiveRoutes(directives)
         if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
+        if (routes != null) routingRoutes(routes, publicOrigin)
         get("/health") { call.respondText("OK") }
         get("/ready") {
             if (readiness()) call.respondText("OK")
@@ -108,7 +109,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             val headers = listOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id", "user-agent")
                 .mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
             gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null, protocol)) { head, chunks ->
-                head.headers.filterKeys { it.lowercase() in setOf("retry-after", "x-teamcode-request-id", "x-teamcode-account-id") }.forEach { (name, value) -> call.response.header(name, value) }
+                head.headers.filterKeys { it.lowercase() in setOf("retry-after", "x-teamcode-request-id", "x-teamcode-model", "x-teamcode-provider") }.forEach { (name, value) -> call.response.header(name, value) }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
                 val consumed = CompletableDeferred<Unit>()

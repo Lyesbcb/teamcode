@@ -30,9 +30,9 @@ Infrastructure does not import public DTOs. Presentation maps domain objects to 
 
 ## Deployment
 
-One server process and an independent MySQL database for the first team deployment. Use Exposed, Hikari and reviewed Flyway migrations; schema tests replay migrations against MySQL. No RabbitMQ or Redis requirement initially. Durable directives and quota reservations live in the database. No database lock spans an inference stream.
+Stateless server replicas and a shared MySQL database. Use HikariCP and reviewed Flyway migrations; schema tests replay migrations against MySQL. No RabbitMQ or Redis requirement initially. Durable directives and quota reservations live in the database. No database lock spans an inference stream.
 
-The local CLI embeds an HTTP loopback-only Ktor CIO server. Outbound HTTPS uses Darwin on macOS, Curl on Linux, and WinHttp on Windows. Server CIO and client CIO are different concerns: never assume Native client TLS works merely because the local HTTP server works. The central server uses Netty on JVM.
+The local CLI embeds an HTTP loopback-only Ktor CIO server. Outbound HTTPS uses Ktor 3.6 engine defaults (Darwin on macOS, Curl on Linux, WinHttp on Windows); the dependency is shared across native targets. Server CIO and client CIO are different concerns: never assume Native client TLS works merely because the local HTTP server works. The central server uses Netty on JVM.
 
 Native targets: macosArm64, macosX64, linuxX64, linuxArm64, mingwX64. Publish target binaries and checksums; document dynamic library requirements. Compile and test on appropriate hosts, not only JVM. Do not promise static binaries or supported targets before their release artifacts pass verification.
 
