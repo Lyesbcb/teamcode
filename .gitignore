@@ -1,0 +1,12 @@
+# Build outputs and local state
+.gradle/
+.kotlin/
+**/build/
+.idea/
+*.iml
+.DS_Store
+.env
+.env.*
+!.env.example
+data/
+*.log
