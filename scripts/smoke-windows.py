@@ -416,8 +416,8 @@ try:
         assert json.loads(config.with_name('service.json').read_text(encoding='utf-8')) == settings
         assert 'Running: true' in command('service', 'status').stdout
         task = Path(settings['registration'])
-        assert team_token not in task.read_text(encoding='utf-8') and settings['localToken'] not in task.read_text(encoding='utf-8')
-        assert '<LogonType>InteractiveToken</LogonType>' in task.read_text(encoding='utf-8')
+        assert team_token not in task.read_text(encoding='utf-16') and settings['localToken'] not in task.read_text(encoding='utf-16')
+        assert '<LogonType>InteractiveToken</LogonType>' in task.read_text(encoding='utf-16')
         # Reuse is checked through the actual native child, not just an identity ping.
         env['TEAMCODE_TEST_AGENT'] = 'claude'
         record = root / 'service-agent.json'

@@ -25,7 +25,8 @@ On an empty database, TeamCode creates `admin` and prints its random temporary p
 
 ```sh
 teamcode login --server https://teamcode.example.org
-teamcode accounts add
+teamcode accounts add --provider claude
+teamcode accounts add --provider codex
 teamcode accounts import --from teamclaude --dry-run
 teamcode accounts import --from teamclaude
 teamcode accounts list
@@ -33,7 +34,7 @@ teamcode accounts handover ACCOUNT_ID --confirm
 teamcode logout
 ```
 
-The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` into the hidden prompt. Credentials are sent to TeamCode, where the Claude profile/Max subscription or Codex authenticated subscription identity is checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Expired Claude credentials require `accounts add`; expired Codex credentials currently require signing in with Codex/TeamClaude and importing again. Direct Codex OAuth enrollment is pending. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
+The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` (Claude) or final `http://localhost:1455/auth/callback?...` address (Codex) into the hidden prompt. Codex uses its registered redirect address; no local callback listener is started, so paste the address even when the browser reports that the page cannot load. Credentials are sent to TeamCode, where the Claude profile/Max subscription or Codex authenticated subscription identity is checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Reconnect with `accounts add --provider claude` or `accounts add --provider codex`; verified enrollment updates an existing account. The Codex login flow has synthetic protocol tests; a live browser-consent acceptance run remains pending. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
 
 ## Kubernetes
 

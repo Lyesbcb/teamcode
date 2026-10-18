@@ -4,15 +4,14 @@ import com.github.ajalt.clikt.command.*
 import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.mordant.terminal.Terminal
 import io.ktor.client.HttpClient
-import io.ktor.http.URLBuilder
 import me.nathanfallet.teamcode.api.models.EnrollAccountRequest
 import me.nathanfallet.teamcode.cli.loadConfig
 import me.nathanfallet.teamcode.cli.sdk
 import me.nathanfallet.teamcode.cli.platform.*
-import me.nathanfallet.teamcode.client.ClaudeEnrollmentClient
-import me.nathanfallet.teamcode.client.TeamCodeException
+import me.nathanfallet.teamcode.client.*
 import okio.ByteString.Companion.toByteString
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -27,36 +26,27 @@ private class ListAccounts : SuspendingCliktCommand(name = "list") {
     } }
 }
 private class AddAccount : SuspendingCliktCommand(name = "add") {
-    override fun help(context: Context) = "Sign in to Claude locally, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
+    private val providerName by option("--provider").choice("claude", "claude-max", "codex").default("claude")
+    override fun help(context: Context) = "Sign in to Claude or Codex locally, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
     override suspend fun run() {
         val config = loadConfig()
         sdk(config).use { client ->
             client.accounts() // Verify administrator access before opening provider sign-in.
+            val provider = if (providerName == "codex") CodexOAuthEnrollment else ClaudeOAuthEnrollment
             val verifier = randomCode()
             val state = randomCode()
             val challenge = verifier.encodeToByteArray().toByteString().sha256().base64().replace('+', '-').replace('/', '_').trimEnd('=')
-            val url = URLBuilder("https://claude.ai/oauth/authorize").apply { parameters.apply {
-                append("code", "true"); append("client_id", ClaudeEnrollmentClient.CLIENT_ID)
-                append("response_type", "code"); append("redirect_uri", ClaudeEnrollmentClient.REDIRECT_URI)
-                append("scope", "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload")
-                append("code_challenge", challenge); append("code_challenge_method", "S256"); append("state", state)
-            } }.buildString()
-            echo("Open this URL in your browser, sign in, then paste the complete code#state shown by Claude:")
+            val url = provider.authorizationUrl(state, challenge)
+            echo("Open this URL in your browser and sign in. ${provider.pasteInstructions}")
             echo(url)
             val paste = Terminal().readLineOrNull(hideInput = true)?.trim().orEmpty()
-            val code = parseLoginCode(paste, state)
-            val input = ClaudeEnrollmentClient { configure -> HttpClient() { configure(this) } }.use { it.exchange(code, state, verifier, randomCode()) }
+            val code = provider.parseCode(paste, state)
+            val input = OAuthEnrollmentClient(provider) { configure -> HttpClient() { configure(this) } }.use { it.exchange(code, state, verifier, randomCode()) }
             val result = client.enrollAccount(input)
             echo("${if (result.created) "Added" else "Updated"} ${result.account.displayName} (${result.account.id}).")
             echo("Stop any other refresher for this account, then run: teamcode accounts handover ${result.account.id} --confirm")
         }
     }
-}
-internal fun parseLoginCode(paste: String, state: String): String {
-    require(paste.length in 1..8192) { "Invalid authorization code." }
-    val parts = paste.split('#', limit = 2)
-    require(parts.size == 2 && parts[0].isNotBlank() && parts[1] == state) { "OAuth state mismatch. Start a new sign-in attempt." }
-    return parts[0]
 }
 private class ImportAccounts : SuspendingCliktCommand(name = "import") {
     private val from by option("--from").required()

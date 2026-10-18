@@ -15,6 +15,6 @@ kotlin {
             implementation(libs.ktor.json)
         }
         commonTest.dependencies { implementation(kotlin("test")); implementation(libs.coroutines.test) }
-        jvmTest.dependencies { runtimeOnly(libs.junit) }
+        jvmTest.dependencies { runtimeOnly(libs.junit); implementation(libs.ktor.client.mock) }
     }
 }

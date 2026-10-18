@@ -8,6 +8,7 @@
 - Put business rules in use cases and services, never in HTTP routes or CLI commands. Use constructor injection and Koin in the server composition root.
 - Native CLI: no JVM at runtime. Test the actual native binary; JVM tests alone do not validate TLS, streaming or process behavior.
 - Never log credentials, prompts or response bodies. The only exception is the initial administrator temporary password, printed once after first-run creation commits, as explicitly requested by the project owner. Never print it again on restart. No real provider calls in normal tests or PR CI.
+- Extend providers through `ProviderTransport` and `OAuthEnrollmentProvider`; extend incoming HTTP formats through `InboundProtocol` and request/stream formats through `ProtocolAdapter`. Keep team policy and account selection shared. Document capability limits and test real protocol fixtures before claiming support.
 - Preserve coroutine cancellation. Bound request bodies, queues, retries and network waits. Never replay a stream after committed output.
 - Update `docs/status.md` with evidence when a milestone changes. Never present a planned command as implemented.
 - Never stop processes or Gradle daemons started by someone else. Never kill by process name.
