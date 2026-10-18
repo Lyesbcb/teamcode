@@ -87,8 +87,11 @@ class TeamCodeClient(
         body: ByteArray,
         headers: Map<String, String> = emptyMap(),
         receive: suspend (HttpResponse) -> Unit,
-    ) {
-        http.preparePost("$origin/v1/messages") {
+    ) = forwardInference("/v1/messages", body, headers, receive)
+
+    suspend fun forwardInference(path: String, body: ByteArray, headers: Map<String, String> = emptyMap(), receive: suspend (HttpResponse) -> Unit) {
+        require(path in setOf("/v1/messages", "/v1/responses")) { "Unsupported inference path." }
+        http.preparePost("$origin$path") {
             contentType(ContentType.Application.Json)
             for ((name, value) in headers) {
                 require(name.lowercase() in FORWARDED_HEADERS) { "Unsupported inference header." }

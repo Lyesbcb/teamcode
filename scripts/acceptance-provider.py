@@ -26,6 +26,8 @@ parser.add_argument('--binary', required=True)
 parser.add_argument('--jar', required=True)
 parser.add_argument('--source', type=Path, required=True, help='Authorized TeamClaude configuration')
 parser.add_argument('--model', default='claude-haiku-4-5-20251001')
+parser.add_argument('--skip-claude', action='store_true')
+parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
 args = parser.parse_args()
 binary, jar = str(Path(args.binary).resolve()), str(Path(args.jar).resolve())
 name = 'teamcode-acceptance-' + secrets.token_hex(6)
@@ -165,25 +167,61 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
                      if not key.startswith(('ANTHROPIC_', 'CLAUDE_', 'CLAUDECODE', 'CMUX_'))}
         agent_env.update(ANTHROPIC_BASE_URL=f'http://127.0.0.1:{local_port}',
                          ANTHROPIC_API_KEY=local_token, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
-        claude = shutil.which('claude')
-        assert claude, 'Claude Code must be installed for this acceptance test.'
-        result = subprocess.run([claude, '--bare', '--setting-sources', '', '--strict-mcp-config',
-                                 '--tools', '', '--no-session-persistence', '--disable-slash-commands',
-                                 '--model', args.model, '--output-format', 'json',
-                                 '--system-prompt', 'Reply briefly.', '-p', 'Reply with exactly TEAMCODE_OK.'],
-                                env=agent_env, cwd=root, text=True, capture_output=True, timeout=90)
-        lines = log.read_text().splitlines()
-        events = [line for line in lines if line.startswith('TeamCode inference ')]
-        for event in events:
-            print(event, flush=True)  # Metadata only; never provider payloads or credentials.
-        assert result.returncode == 0, 'Claude Code failed; agent output deliberately withheld.'
-        parsed = json.loads(result.stdout)
-        assert parsed.get('is_error') is not True and 'TEAMCODE_OK' in parsed.get('result', ''), 'Claude Code did not complete successfully.'
-        assert any('provider=anthropic model=' + args.model in line for line in events)
-        assert any('status=200' in line for line in events)
-        assert any('settled' in line and 'units=unknown' not in line for line in events)
+        if not args.skip_claude:
+            claude = shutil.which('claude')
+            assert claude, 'Claude Code must be installed for this acceptance test.'
+            result = subprocess.run([claude, '--bare', '--setting-sources', '', '--strict-mcp-config',
+                                     '--tools', '', '--no-session-persistence', '--disable-slash-commands',
+                                     '--model', args.model, '--output-format', 'json',
+                                     '--system-prompt', 'Reply briefly.', '-p', 'Reply with exactly TEAMCODE_OK.'],
+                                    env=agent_env, cwd=root, text=True, capture_output=True, timeout=90)
+            events = [line for line in log.read_text().splitlines() if line.startswith('TeamCode inference ')]
+            assert result.returncode == 0, 'Claude Code failed; agent output deliberately withheld.'
+            parsed = json.loads(result.stdout)
+            assert parsed.get('is_error') is not True and 'TEAMCODE_OK' in parsed.get('result', ''), 'Claude Code did not complete successfully.'
+            assert any('provider=anthropic model=' + args.model in line for line in events)
+            assert any('status=200' in line for line in events)
+            assert any('settled' in line and 'units=unknown' not in line for line in events)
+            assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest
+            print('Real Claude Code acceptance passed; usage settled.', flush=True)
+        if args.codex_model:
+            codex = shutil.which('codex')
+            assert codex, 'Codex CLI must be installed for this acceptance test.'
+            provider_toml = ('model_providers.teamcode={name="TeamCode",base_url="http://127.0.0.1:'
+                             + str(local_port) + '/v1",env_key="TEAMCODE_LOCAL_TOKEN",wire_api="responses",'
+                             'request_max_retries=0,stream_max_retries=0}')
+            result = subprocess.run([codex, 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+                                     '--skip-git-repo-check', '--sandbox', 'read-only', '--json',
+                                     '-c', 'model_provider="teamcode"', '-c', provider_toml,
+                                     '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
+                                     '--model', args.codex_model, 'Do not use tools. Reply with exactly TEAMCODE_OK.'],
+                                    cwd=root, env=agent_env, capture_output=True, text=True, timeout=90)
+            metadata = [line for line in log.read_text().splitlines() if line.startswith('TeamCode inference ')]
+            for event in metadata:
+                print(event, flush=True)
+            if result.returncode != 0:
+                diagnostics = (result.stdout + result.stderr).lower()
+                markers = ['missing field', 'unexpected', 'stream disconnected', 'response.completed', 'response.failed', 'response.done', 'websocket', 'unsupported', 'model', 'quota', 'rate limit', 'unauthorized', 'instructions', 'invalid', 'permission', 'sandbox', 'timeout', 'connection', 'deserialize', 'tool', 'originator', 'service tier', 'reconnect', 'retry limit', 'error', 'turn.failed']
+                print('Codex diagnostic categories:', [m for m in markers if m in diagnostics], flush=True)
+                for line in result.stdout.splitlines():
+                    try:
+                        event = json.loads(line)
+                        print('Codex event type:', event.get('type'), flush=True)
+                    except ValueError:
+                        pass
+            assert result.returncode == 0, 'Codex CLI failed; agent output deliberately withheld.'
+            items = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith('{')]
+            assert any(i.get('type') == 'turn.completed' for i in items), 'Codex turn did not complete.'
+            assert any('TEAMCODE_OK' in i.get('item', {}).get('text', '') for i in items), 'Codex did not return the expected response.'
+            dispatch = next(line for line in metadata if 'provider=codex model=' + args.codex_model in line)
+            request_id = re.search(r'request=([a-zA-Z0-9-]+)', dispatch).group(1)
+            assert any('settled request=' + request_id in line and 'units=unknown' not in line for line in metadata)
+            print('Real Codex CLI acceptance passed through native proxy and subscription pool.', flush=True)
+        events = [line for line in log.read_text().splitlines() if line.startswith('TeamCode inference ')]
+        if not args.codex_model:
+            for event in events:
+                print(event, flush=True)
         assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest
-        print('Real acceptance passed: native import/upsert -> real Claude Code -> native proxy -> TeamCode -> Claude Haiku; usage settled.', flush=True)
     finally:
         if proxy is not None:
             proxy.terminate()

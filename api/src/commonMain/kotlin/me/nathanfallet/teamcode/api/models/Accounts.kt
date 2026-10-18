@@ -3,7 +3,7 @@ package me.nathanfallet.teamcode.api.models
 import kotlinx.serialization.Serializable
 
 @Serializable
-class EnrollAccountRequest(val accessToken: String, val refreshToken: String, val expiresAtMillis: Long, val operationId: String) {
+class EnrollAccountRequest(val accessToken: String, val refreshToken: String, val expiresAtMillis: Long, val operationId: String, val provider: String = "anthropic") {
     override fun toString() = "EnrollAccountRequest([REDACTED])"
 }
 @Serializable

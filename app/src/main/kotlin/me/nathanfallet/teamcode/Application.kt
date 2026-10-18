@@ -12,9 +12,11 @@ import me.nathanfallet.teamcode.infrastructure.database.SqlAdmissionStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlDirectiveService
 import me.nathanfallet.teamcode.infrastructure.database.SqlModelPolicyStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCredentialSource
-import me.nathanfallet.teamcode.infrastructure.gateway.ClaudePoolGateway
+import me.nathanfallet.teamcode.infrastructure.gateway.PoolGateway
 import me.nathanfallet.teamcode.infrastructure.gateway.QuotaMonitor
 import me.nathanfallet.teamcode.infrastructure.providers.ClaudeTransport
+import me.nathanfallet.teamcode.infrastructure.providers.CodexTransport
+import me.nathanfallet.teamcode.infrastructure.providers.CodexAccountVerifier
 import me.nathanfallet.teamcode.infrastructure.database.SqlAccountStore
 import me.nathanfallet.teamcode.infrastructure.providers.ClaudeAccountVerifier
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
@@ -41,16 +43,16 @@ fun main() {
     val providerHttp = HttpClient(CIO) { followRedirects = false; install(HttpTimeout) { connectTimeoutMillis = 10_000; requestTimeoutMillis = 30_000 } }
     val cipher = database?.let { CredentialCipher(Base64.getDecoder().decode(requireNotNull(System.getenv("TEAMCODE_ENCRYPTION_KEY")) { "Set TEAMCODE_ENCRYPTION_KEY to a base64-encoded 32-byte key." })) }
     val accountStore = database?.let { SqlAccountStore(it, cipher!!) }
-    val accounts = accountStore?.let { AccountManagement(it, ClaudeAccountVerifier(providerHttp)) }
+    val accounts = accountStore?.let { AccountManagement(it, ClaudeAccountVerifier(providerHttp), mapOf("codex" to CodexAccountVerifier(providerHttp))) }
     val admission = database?.let { SqlAdmissionStore(it) }
     val modelPolicies = database?.let { SqlModelPolicyStore(it) }
     val directives = database?.let { SqlDirectiveService(it) }
-    val transport = ClaudeTransport(providerHttp)
-    val credentialSource = database?.let { SqlCredentialSource(it, cipher!!, transport::refresh) }
-    val gateway = if (database != null) ClaudePoolGateway(admission!!, credentialSource!!, transport, modelPolicies!!) else FixtureGatewayService()
+    val transports = listOf(ClaudeTransport(providerHttp), CodexTransport(providerHttp))
+    val credentialSource = database?.let { SqlCredentialSource(it, cipher!!) { account, token -> transports.single { it.provider == account.identity.provider }.refresh(token) } }
+    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!) else FixtureGatewayService()
     val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     if (accountStore != null) {
-        val monitor = QuotaMonitor(accountStore, credentialSource!!, admission!!, transport)
+        val monitor = QuotaMonitor(accountStore, credentialSource!!, admission!!, transports)
         workers.launch {
             while (isActive) {
                 try { monitor.sample(); admission.maintain(); directives!!.update() }

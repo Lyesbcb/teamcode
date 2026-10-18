@@ -14,6 +14,7 @@ import me.nathanfallet.teamcode.domain.policy.*
 import me.nathanfallet.teamcode.infrastructure.fixtures.FixtureGatewayService
 import me.nathanfallet.teamcode.infrastructure.gateway.*
 import me.nathanfallet.teamcode.infrastructure.providers.ClaudeTransport
+import me.nathanfallet.teamcode.infrastructure.providers.CodexTransport
 import kotlin.test.*
 
 class PoolGatewayTest {
@@ -32,7 +33,7 @@ class PoolGatewayTest {
         }) { install(HttpTimeout) }
         http.use {
             val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
-            val gateway = ClaudePoolGateway(store, source, ClaudeTransport(it), FakeModelPolicies())
+            val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             val output = StringBuilder()
             gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect { output.append(it.decodeToString()) } }
             assertEquals(events, output.toString())
@@ -47,7 +48,7 @@ class PoolGatewayTest {
         val http = HttpClient(MockEngine { calls++; respond(FixtureGatewayService.EVENTS.first(), headers = headersOf(HttpHeaders.ContentType, "text/event-stream")) }) { install(HttpTimeout) }
         http.use {
             val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
-            val gateway = ClaudePoolGateway(store, source, ClaudeTransport(it), FakeModelPolicies())
+            val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             val cancelled = assertFailsWith<CancellationException> { gateway.forward(request()) { _, chunks -> chunks.collect { throw CancellationException("downstream disconnected") } } }
             assertEquals("downstream disconnected", cancelled.message)
             assertEquals(1, calls)
@@ -61,7 +62,7 @@ class PoolGatewayTest {
         val http = HttpClient(MockEngine { respond("provider-secret", HttpStatusCode.TooManyRequests, headersOf("retry-after", "10")) }) { install(HttpTimeout) }
         http.use {
             val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
-            val gateway = ClaudePoolGateway(store, source, ClaudeTransport(it), FakeModelPolicies())
+            val gateway = PoolGateway(store, source, listOf(ClaudeTransport(it)), FakeModelPolicies())
             gateway.forward(request()) { head, chunks ->
                 assertEquals(429, head.status)
                 assertEquals("10", head.headers["retry-after"])
@@ -69,6 +70,25 @@ class PoolGatewayTest {
             }
             assertEquals(0, store.settled)
             assertTrue(store.cooled)
+        }
+    }
+    @Test fun codexStreamWithoutContentTypeUsesResponsesContract() = runBlocking {
+        val codex = account.copy(identity = account.identity.copy(provider = "codex"))
+        val store = FakeAdmission(codex)
+        val events = """data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":2}}}""" + "\n\n"
+        val http = HttpClient(MockEngine { respond(events, headers = Headers.Empty) }) { install(HttpTimeout) }
+        http.use {
+            val source = object : CredentialSource { override suspend fun fresh(account: AccountRecord) = ProviderCredentials("provider-secret", "refresh-secret", Long.MAX_VALUE) }
+            val gateway = PoolGateway(store, source, listOf(CodexTransport(it)), FakeModelPolicies())
+            val request = GenerationRequest("""{"model":"gpt-6-luna","stream":true,"instructions":"brief","input":[]}""".toByteArray(), emptyMap(), actor, WireProtocol.RESPONSES)
+            val output = StringBuilder()
+            gateway.forward(request) { head, chunks ->
+                assertEquals("text/event-stream", head.contentType)
+                chunks.collect { output.append(it.decodeToString()) }
+            }
+            assertEquals(events, output.toString())
+            assertEquals(20, store.settled)
+            assertEquals("codex", store.selectedProvider)
         }
     }
     @Test fun usageMeterHandlesChunkBoundariesAndMissingFinalUsage() {
@@ -85,7 +105,8 @@ private class FakeAdmission(private val account: AccountRecord) : AdmissionStore
     var settled: Long? = null
     var didSettle = false
     var cooled = false
-    override suspend fun reserve(actor: Principal, units: Long, model: String) = Reservation("request", account, units)
+    var selectedProvider: String? = null
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String): Reservation { selectedProvider = provider; return Reservation("request", account, units) }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?) { didSettle = true; settled = actualUnits }
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = error("unused")
     override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = error("unused")

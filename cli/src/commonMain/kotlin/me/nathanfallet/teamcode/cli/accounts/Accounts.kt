@@ -84,7 +84,7 @@ private class ImportAccounts : SuspendingCliktCommand(name = "import") {
                 entry as ImportEntry.Ready
                 try {
                     val credentials = entry.credentials
-                    val result = client.enrollAccount(EnrollAccountRequest(credentials.accessToken, credentials.refreshToken, credentials.expiresAtMillis, randomCode()))
+                    val result = client.enrollAccount(EnrollAccountRequest(credentials.accessToken, credentials.refreshToken, credentials.expiresAtMillis, randomCode(), credentials.provider))
                     if (takeOwnership || accessOnly) client.handoverAccount(result.account.id, accessOnly)
                     echo("${if (result.created) "Added" else "Updated"} ${result.account.displayName} (${result.account.id}).")
                 } catch (error: TeamCodeException) { failed++; echo("Failed ${entry.label}: server returned HTTP ${error.statusCode}. Reconnect expired accounts with accounts add.") }

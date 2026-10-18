@@ -86,6 +86,12 @@ class TeamPersistenceTest {
                 admission.settle(other, 10)
                 assertEquals(10, admission.capacity(readyAlice).chargedAndReservedUnits)
                 admission.observe(updated.id, listOf(AccountQuota(updated.id, "seven_day", .96, System.currentTimeMillis(), System.currentTimeMillis() + 3_600_000)))
+                val codexIdentity = VerifiedProviderAccount(verified.identity.copy(provider = "codex", accountId = "codex-user"), "Codex")
+                val codex = (store.upsert(codexIdentity, credentials, null, "operation-codex01") as EnrollmentResult.Created).account
+                store.handover("default", codex.id, accessOnly = true)
+                val codexRequest = admission.reserve(admin.principal, 20, "gpt-6-luna", "codex")
+                assertEquals(codex.id, codexRequest.account.id)
+                admission.settle(codexRequest, 0)
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { admission.reserve(admin.principal, 20, "claude-opus-test") }.code)
                 assertEquals(60, SqlAdmissionStore(database).capacity(admin.principal).chargedAndReservedUnits)
                 val support = service.createMember(admin.principal, "support", Role.MEMBER)
@@ -100,7 +106,7 @@ class TeamPersistenceTest {
                 val expired = ProviderCredentials("expired-access", "rotating-refresh", 1)
                 store.upsert(verified, expired, 2, "operation-expired01")
                 val renewals = java.util.concurrent.atomic.AtomicInteger()
-                val refreshing = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) {
+                val refreshing = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { _, _ ->
                     renewals.incrementAndGet(); delay(50)
                     ProviderCredentials("renewed-access", "rotated-refresh", System.currentTimeMillis() + 3_600_000)
                 }
@@ -113,7 +119,7 @@ class TeamPersistenceTest {
                 assertEquals(1, renewals.get())
                 assertEquals("rotated-refresh", store.credentials("default", updated.id).refreshToken)
                 store.upsert(privateVerified, expired, 1, "operation-expired02")
-                val broken = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { throw IllegalStateException("unknown refresh outcome") }
+                val broken = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { _, _ -> throw IllegalStateException("unknown refresh outcome") }
                 assertFailsWith<TeamFailure> { broken.fresh(store.find(privateVerified.identity)!!) }
                 assertEquals(AccountState.RECONNECT_REQUIRED, store.find(privateVerified.identity)!!.state)
                 // A second service instance uses the same persistent state; migrations are repeatable.

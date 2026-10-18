@@ -13,8 +13,11 @@ import me.nathanfallet.teamcode.domain.capacity.AccountQuota
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 import java.time.Instant
 
-class ClaudeTransport(private val http: HttpClient) {
-    suspend fun refresh(previous: ProviderCredentials): ProviderCredentials = http.preparePost("https://platform.claude.com/v1/oauth/token") {
+class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
+    override val provider = "anthropic"
+    override val protocol = me.nathanfallet.teamcode.domain.gateway.WireProtocol.MESSAGES
+    override fun quotas(accountId: String, headers: Headers, now: Long) = headerQuotas(accountId, headers, now)
+    override suspend fun refresh(previous: ProviderCredentials): ProviderCredentials = http.preparePost("https://platform.claude.com/v1/oauth/token") {
         contentType(ContentType.Application.Json)
         timeout { requestTimeoutMillis = 15_000 }
         setBody(buildJsonObject {
@@ -30,14 +33,14 @@ class ClaudeTransport(private val http: HttpClient) {
         if (access.isNullOrBlank() || seconds == null || seconds !in 1..31_536_000) throw TeamFailure("refresh_failed", 503, "Provider refresh returned incomplete credentials.")
         ProviderCredentials(access, refresh, System.currentTimeMillis() + seconds * 1000)
     }
-    suspend fun usage(account: AccountRecord, credentials: ProviderCredentials): List<AccountQuota> = http.prepareGet("https://api.anthropic.com/api/oauth/usage?cedar_ember=1") {
+    override suspend fun usage(account: AccountRecord, credentials: ProviderCredentials): List<AccountQuota> = http.prepareGet("https://api.anthropic.com/api/oauth/usage?cedar_ember=1") {
         bearerAuth(credentials.accessToken); header("anthropic-beta", "oauth-2025-04-20")
         timeout { requestTimeoutMillis = 15_000 }
     }.execute { response ->
         if (response.status.value != 200) throw TeamFailure("usage_unavailable", 503, "Provider usage is unavailable.")
         parseUsage(account.id, response.boundedJson(), System.currentTimeMillis())
     }
-    suspend fun messages(account: AccountRecord, credentials: ProviderCredentials, body: JsonObject, headers: Map<String, String>, receive: suspend (HttpResponse) -> Unit) {
+    override suspend fun send(account: AccountRecord, credentials: ProviderCredentials, body: JsonObject, headers: Map<String, String>, receive: suspend (HttpResponse) -> Unit) {
         val metadata = body["metadata"] as? JsonObject
         val userId = (metadata?.get("user_id") as? JsonPrimitive)?.contentOrNull
         val identity = userId?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
@@ -82,7 +85,7 @@ class ClaudeTransport(private val http: HttpClient) {
         }
     }
 }
-private suspend fun HttpResponse.boundedJson(): JsonObject {
+internal suspend fun HttpResponse.boundedJson(): JsonObject {
     val bytes = bodyAsChannel().readRemaining(262_145).readByteArray()
     if (bytes.size > 262_144) throw TeamFailure("provider_response_invalid", 502, "Provider response exceeds the limit.")
     return try { Json.parseToJsonElement(bytes.decodeToString()).jsonObject } catch (_: IllegalArgumentException) { throw TeamFailure("provider_response_invalid", 502, "Provider returned an invalid response.") }

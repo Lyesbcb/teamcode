@@ -10,7 +10,7 @@ import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
 class SqlCredentialSource(
     private val database: Database,
     private val cipher: CredentialCipher,
-    private val renew: suspend (ProviderCredentials) -> ProviderCredentials,
+    private val renew: suspend (AccountRecord, ProviderCredentials) -> ProviderCredentials,
 ) : CredentialSource {
     override suspend fun fresh(account: AccountRecord): ProviderCredentials {
         val result = database.suspendingTransaction { c ->
@@ -25,7 +25,7 @@ class SqlCredentialSource(
             if (row.first.state == AccountState.ACCESS_ONLY) return@suspendingTransaction Result.failure<ProviderCredentials>(
                 TeamFailure("access_token_expired", 503, "Access-only credentials expired. Import current credentials again; TeamCode will not refresh this account."))
             try {
-                val renewed = renew(credentials) // Adapter enforces a short timeout and never retries a rotating refresh.
+                val renewed = renew(row.first, credentials) // Adapter enforces a short timeout and never retries a rotating refresh.
                 val envelope = cipher.encrypt(Json.encodeToString(CredentialPayload(renewed.accessToken, renewed.refreshToken, renewed.expiresAtMillis)).toByteArray(), context)
                 c.execute("UPDATE accounts SET credential_envelope = ?, credential_version = credential_version + 1 WHERE id = ?", envelope, account.id)
                 Result.success(renewed)

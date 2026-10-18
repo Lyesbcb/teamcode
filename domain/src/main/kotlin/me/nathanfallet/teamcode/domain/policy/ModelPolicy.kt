@@ -3,7 +3,7 @@ package me.nathanfallet.teamcode.domain.policy
 import me.nathanfallet.teamcode.domain.team.*
 
 data class ModelPolicy(
-    val allowedModels: List<String> = listOf("claude-*"),
+    val allowedModels: List<String> = listOf("claude-*", "gpt-*"),
     val deniedModels: List<String> = listOf("*fable*"),
     val allowedEfforts: List<String> = listOf("provider-default", "low", "medium", "high", "max", "xhigh", "budgeted"),
     val maximumThinkingTokens: Long = 32_768,

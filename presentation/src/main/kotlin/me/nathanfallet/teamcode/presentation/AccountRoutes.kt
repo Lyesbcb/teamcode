@@ -14,7 +14,7 @@ internal fun Route.accountRoutes(accounts: AccountManagement, publicOrigin: Stri
         val input = call.jsonBody<EnrollAccountRequest>()
         val credentials = try { ProviderCredentials(input.accessToken, input.refreshToken, input.expiresAtMillis) }
             catch (_: IllegalArgumentException) { throw TeamFailure("invalid_credentials", 400, "Invalid provider credentials.") }
-        when (val result = accounts.enroll(call.principal, credentials, input.operationId)) {
+        when (val result = accounts.enroll(call.principal, credentials, input.operationId, input.provider)) {
             is EnrollmentResult.Created -> call.respond(HttpStatusCode.Created, EnrollAccountResponse(true, result.account.view()))
             is EnrollmentResult.Updated -> call.respond(EnrollAccountResponse(false, result.account.view()))
             EnrollmentResult.Conflict -> throw TeamFailure("enrollment_conflict", 409, "Credentials changed during enrollment. Retry with a new operation.")

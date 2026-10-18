@@ -4,7 +4,7 @@ import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.Serialization
 
 /** Parsed credentials are untrusted until the server verifies provider identity. */
-class ImportCredentials(val accessToken: String, val refreshToken: String, val expiresAtMillis: Long) {
+class ImportCredentials(val accessToken: String, val refreshToken: String, val expiresAtMillis: Long, val provider: String = "anthropic") {
     override fun toString(): String = "ImportCredentials([REDACTED])"
 }
 
@@ -29,8 +29,8 @@ fun parseTeamClaudeConfig(source: String): List<ImportEntry> {
         val label = account.string("name")?.let(::safeLabel)?.takeIf { it.isNotEmpty() } ?: "Account ${index + 1}"
         val provider = account.string("provider") ?: "anthropic"
         val type = account.string("type")
-        if (provider != "anthropic" || type != "oauth" || account["upstream"]?.let { it != JsonNull } == true) {
-            return@mapIndexed ImportEntry.Rejected(label, "Only native Anthropic OAuth accounts are supported by this import format.")
+        if (provider !in setOf("anthropic", "codex") || type != "oauth" || account["upstream"]?.let { it != JsonNull } == true) {
+            return@mapIndexed ImportEntry.Rejected(label, "Only native Anthropic or Codex OAuth accounts are supported by this import format.")
         }
         val access = account.string("accessToken")
         val refresh = account.string("refreshToken")
@@ -38,7 +38,7 @@ fun parseTeamClaudeConfig(source: String): List<ImportEntry> {
         if (access.isNullOrBlank() || refresh.isNullOrBlank() || expires == null || expires <= 0) {
             return@mapIndexed ImportEntry.Rejected(label, "Missing or invalid OAuth credentials; reconnect the source account first.")
         }
-        ImportEntry.Ready(label, ImportCredentials(access, refresh, expires))
+        ImportEntry.Ready(label, ImportCredentials(access, refresh, expires, provider))
     }
 }
 

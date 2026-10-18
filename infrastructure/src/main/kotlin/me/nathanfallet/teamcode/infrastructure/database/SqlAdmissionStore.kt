@@ -8,7 +8,7 @@ import me.nathanfallet.teamcode.domain.team.*
 
 /** Admission is serialized per team; both member and physical account slots are reserved atomically. */
 class SqlAdmissionStore(private val database: Database) : AdmissionStore {
-    override suspend fun reserve(actor: Principal, units: Long, model: String): Reservation = database.transaction { c ->
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String): Reservation = database.transaction { c ->
         actor.requireReady()
         require(units in 1..100_000_000)
         val now = System.currentTimeMillis()
@@ -25,7 +25,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         if (units > current.dailyAllowanceUnits - current.chargedAndReservedUnits) throw TeamFailure("member_allowance", 429, "Your daily allowance has insufficient remaining units for this request.")
         val poolSpent = c.rows("SELECT COALESCE(SUM(units), 0) FROM reservations WHERE team_id = ? AND pool_id = ? AND day_number = ?", actor.teamId, policy.poolId.orEmpty(), now / DAY) { it.getLong(1) }.single()
         if (units > current.poolDailyUnits - poolSpent) throw TeamFailure("pool_allowance", 429, "This pool's daily team budget has been reserved or consumed.")
-        val candidates = c.rows("SELECT * FROM accounts WHERE team_id = ? AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ? AND pool_id <=> ?", actor.teamId, now, policy.poolId, map = ::accountRecord)
+        val candidates = c.rows("SELECT * FROM accounts WHERE team_id = ? AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ? AND pool_id <=> ? AND provider = ?", actor.teamId, now, policy.poolId, provider, map = ::accountRecord)
         val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.resets_at > ?", actor.teamId, now, map = ::quota)
         val active = c.rows("SELECT account_id, COUNT(*) AS n FROM reservations WHERE team_id = ? AND state = 'ACTIVE' AND expires_at > ? GROUP BY account_id", actor.teamId, now) { it.getString(1) to it.getInt(2) }.toMap()
         val eligible = candidates.filter { account ->
@@ -117,6 +117,6 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         if (row == null || row != actor.member.role.name) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
     }
     private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.getLong("resets_at"))
-    private fun relevant(window: String, model: String) = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").lowercase())
+    private fun relevant(window: String, model: String) = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
     companion object { private const val DAY = 86_400_000L }
 }

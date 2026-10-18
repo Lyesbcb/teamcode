@@ -26,7 +26,7 @@ Current hint output repeats on invocation; automatic hook installation and per-s
 
 ## Models and effort
 
-Administrators edit the allow/deny patterns and allowed efforts in the dashboard. Deny takes precedence. Missing effort is represented as `provider-default`; an explicit token thinking budget also requires `budgeted` permission and must fit the administrator's cap. This policy validates the requested and resolved model names, so route aliases cannot bypass a forbidden model. The currently enabled gateway only serves explicit Claude model IDs; cross-provider routing is still under implementation.
+Administrators edit the allow/deny patterns and allowed efforts in the dashboard. Deny takes precedence. Missing effort is represented as `provider-default`; an explicit token thinking budget also requires `budgeted` permission and must fit the administrator's cap. This policy validates the requested and resolved model names, so route aliases cannot bypass a forbidden model. The currently enabled gateway serves native explicit Claude or GPT model IDs on their respective endpoints; cross-provider routing is still under implementation.
 
 ## Refresh ownership
 

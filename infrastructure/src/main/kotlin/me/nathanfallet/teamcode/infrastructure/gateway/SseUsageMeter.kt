@@ -5,6 +5,10 @@ import kotlinx.serialization.json.*
 
 /** Reads usage metadata only; no prompt or generated content is retained after a bounded event line. */
 class SseUsageMeter {
+    var lastEvent: String = "none"
+        private set
+    var failureCategory: String = "none"
+        private set
     private val line = ByteArrayOutputStream()
     private var invalid = false
     private var dropping = false
@@ -31,10 +35,22 @@ class SseUsageMeter {
     private fun consume(text: String) {
         if (!text.startsWith("data:")) return
         val data = text.removePrefix("data:").trim()
+        if (data == "[DONE]") return
         val json = try { Json.parseToJsonElement(data) as? JsonObject } catch (_: IllegalArgumentException) { null }
         if (json == null) { invalid = true; return }
-        when ((json["type"] as? JsonPrimitive)?.contentOrNull) {
-            "error" -> invalid = true
+        val type = (json["type"] as? JsonPrimitive)?.contentOrNull
+        if (type in setOf("message_start", "message_delta", "message_stop", "response.created", "response.in_progress", "response.output_text.delta", "response.completed", "response.incomplete", "response.failed", "error")) lastEvent = type!!
+        if (type in setOf("error", "response.failed")) {
+            val error = json["error"] ?: (json["response"] as? JsonObject)?.get("error") ?: json
+            val diagnostic = error.toString().lowercase()
+            failureCategory = listOf("quota", "rate_limit", "unauthorized", "unsupported", "model", "instructions", "overloaded", "invalid", "internal").firstOrNull { it in diagnostic } ?: "provider_error"
+        }
+        when (type) {
+            "response.completed", "response.incomplete" -> {
+                record((json["response"] as? JsonObject)?.get("usage") as? JsonObject)
+                complete = true // Responses input_tokens already includes cached tokens; do not add its detail again.
+            }
+            "error", "response.failed" -> invalid = true
             "message_stop" -> complete = true
             "message_start" -> record((json["message"] as? JsonObject)?.get("usage") as? JsonObject)
             "message_delta" -> record(json["usage"] as? JsonObject)

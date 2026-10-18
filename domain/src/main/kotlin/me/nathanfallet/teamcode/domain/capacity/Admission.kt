@@ -9,7 +9,7 @@ data class PoolBudget(val poolId: String, val dailyUnits: Long)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
 data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long)
 interface AdmissionStore {
-    suspend fun reserve(actor: Principal, units: Long, model: String): Reservation
+    suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic"): Reservation
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
     suspend fun settle(reservation: Reservation, actualUnits: Long?)
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity

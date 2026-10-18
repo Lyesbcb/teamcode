@@ -10,11 +10,12 @@ import io.ktor.utils.io.*
 import kotlinx.coroutines.CompletableDeferred
 import me.nathanfallet.teamcode.client.TeamCodeClient
 
-/** Only the Messages path is supported in the first transport slice. No CONNECT or arbitrary destination. */
+/** Fixed Messages/Responses routes only. No CONNECT or arbitrary destination. */
 fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBodyBytes: Int = 2 * 1024 * 1024) {
     require(localToken.length >= 32) { "A local proxy token of at least 32 characters is required." }
     routing {
-        post("/v1/messages") {
+        for (path in listOf("/v1/messages", "/v1/responses")) {
+        post(path) {
             val auth = call.request.header(HttpHeaders.Authorization)
             val key = call.request.header("x-api-key")
             if (!equalToken(auth?.removePrefix("Bearer "), localToken) && !equalToken(key, localToken)) {
@@ -49,7 +50,8 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             var offset = 0
             for (chunk in chunks) { chunk.copyInto(body, offset); offset += chunk.size }
             val headers = TeamCodeClient.FORWARDED_HEADERS.mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
-            client.forwardMessages(body, headers) { upstream ->
+            client.forwardInference(path, body, headers) { upstream ->
+                listOf("retry-after", "x-teamcode-request-id").forEach { name -> upstream.headers[name]?.let { call.response.header(name, it) } }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
                 // Ktor may schedule the writer after respond returns. Keep the SDK response
@@ -66,6 +68,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
                 }
                 consumed.await()
             }
+        }
         }
     }
 }
