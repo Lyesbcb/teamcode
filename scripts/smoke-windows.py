@@ -3,6 +3,8 @@
 import argparse
 import concurrent.futures
 import contextlib
+import ctypes
+from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -277,7 +279,10 @@ try:
             }); request.on('error', reject); request.end(body);
           });
           assert(reply.includes('"done":true'));
-          fs.writeFileSync(process.env.TEAMCODE_RUN_RECORD, JSON.stringify({args, cwd:process.cwd(), origin:new URL(url).origin}));
+          const descendant = require('child_process').spawn(process.execPath,
+            ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
+          descendant.unref();
+          fs.writeFileSync(process.env.TEAMCODE_RUN_RECORD, JSON.stringify({args, cwd:process.cwd(), origin:new URL(url).origin, descendant:descendant.pid}));
           console.log('CHILD_STDOUT_OK'); console.error('CHILD_STDERR_OK'); process.exit(37);
         })().catch(() => { console.error('Synthetic child failed'); process.exit(1); });
         '''
@@ -292,6 +297,24 @@ try:
         env['CLAUDE_CODE_OAUTH_TOKEN'] = 'inherited-must-be-removed'
         arguments = ['--dangerously-skip-permissions', '', 'équipe', 'two words', 'a"b',
                      'C:\\trailing\\', '& | < > %PATH% !value!', 'line\nbreak', '--', 'literal']
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+
+        def descendant_exited(pid):
+            handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, observation only.
+            if not handle:
+                assert ctypes.get_last_error() == 87, 'Could not inspect the owned synthetic child'
+                return
+            try:
+                assert kernel.WaitForSingleObject(handle, 5000) == 0, 'Owned npm descendant survived the launcher'
+            finally:
+                kernel.CloseHandle(handle)
+
         for name in ('claude', 'codex'):
             record = root / (name + '.json')
             env['TEAMCODE_TEST_AGENT'] = name
@@ -300,6 +323,7 @@ try:
             assert result.returncode == 37, f'{name} failed: {result.stdout}\n{result.stderr}'
             assert result.stdout == 'CHILD_STDOUT_OK\n' and 'CHILD_STDERR_OK' in result.stderr
             captured = json.loads(record.read_text(encoding='utf-8'))
+            descendant_exited(captured['descendant'])
             assert captured['args'] == arguments, 'Windows argument encoding changed the agent arguments'
             assert captured['cwd'] == str(Path.cwd())
             address = urllib.parse.urlsplit(captured['origin'])

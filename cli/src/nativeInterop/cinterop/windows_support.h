@@ -127,7 +127,13 @@ static inline HANDLE teamcode_windows_standard(DWORD kind, int quiet) {
     return result;
 }
 
-/* The returned handle owns precisely the created process; callers never signal by name or reused PID. */
+typedef struct {
+    HANDLE process;
+    HANDLE job;
+} teamcode_windows_child;
+
+/* A private job owns only this child and its descendants, including npm's native agent subprocess.
+ * Assign before resuming so no descendant can escape between process creation and job assignment. */
 static inline void *teamcode_windows_spawn(const wchar_t *application, wchar_t *command_line,
         const wchar_t *environment, int quiet) {
     STARTUPINFOEXW startup = {0};
@@ -138,6 +144,11 @@ static inline void *teamcode_windows_spawn(const wchar_t *application, wchar_t *
     PROCESS_INFORMATION process = {0};
     SIZE_T size = 0;
     int initialized = 0;
+    teamcode_windows_child *child = NULL;
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) goto cleanup;
     for (int i = 0; i < 3; i++) if (!handles[i] || handles[i] == INVALID_HANDLE_VALUE) goto cleanup;
     startup.StartupInfo.hStdInput = handles[0];
     startup.StartupInfo.hStdOutput = handles[1];
@@ -149,21 +160,37 @@ static inline void *teamcode_windows_spawn(const wchar_t *application, wchar_t *
     if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         handles, sizeof(handles), NULL, NULL)) goto cleanup;
     if (!CreateProcessW(application, command_line, NULL, NULL, TRUE,
-        CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, (void *)environment, NULL,
+        CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, (void *)environment, NULL,
         &startup.StartupInfo, &process)) goto cleanup;
-    CloseHandle(process.hThread);
+    if (!AssignProcessToJobObject(job, process.hProcess)) goto cleanup;
+    child = (teamcode_windows_child *)calloc(1, sizeof(teamcode_windows_child));
+    if (!child) goto cleanup;
+    if (ResumeThread(process.hThread) == (DWORD)-1) { free(child); child = NULL; goto cleanup; }
+    child->process = process.hProcess;
+    child->job = job;
 cleanup:
+    if (!child && process.hProcess) { TerminateProcess(process.hProcess, 130); CloseHandle(process.hProcess); }
+    if (!child && job) CloseHandle(job);
+    if (process.hThread) CloseHandle(process.hThread);
     if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList);
     for (int i = 0; i < 3; i++) if (handles[i] && handles[i] != INVALID_HANDLE_VALUE) CloseHandle(handles[i]);
-    return process.hProcess;
+    return child;
 }
 static inline int teamcode_windows_poll(void *process, unsigned long *code) {
-    DWORD status = WaitForSingleObject((HANDLE)process, 0);
+    teamcode_windows_child *child = (teamcode_windows_child *)process;
+    DWORD status = WaitForSingleObject(child->process, 0);
     if (status == WAIT_TIMEOUT) return 0;
-    if (status != WAIT_OBJECT_0 || !GetExitCodeProcess((HANDLE)process, code)) return -1;
+    if (status != WAIT_OBJECT_0 || !GetExitCodeProcess(child->process, code)) return -1;
     return 1;
 }
-static inline void teamcode_windows_close(void *process) { CloseHandle((HANDLE)process); }
-static inline void teamcode_windows_terminate(void *process) { TerminateProcess((HANDLE)process, 130); }
+static inline void teamcode_windows_close(void *process) {
+    teamcode_windows_child *child = (teamcode_windows_child *)process;
+    CloseHandle(child->process);
+    CloseHandle(child->job);
+    free(child);
+}
+static inline void teamcode_windows_terminate(void *process) {
+    TerminateJobObject(((teamcode_windows_child *)process)->job, 130);
+}
 #endif

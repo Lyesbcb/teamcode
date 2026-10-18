@@ -111,6 +111,11 @@ jobs:
       - name: Verify persistent team setup with the native CLI
         if: runner.os == 'Linux'
         run: python3 scripts/smoke-team.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teamcode-${{ env.NATIVE_DIRECTORY }}
+          path: cli/build/bin/${{ env.NATIVE_DIRECTORY }}/debugExecutable/teamcode.kexe
+          retention-days: 7
   windows:
     runs-on: windows-latest
     steps:
@@ -125,3 +130,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
       - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teamcode-windows-x64
+          path: cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+          retention-days: 7
