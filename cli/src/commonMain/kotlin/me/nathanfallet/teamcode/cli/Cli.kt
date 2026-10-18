@@ -16,12 +16,13 @@ import me.nathanfallet.teamcode.cli.proxy.localProxy
 import me.nathanfallet.teamcode.client.TeamCodeClient
 import com.github.ajalt.mordant.terminal.Terminal
 import me.nathanfallet.teamcode.cli.accounts.Accounts
+import me.nathanfallet.teamcode.cli.agents.Agents
 
 const val VERSION = "0.1.0-SNAPSHOT"
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {

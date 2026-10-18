@@ -3,13 +3,15 @@ package me.nathanfallet.teamcode.infrastructure.database
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.accounts.*
+import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
 import org.testcontainers.mysql.MySQLContainer
 import kotlin.test.*
 
 class TeamPersistenceTest {
     @Test fun bootstrapSessionsRevocationAndLastAdministratorSurviveRestarts() = runBlocking {
-        MySQLContainer("mysql:8.4").withDatabaseName("teamcode").use { container ->
+        MySQLContainer("mysql:8.4").withDatabaseName("teamcode")
+            .withTmpFs(mapOf("/var/lib/mysql" to "rw,nosuid,size=1g")).use { container ->
             container.start()
             Database(container.jdbcUrl, container.username, container.password).use { database ->
                 database.migrate()
@@ -60,11 +62,65 @@ class TeamPersistenceTest {
                 database.transaction { c ->
                     assertTrue(c.rows("SELECT credential_envelope FROM accounts") { it.getString(1) }.all { it.startsWith("v1:") && !it.contains("synthetic") })
                 }
+                store.configure("default", updated.id, "Shared", false, 0)
+                val privateVerified = VerifiedProviderAccount(verified.identity.copy(accountId = "private-account"), "Protected")
+                val protected = (store.upsert(privateVerified, credentials, null, "operation-private01") as EnrollmentResult.Created).account
+                store.configure("default", protected.id, "Protected", false, 0, "alice-only")
+                store.handover("default", protected.id)
+                val pendingAlice = service.login("alice", reset.temporaryPassword, "test")
+                service.changePassword(pendingAlice.principal, reset.temporaryPassword, "alice new secure password")
+                val readyAlice = service.login("alice", "alice new secure password", "test").principal
+                val admission = SqlAdmissionStore(database)
+                admission.configure(admin.principal, MemberPolicy(admin.principal.member.id, 100, 1))
+                admission.configure(admin.principal, MemberPolicy(readyAlice.member.id, 100, 1, "alice-only"))
+                val contested = coroutineScope { (1..4).map { async { runCatching { admission.reserve(admin.principal, 60, "claude-opus-test") } } }.awaitAll() }
+                assertEquals(1, contested.count { it.isSuccess })
+                val first = contested.single { it.isSuccess }.getOrThrow()
+                assertEquals(updated.id, first.account.id)
+                val other = admission.reserve(readyAlice, 60, "claude-opus-test")
+                assertEquals(protected.id, other.account.id)
+                admission.settle(first, null)
+                admission.settle(first, 0) // A duplicate settlement cannot refund uncertain spend.
+                assertEquals(60, admission.capacity(admin.principal).chargedAndReservedUnits)
+                assertEquals("member_allowance", assertFailsWith<TeamFailure> { admission.reserve(admin.principal, 60, "claude-opus-test") }.code)
+                admission.settle(other, 10)
+                assertEquals(10, admission.capacity(readyAlice).chargedAndReservedUnits)
+                admission.observe(updated.id, listOf(AccountQuota(updated.id, "seven_day", .96, System.currentTimeMillis(), System.currentTimeMillis() + 3_600_000)))
+                assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { admission.reserve(admin.principal, 20, "claude-opus-test") }.code)
+                assertEquals(60, SqlAdmissionStore(database).capacity(admin.principal).chargedAndReservedUnits)
+                val support = service.createMember(admin.principal, "support", Role.MEMBER)
+                admission.configure(admin.principal, MemberPolicy(admin.principal.member.id, 0, 2, null, 5))
+                admission.configure(admin.principal, MemberPolicy(readyAlice.member.id, 0, 2, null, 5))
+                admission.configure(admin.principal, MemberPolicy(support.member.id, 0, 1, null, 1))
+                admission.configurePool(admin.principal, PoolBudget("", 1100))
+                assertEquals(500, admission.capacity(admin.principal).dailyAllowanceUnits)
+                assertEquals(500, admission.capacity(readyAlice).dailyAllowanceUnits)
+                assertEquals(100, admission.capacity(admin.principal, support.member.id).dailyAllowanceUnits)
+                assertEquals(60, admission.capacity(admin.principal).chargedAndReservedUnits)
+                val expired = ProviderCredentials("expired-access", "rotating-refresh", 1)
+                store.upsert(verified, expired, 2, "operation-expired01")
+                val renewals = java.util.concurrent.atomic.AtomicInteger()
+                val refreshing = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) {
+                    renewals.incrementAndGet(); delay(50)
+                    ProviderCredentials("renewed-access", "rotated-refresh", System.currentTimeMillis() + 3_600_000)
+                }
+                store.handover("default", updated.id, accessOnly = true)
+                assertEquals("access_token_expired", assertFailsWith<TeamFailure> { refreshing.fresh(store.find(verified.identity)!!) }.code)
+                assertEquals(0, renewals.get())
+                assertEquals(AccountState.ACCESS_ONLY, store.find(verified.identity)!!.state)
+                store.handover("default", updated.id)
+                coroutineScope { (1..4).map { async { refreshing.fresh(store.find(verified.identity)!!) } }.awaitAll() }
+                assertEquals(1, renewals.get())
+                assertEquals("rotated-refresh", store.credentials("default", updated.id).refreshToken)
+                store.upsert(privateVerified, expired, 1, "operation-expired02")
+                val broken = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { throw IllegalStateException("unknown refresh outcome") }
+                assertFailsWith<TeamFailure> { broken.fresh(store.find(privateVerified.identity)!!) }
+                assertEquals(AccountState.RECONNECT_REQUIRED, store.find(privateVerified.identity)!!.state)
                 // A second service instance uses the same persistent state; migrations are repeatable.
                 database.migrate()
                 val restarted = SqlTeamService(database)
                 assertNull(restarted.bootstrap())
-                assertEquals(2, restarted.members(restarted.authenticate(admin.token)!!).size)
+                assertEquals(3, restarted.members(restarted.authenticate(admin.token)!!).size)
                 restarted.logout(admin.principal)
                 assertNull(service.authenticate(admin.token))
                 database.transaction { c ->

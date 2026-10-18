@@ -63,8 +63,10 @@ private class ImportAccounts : SuspendingCliktCommand(name = "import") {
     private val config by option("--config", help = "Explicit TeamClaude configuration file; otherwise use its XDG location.")
     private val dryRun by option("--dry-run", help = "Parse locally without uploading credentials.").flag()
     private val takeOwnership by option("--take-ownership", help = "Confirm other refreshers have stopped and activate imported accounts.").flag()
+    private val accessOnly by option("--access-only", help = "Activate imported access tokens without refreshing them; useful for temporary acceptance tests.").flag()
     override suspend fun run() {
         require(from == "teamclaude") { "Only --from teamclaude is supported." }
+        require(!(takeOwnership && accessOnly)) { "Choose either refresh ownership or access-only activation." }
         val path = (config ?: sourceConfig()).toPath()
         val info = FileSystem.SYSTEM.metadata(path)
         require(info.isRegularFile && (info.size ?: Long.MAX_VALUE) <= MAX_IMPORT_BYTES)
@@ -83,13 +85,14 @@ private class ImportAccounts : SuspendingCliktCommand(name = "import") {
                 try {
                     val credentials = entry.credentials
                     val result = client.enrollAccount(EnrollAccountRequest(credentials.accessToken, credentials.refreshToken, credentials.expiresAtMillis, randomCode()))
-                    if (takeOwnership) client.handoverAccount(result.account.id)
+                    if (takeOwnership || accessOnly) client.handoverAccount(result.account.id, accessOnly)
                     echo("${if (result.created) "Added" else "Updated"} ${result.account.displayName} (${result.account.id}).")
                 } catch (error: TeamCodeException) { failed++; echo("Failed ${entry.label}: server returned HTTP ${error.statusCode}. Reconnect expired accounts with accounts add.") }
             }
         }
         echo("Import complete: ${entries.size - failed} succeeded, $failed skipped or failed. Source configuration was not modified.")
-        if (!takeOwnership) echo("Stop the source refresher, then activate each account with accounts handover <id> --confirm.")
+        if (accessOnly) echo("Access-only mode: TeamCode will not refresh these tokens. Import again when they expire.")
+        else if (!takeOwnership) echo("Stop the source refresher, then activate each account with accounts handover <id> --confirm.")
         check(failed == 0) { "Some accounts were not imported." }
     }
     private fun sourceConfig(): String {

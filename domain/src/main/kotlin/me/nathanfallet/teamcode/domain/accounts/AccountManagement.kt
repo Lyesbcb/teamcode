@@ -4,8 +4,8 @@ import me.nathanfallet.teamcode.domain.team.*
 
 interface AccountStore : AccountsRepository {
     suspend fun list(teamId: String): List<AccountRecord>
-    suspend fun configure(teamId: String, id: String, displayName: String, disabled: Boolean, priority: Int): AccountRecord
-    suspend fun handover(teamId: String, id: String): AccountRecord
+    suspend fun configure(teamId: String, id: String, displayName: String, disabled: Boolean, priority: Int, poolId: String? = null): AccountRecord
+    suspend fun handover(teamId: String, id: String, accessOnly: Boolean = false): AccountRecord
     suspend fun credentials(teamId: String, id: String): ProviderCredentials
 }
 class AccountManagement(private val store: AccountStore, private val verifier: AccountVerifier) {
@@ -20,13 +20,14 @@ class AccountManagement(private val store: AccountStore, private val verifier: A
         val existing = store.find(verified.identity)
         return store.upsert(verified, credentials, existing?.credentialVersion, operationId)
     }
-    suspend fun configure(actor: Principal, id: String, name: String, disabled: Boolean, priority: Int): AccountRecord {
+    suspend fun configure(actor: Principal, id: String, name: String, disabled: Boolean, priority: Int, poolId: String? = null): AccountRecord {
         actor.requireAdmin()
+        if (poolId != null && !Regex("[a-zA-Z0-9_-]{1,36}").matches(poolId)) throw TeamFailure("invalid_pool", 400, "Use a pool identifier containing letters, digits, underscores or hyphens (up to 36 characters).")
         if (name.isBlank() || name.length > 120 || name.any { it.isISOControl() } || priority !in -100..100) throw TeamFailure("invalid_account", 400, "Use a name up to 120 characters and a priority between -100 and 100.")
-        return store.configure(actor.teamId, id, name, disabled, priority)
+        return store.configure(actor.teamId, id, name, disabled, priority, poolId)
     }
-    suspend fun handover(actor: Principal, id: String): AccountRecord {
+    suspend fun handover(actor: Principal, id: String, accessOnly: Boolean = false): AccountRecord {
         actor.requireAdmin()
-        return store.handover(actor.teamId, id)
+        return store.handover(actor.teamId, id, accessOnly)
     }
 }

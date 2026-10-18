@@ -2,12 +2,19 @@ package me.nathanfallet.teamcode
 
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import java.util.Base64
 import me.nathanfallet.teamcode.domain.accounts.AccountManagement
+import me.nathanfallet.teamcode.infrastructure.database.SqlAdmissionStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlDirectiveService
+import me.nathanfallet.teamcode.infrastructure.database.SqlModelPolicyStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlCredentialSource
+import me.nathanfallet.teamcode.infrastructure.gateway.ClaudePoolGateway
+import me.nathanfallet.teamcode.infrastructure.gateway.QuotaMonitor
+import me.nathanfallet.teamcode.infrastructure.providers.ClaudeTransport
 import me.nathanfallet.teamcode.infrastructure.database.SqlAccountStore
 import me.nathanfallet.teamcode.infrastructure.providers.ClaudeAccountVerifier
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
@@ -32,9 +39,26 @@ fun main() {
         requireNotNull(System.getenv("TEAMCODE_DATABASE_PASSWORD")) { "Set TEAMCODE_DATABASE_PASSWORD." },
     ).also { it.migrate() } else null
     val providerHttp = HttpClient(CIO) { followRedirects = false; install(HttpTimeout) { connectTimeoutMillis = 10_000; requestTimeoutMillis = 30_000 } }
-    val accounts = database?.let {
-        val key = Base64.getDecoder().decode(requireNotNull(System.getenv("TEAMCODE_ENCRYPTION_KEY")) { "Set TEAMCODE_ENCRYPTION_KEY to a base64-encoded 32-byte key." })
-        AccountManagement(SqlAccountStore(it, CredentialCipher(key)), ClaudeAccountVerifier(providerHttp))
+    val cipher = database?.let { CredentialCipher(Base64.getDecoder().decode(requireNotNull(System.getenv("TEAMCODE_ENCRYPTION_KEY")) { "Set TEAMCODE_ENCRYPTION_KEY to a base64-encoded 32-byte key." })) }
+    val accountStore = database?.let { SqlAccountStore(it, cipher!!) }
+    val accounts = accountStore?.let { AccountManagement(it, ClaudeAccountVerifier(providerHttp)) }
+    val admission = database?.let { SqlAdmissionStore(it) }
+    val modelPolicies = database?.let { SqlModelPolicyStore(it) }
+    val directives = database?.let { SqlDirectiveService(it) }
+    val transport = ClaudeTransport(providerHttp)
+    val credentialSource = database?.let { SqlCredentialSource(it, cipher!!, transport::refresh) }
+    val gateway = if (database != null) ClaudePoolGateway(admission!!, credentialSource!!, transport, modelPolicies!!) else FixtureGatewayService()
+    val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    if (accountStore != null) {
+        val monitor = QuotaMonitor(accountStore, credentialSource!!, admission!!, transport)
+        workers.launch {
+            while (isActive) {
+                try { monitor.sample(); admission.maintain(); directives!!.update() }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) { System.err.println("TeamCode quota sampling is temporarily unavailable.") }
+                delay(60_000)
+            }
+        }
     }
     val team = database?.let { SqlTeamService(it) }
     val initialPassword = runBlocking { team?.bootstrap() }
@@ -46,10 +70,10 @@ fun main() {
     }
     val token = if (mode == "fixture") requireNotNull(System.getenv("TEAMCODE_ACCESS_TOKEN")) { "Set TEAMCODE_ACCESS_TOKEN for fixture mode." } else ""
     val koin = koinApplication { modules(module {
-        single<GatewayService> { FixtureGatewayService() }
+        single<GatewayService> { gateway }
         if (team != null) single<TeamService> { team }
     }) }
     try {
-        embeddedServer(Netty, host = host, port = port) { configureGateway(koin.koin.get(), token, team, origin, accounts) }.start(wait = true)
-    } finally { koin.close(); providerHttp.close(); database?.close() }
+        embeddedServer(Netty, host = host, port = port) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies) }.start(wait = true)
+    } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

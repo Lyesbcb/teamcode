@@ -21,7 +21,9 @@ data class AccountRecord(
     val priority: Int,
     val state: AccountState,
 )
-enum class AccountState { PENDING_HANDOVER, READY, RECONNECT_REQUIRED }
+enum class AccountState { PENDING_HANDOVER, READY, ACCESS_ONLY, RECONNECT_REQUIRED;
+    val canServe: Boolean get() = this == READY || this == ACCESS_ONLY
+}
 
 interface AccountVerifier {
     suspend fun verify(teamId: String, credentials: ProviderCredentials): VerifiedProviderAccount
@@ -40,3 +42,5 @@ sealed interface EnrollmentResult {
 }
 
 class CredentialVersionConflict : Exception("Account credentials changed during enrollment. Retry using current credentials.")
+
+interface CredentialSource { suspend fun fresh(account: AccountRecord): ProviderCredentials }

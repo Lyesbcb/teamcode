@@ -2,7 +2,7 @@
 
 An open-source, self-hosted model gateway for teams: pooled provider accounts, fair access, predictive capacity management, a web dashboard, and a native Kotlin Multiplatform CLI.
 
-**Early development.** Team authentication, member administration, encrypted provider enrollment, and the native CLI are implemented. Inference still uses the explicit synthetic transport fixture; real pool routing is the next slice. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
+**Early development.** Claude Max inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. A real Claude Code → native proxy → TeamCode → Haiku acceptance run has passed. Codex, cross-provider translation and OS service installation remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
 
 ## Run the team server
 
@@ -33,7 +33,7 @@ teamcode accounts handover ACCOUNT_ID --confirm
 teamcode logout
 ```
 
-The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` into the hidden prompt. Credentials are sent to TeamCode, where the provider identity and Max subscription are checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Expired credentials require `accounts add`.
+The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` into the hidden prompt. Credentials are sent to TeamCode, where the provider identity and Max subscription are checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Expired credentials require `accounts add`. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
 
 ## Try the transport fixture
 
@@ -59,7 +59,7 @@ export TEAMCODE_LOCAL_TOKEN="$(openssl rand -hex 32)"
 
 The CLI saves the self-hosted server URL and authentication in `$XDG_CONFIG_HOME/teamcode/config.json`, falling back to `~/.config/teamcode/config.json` (directory 0700/file 0600 on POSIX). Other invocations reuse it. Omit `--server` to be prompted for the URL. `configure` is a development helper for an existing test token. Normal installations use `login`. Do not enter secrets into shell history or command arguments.
 
-The proxy accepts authenticated JSON `POST /v1/messages` on `127.0.0.1:8789` and streams the explicit synthetic fixture. It is not ready to run real coding agents. Host/port environment variables for the central fixture: `TEAMCODE_HOST` (default loopback) and `TEAMCODE_PORT` (default 8080).
+The proxy accepts authenticated JSON `POST /v1/messages` on `127.0.0.1:8789`. In server mode it routes to eligible imported Claude Max accounts; in fixture mode it returns synthetic events. Point Claude Code at this loopback origin with `ANTHROPIC_BASE_URL` and use the local proxy token as `ANTHROPIC_API_KEY`. Host/port environment variables for the central fixture: `TEAMCODE_HOST` (default loopback) and `TEAMCODE_PORT` (default 8080).
 
 ## Verification
 
@@ -85,3 +85,22 @@ presentation -> api
 Seven modules, root package `me.nathanfallet.teamcode`. The CLI is Kotlin/Native, not a JVM wrapper. The server is Ktor/JVM. No private dependencies or ControlResell services are required.
 
 Read [architecture](docs/architecture.md), [product](docs/product.md), [roadmap](docs/roadmap.md) and [contributing](CONTRIBUTING.md). Original code is Apache-2.0.
+
+## Capacity and model policies
+
+The dashboard exposes member weights, per-member concurrency and optional hard daily caps, pool budgets, observed provider quota windows, model/effort restrictions and current agent guidance. Daily credits are an internal team budget, not a conversion of Max subscription percentages. With weights 5/5/1 and a budget of 1,100 credits, members receive 500/500/100; changing weights does not erase spend. Reservations and actual usage survive restarts. Separate pool identifiers isolate accounts for protected members.
+
+Default model policy permits `claude-*` and denies `*fable*`. Administrators can set allowed/denied patterns and reasoning efforts in `/dashboard/models`. Requests are rejected before dispatch when a policy is violated. No effort is silently replaced.
+
+`teamcode agents watch` prints expiring guidance updates. `teamcode agents hint --format claude` emits Claude Code PreToolUse additional context; receipt records mean delivery by the CLI, not proof that the model complied. Server admission enforces concurrency and pacing independently. See [capacity behavior](docs/capacity.md).
+
+Real-provider acceptance is explicitly opt-in and never runs in CI:
+
+```sh
+python3 scripts/acceptance-provider.py \
+  --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
+  --jar app/build/libs/app-all.jar \
+  --source /path/to/teamclaude.json
+```
+
+It starts its own MySQL/server/proxy, imports in access-only mode, verifies a repeated import, asks an isolated real Claude Code process for one short Haiku response, checks metadata-only server logs and destroys its own test database. It never edits the source config or refreshes provider credentials.

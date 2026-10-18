@@ -13,6 +13,9 @@ import io.ktor.utils.io.*
 import java.security.MessageDigest
 import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.accounts.AccountManagement
+import me.nathanfallet.teamcode.domain.capacity.AdmissionStore
+import me.nathanfallet.teamcode.domain.capacity.DirectiveService
+import me.nathanfallet.teamcode.domain.policy.ModelPolicyStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
@@ -23,13 +26,14 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
     install(ContentNegotiation) { json(Serialization.json) }
     install(StatusPages) {
         exception<TeamFailure> { call, error ->
+            if (error.status == 429) call.response.header(HttpHeaders.RetryAfter, "60")
             if (call.request.path().startsWith("/dashboard")) call.respondText(page("Request failed", "<p>${escape(error.message ?: "Request failed.")}</p><a href='/dashboard'>Back to dashboard</a>"), ContentType.Text.Html, HttpStatusCode.fromValue(error.status))
             else call.respond(HttpStatusCode.fromValue(error.status), ApiError(ErrorDetail(error.code, error.message ?: "Request failed.")))
         }
@@ -73,10 +77,13 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
     routing {
         if (team != null) { teamRoutes(team); dashboardRoutes(team, publicOrigin) }
         if (accounts != null) accountRoutes(accounts, publicOrigin)
+        if (admission != null && team != null) capacityRoutes(admission, team, publicOrigin)
+        if (directives != null) directiveRoutes(directives)
+        if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
         get("/health") { call.respondText("OK") }
         get<CapabilitiesResource> {
             call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = gateway.status().mode,
-                features = listOf("status", "messages.fixture.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
+                features = listOf("status", if (gateway.status().mode == "fixture") "messages.fixture.streaming" else "messages.claude-max.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
         }
         get<StatusResource> {
             val status = gateway.status()
@@ -87,13 +94,14 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             val bytes = call.receiveChannel().readBounded(MAX_BODY_BYTES)
             val value = try { Serialization.json.parseToJsonElement(bytes.decodeToString()) as? JsonObject }
                 catch (_: IllegalArgumentException) { null } ?: throw InvalidRequest("A JSON object is required.")
-            if (value["stream"] != JsonPrimitive(true)) throw InvalidRequest("The development fixture requires stream=true.")
+            if (value["stream"] != JsonPrimitive(true)) throw InvalidRequest("This endpoint requires stream=true.")
             val model = value["model"] as? JsonPrimitive
             if (model?.isString != true || model.content.isBlank()) throw InvalidRequest("A model name is required.")
             if (value["messages"] !is JsonArray) throw InvalidRequest("A messages array is required.")
-            val headers = listOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id")
+            val headers = listOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id", "user-agent")
                 .mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
-            gateway.forward(GenerationRequest(bytes, headers)) { head, chunks ->
+            gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null)) { head, chunks ->
+                head.headers.filterKeys { it.lowercase() in setOf("retry-after", "x-teamcode-request-id", "x-teamcode-account-id") }.forEach { (name, value) -> call.response.header(name, value) }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")
                 val consumed = CompletableDeferred<Unit>()

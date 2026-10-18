@@ -60,11 +60,14 @@ class TeamCodeClient(
     suspend fun changePassword(current: String, replacement: String): SuccessResponse =
         request("/api/v1/auth/password", HttpMethod.Post, PasswordRequest(current, replacement))
     suspend fun logout(): SuccessResponse = request("/api/v1/auth/logout", HttpMethod.Post)
+    suspend fun directive(): DirectiveResponse = request("/api/v1/directives/current", HttpMethod.Get)
+    suspend fun acknowledgeDirective(id: String, stage: String): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage))
+    suspend fun capacity(): CapacityView = request("/api/v1/capacity", HttpMethod.Get)
     suspend fun accounts(): List<AccountView> = request("/api/v1/accounts", HttpMethod.Get)
     suspend fun enrollAccount(input: EnrollAccountRequest): EnrollAccountResponse = request("/api/v1/accounts", HttpMethod.Post, input)
-    suspend fun handoverAccount(id: String): AccountView {
+    suspend fun handoverAccount(id: String, accessOnly: Boolean = false): AccountView {
         require(Regex("[a-zA-Z0-9-]{1,36}").matches(id))
-        return request("/api/v1/accounts/$id/handover", HttpMethod.Post)
+        return request("/api/v1/accounts/$id/${if (accessOnly) "access-only" else "handover"}", HttpMethod.Post)
     }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
 
@@ -110,7 +113,7 @@ class TeamCodeClient(
     override fun close() = http.close()
 
     companion object {
-        val FORWARDED_HEADERS: Set<String> = setOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id")
+        val FORWARDED_HEADERS: Set<String> = setOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id", "user-agent")
     }
 }
 

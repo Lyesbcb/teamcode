@@ -16,7 +16,8 @@ class Database(url: String, username: String, password: String) : AutoCloseable 
         maximumPoolSize = 8; connectionTimeout = 5_000; transactionIsolation = "TRANSACTION_READ_COMMITTED"
     })
     fun migrate() { Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate() }
-    suspend fun <T> transaction(block: (Connection) -> T): T = withContext(Dispatchers.IO) {
+    suspend fun <T> transaction(block: (Connection) -> T): T = suspendingTransaction { block(it) }
+    suspend fun <T> suspendingTransaction(block: suspend (Connection) -> T): T = withContext(Dispatchers.IO) {
         source.connection.use { connection ->
             connection.autoCommit = false
             try { val result = block(connection); connection.commit(); result }

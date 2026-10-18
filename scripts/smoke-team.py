@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
                XDG_CONFIG_HOME=str(root / 'config'))
     log = root / 'server.log'
     try:
-        command(['docker', 'run', '-d', '--name', name, '-p', '127.0.0.1::3306',
+        command(['docker', 'run', '-d', '--name', name, '--tmpfs', '/var/lib/mysql:rw,nosuid,size=1g', '-p', '127.0.0.1::3306',
                  '-e', 'MYSQL_DATABASE=teamcode', '-e', 'MYSQL_USER=teamcode',
                  '-e', f'MYSQL_PASSWORD={database_password}', '-e', f'MYSQL_ROOT_PASSWORD={database_password}',
                  'mysql:8.4'])
@@ -149,4 +149,4 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
     finally:
         stop_own_process()
         if container_created:
-            subprocess.run(['docker', 'rm', '-f', name], capture_output=True, check=True)
+            subprocess.run(['docker', 'rm', '-f', '-v', name], capture_output=True, check=True)
