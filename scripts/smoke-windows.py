@@ -125,8 +125,11 @@ try:
         config = Path(env['XDG_CONFIG_HOME']) / 'teamcode/config.json'
 
         def command(*arguments, stdin=None, check=True):
-            result = subprocess.run([binary, *arguments], env=env, input=stdin, text=True,
-                                    encoding='utf-8', capture_output=True, timeout=45)
+            # Keep stdin bytes literal: Python text mode would convert LF to CRLF on Windows.
+            result = subprocess.run([binary, *arguments], env=env,
+                                    input=None if stdin is None else stdin.encode('utf-8'), capture_output=True, timeout=45)
+            result.stdout = result.stdout.decode('utf-8').replace('\r\n', '\n')
+            result.stderr = result.stderr.decode('utf-8').replace('\r\n', '\n')
             assert all(secret not in result.stdout + result.stderr for secret in
                        (team_token, local_token, initial_team_token, initial_password, replacement_password))
             if check:
@@ -267,6 +270,7 @@ try:
 
         agent_source = r'''
         const fs = require('fs'); const http = require('http'); const assert = require('assert');
+        let stage = 'credentials';
         (async () => {
           const name = process.env.TEAMCODE_TEST_AGENT;
           let args = process.argv.slice(2), url, token;
@@ -280,9 +284,12 @@ try:
             token = process.env.TEAMCODE_LOCAL_TOKEN;
             args = args.slice(0, end-4).concat(args.slice(end));
           }
+          stage = 'stdin';
           assert.strictEqual(fs.readFileSync(0, 'utf8'), 'stdin reaches the child\n');
+          stage = 'capability';
           assert.strictEqual(token.length, 64);
           const body = JSON.stringify({model:'fixture'});
+          stage = 'upstream';
           const reply = await new Promise((resolve, reject) => {
             const request = http.request(url, {method:'POST', headers:{'Content-Type':'application/json',
                 'Content-Length':Buffer.byteLength(body), 'Authorization':'Bearer '+token}}, response => {
@@ -290,16 +297,19 @@ try:
               response.on('data', chunk => text += chunk); response.on('end', () => resolve(text));
             }); request.on('error', reject); request.end(body);
           });
+          stage = 'stream';
           assert(reply.includes('"done":true'));
+          stage = 'descendant';
           const descendant = require('child_process').spawn(process.execPath,
             ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
           descendant.unref();
+          stage = 'record';
           fs.writeFileSync(process.env.TEAMCODE_RUN_RECORD + '.tmp', JSON.stringify({args, cwd:process.cwd(), origin:new URL(url).origin, pid:process.pid, descendant:descendant.pid}));
           fs.renameSync(process.env.TEAMCODE_RUN_RECORD + '.tmp', process.env.TEAMCODE_RUN_RECORD);
           console.log('CHILD_STDOUT_OK'); console.error('CHILD_STDERR_OK');
           if (process.env.TEAMCODE_TEST_WAIT === '1') { setInterval(() => {}, 1000); return; }
           process.exit(37);
-        })().catch(() => { console.error('Synthetic child failed'); process.exit(1); });
+        })().catch(() => { console.error('Synthetic child failed at ' + stage); process.exit(1); });
         '''
         # Standard npm installation shape: wrappers are deliberately not executed by TeamCode.
         for name, script in [('claude', '@anthropic-ai/claude-code/cli.js'), ('codex', '@openai/codex/bin/codex.js')]:
