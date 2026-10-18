@@ -4,6 +4,16 @@ package me.nathanfallet.teamcode.cli.platform
 import kotlinx.cinterop.*
 import platform.windows.GetEnvironmentVariableW
 import me.nathanfallet.teamcode.cli.interop.windows.teamcode_windows_random
+import me.nathanfallet.teamcode.cli.interop.windows.teamcode_windows_arguments
+import platform.windows.LocalFree
+
+/** Read the Unicode command line directly instead of depending on the workstation's ANSI code page. */
+actual fun platformArguments(arguments: Array<String>): Array<String> = memScoped {
+    val count = alloc<IntVar>()
+    val values = checkNotNull(teamcode_windows_arguments(count.ptr))
+    try { Array((count.value - 1).coerceAtLeast(0)) { checkNotNull(values[it + 1]).toKStringFromUtf16() } }
+    finally { LocalFree(values) }
+}
 
 actual fun environment(name: String): String? = memScoped {
     val length = GetEnvironmentVariableW(name, null, 0u)

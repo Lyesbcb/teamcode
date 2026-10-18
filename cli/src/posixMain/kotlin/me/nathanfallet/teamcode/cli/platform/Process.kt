@@ -5,6 +5,8 @@ import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.cli.interop.process.*
 
+actual fun platformArguments(arguments: Array<String>): Array<String> = arguments
+
 actual suspend fun runInteractiveProcess(command: String, arguments: List<String>, overrides: Map<String, String?>, quiet: Boolean): Int {
     val child = memScoped {
         val values = mutableMapOf<String, String>()

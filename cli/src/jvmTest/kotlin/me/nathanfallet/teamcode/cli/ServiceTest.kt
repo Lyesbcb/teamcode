@@ -52,4 +52,17 @@ class ServiceTest {
             assertFalse(response.bodyAsText().contains(token))
         } finally { sdk.close() }
     }
+
+    @Test fun windowsTaskUsesTheCurrentUserWithoutEmbeddingCredentialsOrRequiringElevation() {
+        val windows = ServiceSettings("a".repeat(32), 8789, token, "C:\\Program Files\\TeamCode\\teamcode.exe",
+            "C:\\Users\\équipe\\.config\\teamcode\\config.json", "C:\\Users\\équipe\\.config\\teamcode\\service-task.xml", "windows", "S-1-5-21-123-456-789-1001")
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(ByteArrayInputStream(serviceDefinition(windows).toByteArray()))
+        assertEquals(windows.executable, document.getElementsByTagName("Command").item(0).textContent)
+        assertEquals("\"service\" \"serve\" \"--config\" \"${windows.config}\"", document.getElementsByTagName("Arguments").item(0).textContent)
+        assertEquals("InteractiveToken", document.getElementsByTagName("LogonType").item(0).textContent)
+        assertEquals("LeastPrivilege", document.getElementsByTagName("RunLevel").item(0).textContent)
+        assertEquals("IgnoreNew", document.getElementsByTagName("MultipleInstancesPolicy").item(0).textContent)
+        assertEquals("false", document.getElementsByTagName("AllowHardTerminate").item(0).textContent)
+        assertFalse(serviceDefinition(windows).contains(token))
+    }
 }

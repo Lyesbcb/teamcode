@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run the Windows native CLI with synthetic authentication, ACL inspection and real child processes."""
 import argparse
+import concurrent.futures
+import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -24,16 +26,22 @@ node = Path(shutil.which('node')).resolve()
 team_token = secrets.token_hex(32)
 local_token = secrets.token_hex(32)
 calls = []
+checks = []
+stream_started = threading.Event()
+stream_release = threading.Event()
+stream_release.set()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
     def do_GET(self):
+        checks.append(self.path)
         if self.headers.get('Authorization') != 'Bearer ' + team_token:
             self.send_error(401)
             return
-        payload = ({'mode': 'fixture', 'activeRequests': 0, 'completedRequests': len(calls)}
+        payload = ({'id': 'member', 'username': 'synthetic', 'role': 'MEMBER', 'disabled': False, 'passwordChangeRequired': False}
+                   if self.path.endswith('/me') else {'mode': 'fixture', 'activeRequests': 0, 'completedRequests': len(calls)}
                    if self.path.endswith('/status') else {'serverVersion': 'test', 'mode': 'fixture', 'features': []})
         data = json.dumps(payload).encode()
         self.send_response(200)
@@ -54,6 +62,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'data: {"start":true}\n\n')
         self.wfile.flush()
+        stream_started.set()
+        assert stream_release.wait(30), 'Test did not release the active stream'
         time.sleep(.4)
         self.wfile.write(b'data: {"done":true}\n\n')
         self.wfile.flush()
@@ -62,8 +72,11 @@ server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 origin = f'http://127.0.0.1:{server.server_port}'
 proxy = None
+service_env = None
+service_installed = False
+directory = tempfile.mkdtemp(prefix='teamcode-windows-')
 try:
-    with tempfile.TemporaryDirectory(prefix='teamcode-windows-') as directory:
+    with contextlib.nullcontext(directory):
         root = Path(directory) / 'Unicode équipe with spaces'
         root.mkdir()
         env = dict(os.environ, XDG_CONFIG_HOME=str(root / 'configuration'), TEAMCODE_LOCAL_TOKEN=local_token)
@@ -74,7 +87,7 @@ try:
                                     encoding='utf-8', capture_output=True, timeout=45)
             assert team_token not in result.stdout + result.stderr and local_token not in result.stdout + result.stderr
             if check:
-                assert result.returncode == 0, f'{arguments}: {result.stdout}\n{result.stderr}'
+                assert result.returncode == 0, f'{arguments} (upstream checks: {len(checks)}): {result.stdout}\n{result.stderr}'
             return result
 
         command('configure', '--server', origin, stdin=team_token + '\n')
@@ -199,10 +212,88 @@ try:
             except OSError:
                 pass
         assert config.read_bytes() == original_config
-        print('PASS: native Windows private ACLs, Unicode config, credential isolation, progressive SSE, literal agent arguments, npm launchers, stdio, exit code and cleanup')
+        print('PASS: native Windows private ACLs, Unicode config, credential isolation, progressive SSE, literal agent arguments, npm launchers, stdio, exit code and cleanup', flush=True)
+
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            service_port = listener.getsockname()[1]
+        service_env = env.copy()
+        service_installed = True
+        command('service', 'install', '--port', str(service_port))
+        settings = json.loads(config.with_name('service.json').read_text(encoding='utf-8'))
+        service_origin = f'http://127.0.0.1:{service_port}'
+
+        def service_health(expected=True):
+            for _ in range(150):
+                try:
+                    request = urllib.request.Request(service_origin + '/_teamcode/service',
+                        headers={'Authorization': 'Bearer ' + settings['localToken']})
+                    with urllib.request.urlopen(request, timeout=1) as response:
+                        running = json.load(response) == {'id': settings['id'], 'serverUrl': origin}
+                except OSError:
+                    running = False
+                if running == expected:
+                    return
+                time.sleep(.2)
+            print(command('service', 'logs', check=False).stdout, flush=True)
+            raise AssertionError('Windows service did not reach expected state')
+
+        service_health()
+        command('service', 'install', '--port', str(service_port))
+        assert json.loads(config.with_name('service.json').read_text(encoding='utf-8')) == settings
+        assert 'Running: true' in command('service', 'status').stdout
+        task = Path(settings['registration'])
+        assert team_token not in task.read_text(encoding='utf-8') and settings['localToken'] not in task.read_text(encoding='utf-8')
+        assert '<LogonType>InteractiveToken</LogonType>' in task.read_text(encoding='utf-8')
+        # Reuse is checked through the actual native child, not just an identity ping.
+        env['TEAMCODE_TEST_AGENT'] = 'claude'
+        record = root / 'service-agent.json'
+        env['TEAMCODE_RUN_RECORD'] = str(record)
+        result = command('run', 'claude', '--', *arguments, stdin='stdin reaches the child\n', check=False)
+        assert result.returncode == 37
+        assert json.loads(record.read_text(encoding='utf-8'))['origin'] == service_origin
+        service_health()
+
+        def service_inference():
+            request = urllib.request.Request(service_origin + '/v1/messages', b'{"model":"fixture"}',
+                {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + settings['localToken']})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read()
+
+        stream_started.clear()
+        stream_release.clear()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            response = pool.submit(service_inference)
+            assert stream_started.wait(5)
+            stop = pool.submit(command, 'service', 'stop')
+            time.sleep(2)
+            assert not response.done(), 'Windows service interrupted an accepted stream'
+            stream_release.set()
+            assert b'"done":true' in response.result(timeout=10)
+            stop.result(timeout=30)
+        service_health(expected=False)
+        command('service', 'start')
+        service_health()
+        command('service', 'restart')
+        service_health()
+        command('service', 'uninstall')
+        service_health(expected=False)
+        assert config.read_bytes() == original_config and not task.exists()
+        command('service', 'uninstall')
+        service_installed = False
+        print('PASS: Windows Task Scheduler installation, idempotence, authenticated reuse, graceful drain, restart and uninstall', flush=True)
 finally:
+    stream_release.set()
+    if service_installed:
+        # Only this test's random task and isolated settings may be removed.
+        cleanup = subprocess.run([binary, 'service', 'uninstall'], env=service_env, capture_output=True, timeout=60)
+        service_installed = cleanup.returncode != 0
     if proxy is not None and proxy.poll() is None:
         proxy.terminate()
         proxy.wait(timeout=10)
     server.shutdown()
     server.server_close()
+    if not service_installed:
+        shutil.rmtree(directory)
+    else:
+        print('Windows service cleanup failed; isolated test directory retained for diagnosis.', flush=True)

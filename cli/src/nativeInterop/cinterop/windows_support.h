@@ -7,8 +7,11 @@
 #include <bcrypt.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <shellapi.h>
 #include <stdlib.h>
 #include <wchar.h>
+
+static inline wchar_t **teamcode_windows_arguments(int *count) { return CommandLineToArgvW(GetCommandLineW(), count); }
 
 static inline int teamcode_windows_random(void *buffer, unsigned long count) {
     return BCryptGenRandom(NULL, (PUCHAR)buffer, count, BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
@@ -43,13 +46,14 @@ static inline int teamcode_windows_owner_matches(const wchar_t *path, PSID expec
 static inline int teamcode_windows_write_private(const wchar_t *path, const wchar_t *parent,
         const wchar_t *temporary, const void *bytes, unsigned long length) {
     wchar_t *sid = teamcode_windows_user_sid();
-    if (!sid) return 0;
+    if (!sid) return 1;
     size_t capacity = 64 + 2 * wcslen(sid);
     wchar_t *sddl = (wchar_t *)calloc(capacity, sizeof(wchar_t));
     PSECURITY_DESCRIPTOR descriptor = NULL;
     int success = 0;
     HANDLE file = INVALID_HANDLE_VALUE;
     int created = 0;
+    int stage = 2;
     if (!sddl) goto cleanup;
     swprintf(sddl, capacity, L"O:%lsD:P(A;OICI;FA;;;%ls)", sid, sid);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL)) goto cleanup;
@@ -59,36 +63,48 @@ static inline int teamcode_windows_write_private(const wchar_t *path, const wcha
     BOOL defaulted = FALSE, present = FALSE;
     if (!GetSecurityDescriptorOwner(descriptor, &owner, &defaulted) ||
         !GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) || !present || !dacl) goto cleanup;
+    stage = 3;
     if (!CreateDirectoryW(parent, &attributes) && GetLastError() != ERROR_ALREADY_EXISTS) goto cleanup;
+    stage = 4;
     DWORD parent_flags = GetFileAttributesW(parent);
     if (parent_flags == INVALID_FILE_ATTRIBUTES || !(parent_flags & FILE_ATTRIBUTE_DIRECTORY) ||
         (parent_flags & FILE_ATTRIBUTE_REPARSE_POINT) || !teamcode_windows_owner_matches(parent, owner)) goto cleanup;
+    stage = 5;
     if (SetNamedSecurityInfoW((wchar_t *)parent, SE_FILE_OBJECT,
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL) != ERROR_SUCCESS) goto cleanup;
     DWORD destination_flags = GetFileAttributesW(path);
+    stage = 6;
     if (destination_flags != INVALID_FILE_ATTRIBUTES &&
         ((destination_flags & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) || !teamcode_windows_owner_matches(path, owner))) goto cleanup;
+    stage = 7;
     file = CreateFileW(temporary, GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) goto cleanup;
     created = 1;
+    stage = 8;
     DWORD offset = 0;
     while (offset < length) {
         DWORD written = 0;
         if (!WriteFile(file, (const char *)bytes + offset, length - offset, &written, NULL) || written == 0) goto cleanup;
         offset += written;
     }
+    stage = 9;
     if (!FlushFileBuffers(file)) goto cleanup;
     CloseHandle(file);
     file = INVALID_HANDLE_VALUE;
-    if (!MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) goto cleanup;
-    success = 1;
+    stage = 10;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        if (MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { success = 1; break; }
+        DWORD error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) break;
+        Sleep(25); /* A concurrent token read may briefly hold a non-delete-sharing handle. */
+    }
 cleanup:
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     if (created && !success) DeleteFileW(temporary);
     if (descriptor) LocalFree(descriptor);
     free(sddl);
     LocalFree(sid);
-    return success;
+    return success ? 0 : stage;
 }
 
 /* Duplicate only standard streams; do not make arbitrary parent handles inheritable. */

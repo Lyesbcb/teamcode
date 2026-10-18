@@ -75,10 +75,14 @@ private class Configure : SuspendingCliktCommand(name = "configure") {
         echo("TeamCode access token (stdin; do not pass secrets as command arguments):", err = true)
         val accessToken = readlnOrNull()?.trim().orEmpty()
         val config = CliConfig(normalized, accessToken)
-        sdk(config).use { client ->
-            client.capabilities() // Do not save an unverified credential or arbitrary redirect target.
-        }
-        ConfigStore().save(config)
+        try {
+            sdk(config).use { client -> client.capabilities() } // Verify before saving a credential.
+        } catch (error: CancellationException) { throw error }
+        catch (error: Exception) { throw CliOperationException("server_verification_${error::class.simpleName.orEmpty().filter { it.isLetterOrDigit() }}") }
+        try { ConfigStore().save(config) }
+        catch (error: CancellationException) { throw error }
+        catch (error: CliOperationException) { throw error }
+        catch (error: Exception) { throw CliOperationException("configuration_write_${error::class.simpleName.orEmpty().filter { it.isLetterOrDigit() }}") }
         echo("Configuration saved to ${configPath()}.")
     }
 }
@@ -121,8 +125,9 @@ internal fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.
 }
 
 fun main(args: Array<String>): Unit = runBlocking {
-    try { Cli().main(args) }
+    try { Cli().main(platformArguments(args)) }
     catch (error: CancellationException) { throw error }
+    catch (error: CliOperationException) { SystemExit.fail("TeamCode command failed (${error.code}). Check server connectivity, authentication and private file permissions.") }
     catch (_: Exception) {
         // Never print exception chains from TLS, JSON, file paths or remote servers: they may carry credentials.
         SystemExit.fail("TeamCode command failed. Check the server URL, authentication, file permissions and server availability.")
@@ -130,3 +135,8 @@ fun main(args: Array<String>): Unit = runBlocking {
 }
 
 expect object SystemExit { fun fail(message: String): Nothing; fun exit(code: Int): Nothing }
+
+/** Safe operation identifiers only; never print raw platform/HTTP exception messages. */
+class CliOperationException(val code: String) : Exception() {
+    init { require(Regex("[a-zA-Z0-9_]{1,120}").matches(code)) }
+}

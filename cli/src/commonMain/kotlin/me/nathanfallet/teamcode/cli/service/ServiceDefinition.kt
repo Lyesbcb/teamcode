@@ -23,7 +23,8 @@ internal class ServiceSettings(
         listOf(executable, config, registration).forEach { path ->
             require(path.toPath().isAbsolute && path.none { it.code < 32 || it.code == 127 })
         }
-        require(os in setOf("macos", "linux") && userId.all { it.isDigit() } && userId.isNotEmpty())
+        require(os in setOf("macos", "linux", "windows"))
+        require(if (os == "windows") Regex("S-1-[0-9-]{1,180}").matches(userId) else userId.isNotEmpty() && userId.all { it.isDigit() })
     }
     val label: String get() = "me.nathanfallet.teamcode.$id"
     override fun toString() = "ServiceSettings(id=$id, port=$port, localToken=[REDACTED])"
@@ -31,6 +32,7 @@ internal class ServiceSettings(
 
 internal fun servicePath(config: String) = config.toPath().parent!!.resolve("service.json").toString()
 internal fun serviceLogPath(config: String) = config.toPath().parent!!.resolve("service.log").toString()
+internal fun serviceStopPath(config: String) = config.toPath().parent!!.resolve("service.stop").toString()
 internal fun randomHex(bytes: Int) = secureRandomBytes(bytes).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
 
 internal fun loadService(config: String): ServiceSettings? {
@@ -46,7 +48,27 @@ internal fun serviceDefinition(settings: ServiceSettings): String {
     fun xml(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
     fun unit(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%").replace("$", "$$") + "\""
     val arguments = listOf(settings.executable, "service", "serve", "--config", settings.config)
-    return if (settings.os == "macos") """
+    return if (settings.os == "windows") """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+        <RegistrationInfo><Description>TeamCode local authenticated proxy</Description></RegistrationInfo>
+        <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(settings.userId)}</UserId></LogonTrigger></Triggers>
+        <Principals><Principal id="TeamCodeUser"><UserId>${xml(settings.userId)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+        <Settings>
+        <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+        <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+        <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+        <AllowHardTerminate>false</AllowHardTerminate>
+        <StartWhenAvailable>true</StartWhenAvailable>
+        <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+        <AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden>
+        <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+        <RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure>
+        </Settings>
+        <Actions Context="TeamCodeUser"><Exec><Command>${xml(settings.executable)}</Command>
+        <Arguments>${xml(arguments.drop(1).joinToString(" ", transform = ::quoteWindowsArgument))}</Arguments></Exec></Actions>
+        </Task>
+    """.trimIndent() + "\n" else if (settings.os == "macos") """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><dict>

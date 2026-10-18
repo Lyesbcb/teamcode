@@ -15,6 +15,17 @@ import me.nathanfallet.teamcode.cli.platform.*
 import me.nathanfallet.teamcode.cli.proxy.proxyServer
 import me.nathanfallet.teamcode.client.TeamCodeClient
 import kotlin.time.Clock
+import okio.FileSystem
+import okio.Path.Companion.toPath
+
+internal fun stopRequested(settings: ServiceSettings): Boolean {
+    if (serviceStopRequested()) return true
+    if (settings.os != "windows") return false
+    val path = serviceStopPath(settings.config).toPath()
+    val metadata = FileSystem.SYSTEM.metadataOrNull(path) ?: return false
+    require(metadata.isRegularFile && metadata.symlinkTarget == null && (metadata.size ?: 0) <= 64)
+    return FileSystem.SYSTEM.read(path) { readUtf8() } == settings.id
+}
 
 /** A capability alone is insufficient: verify the installation ID and fixed upstream origin. */
 internal suspend fun serviceResponds(settings: ServiceSettings, origin: String): Boolean = try {
@@ -53,8 +64,8 @@ internal suspend fun serve(settings: ServiceSettings) = coroutineScope {
         val store = ConfigStore(settings.config)
         var config = store.load()
         if (config == null) report("Waiting for saved authentication. Run teamcode login; no browser is opened by the service.")
-        while (config == null && !serviceStopRequested()) { delay(1_000); config = store.load() }
-        if (config == null) return@coroutineScope
+        while (config == null && !stopRequested(settings)) { delay(1_000); config = store.load() }
+        if (config == null || stopRequested(settings)) return@coroutineScope
         val origin = config.serverUrl
         val client = TeamCodeClient(origin, {
             store.load()?.let { latest ->
@@ -69,7 +80,7 @@ internal suspend fun serve(settings: ServiceSettings) = coroutineScope {
             // the proxy lifetime and the outer command loop, so install our handler last.
             installServiceSignalHandlers()
             report("Local proxy is listening. Upstream connectivity and authentication are checked on each request.")
-            while (!serviceStopRequested()) delay(100)
+            while (!stopRequested(settings)) delay(250)
             report("Stopping: draining existing requests for up to ten minutes.")
         } finally {
             withContext(NonCancellable) { server.stop(600_000, 610_000); client.close() }

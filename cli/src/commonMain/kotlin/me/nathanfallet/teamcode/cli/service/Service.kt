@@ -21,11 +21,14 @@ class Service : SuspendingNoOpCliktCommand(name = "service") {
 private fun settings(config: String, port: Int, executable: String?): ServiceSettings {
     val platform = servicePlatform()
     require(platform.userId != "0") { "Install a user service without sudo. System service installation is not available yet." }
-    val home = requireNotNull(environment("HOME")) { "Cannot locate the user home directory." }
+    val home = requireNotNull(environment("HOME") ?: environment("USERPROFILE")) { "Cannot locate the user home directory." }
     val id = randomHex(16)
     val label = "me.nathanfallet.teamcode.$id"
-    val registration = if (platform.os == "macos") "$home/Library/LaunchAgents/$label.plist"
-        else "${config.toPath().parent!!.parent}/systemd/user/$label.service"
+    val registration = when (platform.os) {
+        "macos" -> "$home/Library/LaunchAgents/$label.plist"
+        "windows" -> config.toPath().parent!!.resolve("service-task.xml").toString()
+        else -> "${config.toPath().parent!!.parent}/systemd/user/$label.service"
+    }
     return ServiceSettings(id, port, randomHex(32), executable ?: platform.executable, config, registration, platform.os, platform.userId)
 }
 
@@ -61,7 +64,34 @@ private class Install : SuspendingCliktCommand(name = "install") {
 private suspend fun manager(settings: ServiceSettings, action: String, checkResult: Boolean = true): Int {
     val command: String
     val args: List<String>
-    if (settings.os == "macos") {
+    if (settings.os == "windows") {
+        val system = requireNotNull(environment("SystemRoot")) + "\\System32"
+        if (action in setOf("status", "active")) {
+            command = "$system\\WindowsPowerShell\\v1.0\\powershell.exe"
+            val script = """
+                ${'$'}ErrorActionPreference = 'Stop'
+                try {
+                    ${'$'}scheduler = New-Object -ComObject 'Schedule.Service'
+                    ${'$'}scheduler.Connect()
+                    ${'$'}task = ${'$'}scheduler.GetFolder('\').GetTasks(1) | Where-Object { ${'$'}_.Name -eq ${'$'}env:TEAMCODE_SERVICE_TASK }
+                    if (-not ${'$'}task) { exit 3 }
+                    if (${'$'}env:TEAMCODE_SERVICE_OPERATION -eq 'active' -and ${'$'}task.GetInstances(0).Count -eq 0) { exit 3 }
+                    exit 0
+                } catch { exit 2 }
+            """.trimIndent()
+            args = listOf("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+        } else {
+            command = "$system\\schtasks.exe"
+            args = when (action) {
+                "load" -> listOf("/Create", "/TN", settings.label, "/XML", settings.registration)
+                "enable" -> listOf("/Change", "/TN", settings.label, "/Enable")
+                "disable" -> listOf("/Change", "/TN", settings.label, "/Disable")
+                "start" -> listOf("/Run", "/TN", settings.label)
+                "delete" -> listOf("/Delete", "/TN", settings.label, "/F")
+                else -> error("Unsupported Task Scheduler operation.")
+            }
+        }
+    } else if (settings.os == "macos") {
         command = "/bin/launchctl"
         val domain = "gui/${settings.userId}"
         val target = "$domain/${settings.label}"
@@ -78,7 +108,9 @@ private suspend fun manager(settings: ServiceSettings, action: String, checkResu
             else listOf(action, if (action == "enable") settings.registration else "${settings.label}.service")
     }
     val result = withTimeout(if (action in setOf("stop", "restart")) 670_000L else 15_000L) {
-        runInteractiveProcess(command, args, emptyMap(), quiet = action == "status")
+        runInteractiveProcess(command, args, if (settings.os == "windows") mapOf(
+            "TEAMCODE_SERVICE_TASK" to settings.label, "TEAMCODE_SERVICE_OPERATION" to action,
+        ) else emptyMap(), quiet = action in setOf("status", "active"))
     }
     if (checkResult) check(result == 0) { "The OS service manager rejected the operation." }
     return result
@@ -86,12 +118,40 @@ private suspend fun manager(settings: ServiceSettings, action: String, checkResu
 
 private suspend fun start(settings: ServiceSettings) {
     require(ownsRegistration(settings)) { "The service registration is missing. Run service install." }
+    if (settings.os == "windows") {
+        when (manager(settings, "status", false)) {
+            3 -> manager(settings, "load")
+            0 -> Unit
+            else -> error("Cannot query Windows Task Scheduler.")
+        }
+        FileSystem.SYSTEM.delete(serviceStopPath(settings.config).toPath(), mustExist = false)
+        manager(settings, "enable")
+        manager(settings, "start")
+        return
+    }
     if (settings.os == "macos" && manager(settings, "status", false) != 0) manager(settings, "load")
     else manager(settings, "start")
 }
 
 private suspend fun stop(settings: ServiceSettings) {
     require(ownsRegistration(settings)) { "The service registration is missing; refusing to stop an unknown service." }
+    if (settings.os == "windows") {
+        when (manager(settings, "status", false)) {
+            3 -> return
+            0 -> Unit
+            else -> error("Cannot query Windows Task Scheduler.")
+        }
+        manager(settings, "disable")
+        writePrivateFile(serviceStopPath(settings.config), settings.id)
+        withTimeout(660_000) {
+            while (true) when (manager(settings, "active", false)) {
+                3 -> break
+                0 -> delay(500)
+                else -> error("Cannot verify that the Windows task has stopped.")
+            }
+        }
+        return
+    }
     if (settings.os != "macos" || manager(settings, "status", false) == 0) manager(settings, "stop")
     // bootout can return while the old process is still draining. Do not race its replacement.
     if (settings.os == "macos") withTimeout(660_000) {
@@ -115,6 +175,14 @@ private class Manage(private val operation: String) : SuspendingCliktCommand(nam
                 require(ownsRegistration(selected)) { "The registration is missing. Repair it with service install before uninstalling." }
                 stop(selected)
                 if (selected.os == "linux") manager(selected, "disable")
+                if (selected.os == "windows") {
+                    when (manager(selected, "status", false)) {
+                        0 -> manager(selected, "delete")
+                        3 -> Unit
+                        else -> error("Cannot query Windows Task Scheduler.")
+                    }
+                    FileSystem.SYSTEM.delete(serviceStopPath(selected.config).toPath(), mustExist = false)
+                }
                 FileSystem.SYSTEM.delete(selected.registration.toPath())
                 if (selected.os == "linux") manager(selected, "daemon-reload")
                 FileSystem.SYSTEM.delete(servicePath(selected.config).toPath())

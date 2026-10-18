@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.cli.platform
 
 
 expect fun environment(name: String): String?
+expect fun platformArguments(arguments: Array<String>): Array<String>
 expect fun writePrivateFile(path: String, content: String)
 
 expect fun secureRandomBytes(count: Int): ByteArray
