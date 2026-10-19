@@ -46,7 +46,7 @@ helm upgrade --install teamcode ./helm/teamcode \
 helm test teamcode --namespace teamcode
 ```
 
-Versioned GitHub releases will also include the chart package, with chart version and application version matching the unprefixed tag. After release **0.1.0** is published, the equivalent installation without a source checkout will be:
+Versioned GitHub releases include the chart package, with chart version and application version matching the unprefixed tag. Install the `0.1.0` archive without a source checkout:
 
 ```sh
 helm upgrade --install teamcode \
@@ -54,7 +54,7 @@ helm upgrade --install teamcode \
   --namespace teamcode --create-namespace -f values.yaml --wait --timeout 10m
 ```
 
-The first release is not published yet. Users supply their own namespace, Secret, ingress and database settings; no operator cluster deployment is performed by the publisher. The chart continues to default to `latest`; set `image.tag: "0.1.0"` to pin the matching released server image.
+Users supply their own namespace, Secret, ingress and database settings; no operator cluster deployment is performed by the publisher. The chart continues to default to `latest`; set `image.tag: "0.1.0"` to pin the matching released server image.
 
 The chart does not issue TLS certificates. Supply the TLS secret using your existing certificate management. For ingress controllers other than NGINX, configure equivalent streaming settings: no response buffering, 2 MiB request bodies, and at least 660-second read/send timeouts. Keep the public origin identical on every replica, without a trailing slash.
 

@@ -1,6 +1,6 @@
 # One-command native installation
 
-The release pipeline generates `install.sh` and `install.ps1` from the exact publisher-signed five-target bundle. The first public release is still pending: these commands become available when **0.1.0** passes all V1 acceptance and is published. Source implementation, local acceptance and public-download acceptance are separate; consult [current evidence](status.md).
+The release pipeline generates `install.sh` and `install.ps1` from the exact publisher-signed five-target bundle. The commands below install the version-pinned **0.1.0** release assets after its built-in publication checks pass. The owner moved additional clean-machine and operational validation to V2. Source implementation, local acceptance and public-download acceptance are separate; consult [current evidence](status.md).
 
 ## Install a release
 
