@@ -6,6 +6,8 @@ The first full publication attempt, [39341571577](https://github.com/nathanfalle
 
 The post-release brief contains only unfinished implementation/validation from the original V1 scope. New V2 product features stay in the separate roadmap.
 
+The [testing playbook](testing.md) consolidates reproducible provider-free, real-client and real-subscription procedures, native build inputs, metadata/usage assertions, hook/browser/service fixtures and signed distribution checks. Commands and flags were checked against the existing scripts; local links and whitespace checks pass. Writing the guide did not trigger additional subscription requests or a paid native matrix.
+
 ## Boot startup and finalized 0.1.0 release scope
 
 On 2026-10-20 the owner explicitly requested boot-startup implementation followed by the unprefixed `0.1.0` tag/release. Remaining extended validation/operations moves to V2 for another agent's PR. The [handoff](v2-validation-handoff.md) preserves each pending scenario and existing evidence; publication does not claim those scenarios passed. Built-in release workflow checks and delivery of the native installers/image/deployable chart still gate publication.

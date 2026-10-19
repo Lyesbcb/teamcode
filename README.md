@@ -113,6 +113,8 @@ The proxy accepts authenticated JSON `POST /v1/messages` and `POST /v1/responses
 
 ## Verification
 
+See the [end-to-end testing playbook](docs/testing.md) for native, real-account/client, replica, hook, service and signed-distribution procedures, expected assertions and evidence limits.
+
 ```sh
 python3 scripts/check-module-graph.py
 ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest

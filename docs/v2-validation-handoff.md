@@ -10,6 +10,8 @@ Start from `0.1.0`, fetch current `origin/main` and rebase the working branch be
 
 Use [progress](progress.md), [detailed evidence](status.md) and the [TeamClaude comparison](teamclaude-comparison.md). Exact logs in `/tmp` are local reproduction evidence, not portable release assets; reproduce assertions on your machine/runner. Successful CI proves only the scenarios its scripts execute.
 
+Use the [end-to-end testing playbook](testing.md) for prerequisites, native build commands, isolated real-account import/upsert, tiny Claude/Codex prompts, real coding tasks, dispatch/usage evidence, hooks/browser fixtures, services and signed distribution checks. It distinguishes actual subscriptions from synthetic upstreams and records what each method does not establish.
+
 ## 1. Boot startup and workstation lifecycle
 
 Implementation: `teamcode service install --at-boot` (`--system` alias). macOS uses a root-owned LaunchDaemon that drops to the configuration owner's username; Linux enables user-manager lingering; Windows uses a least-privilege boot-triggered task with password logon. Windows keeps the password in Task Scheduler, not TeamCode configuration. Default installation remains user-logon startup. See [service setup](services.md) and [Windows](windows.md).
