@@ -1,5 +1,7 @@
 # V1 progress
 
+Execution scope is **V1 only**. The owner will implement V2 separately; V2 roadmap entries remain informational and do not expand this implementation goal.
+
 The end-to-end foundation works, including real Claude Max and Codex subscription requests. **V1 release acceptance is not complete.** Successful individual smoke tests do not imply that every client, fallback route or operating-system lifecycle is supported.
 
 | Area | Implemented and verified | Remaining acceptance work |
@@ -10,7 +12,7 @@ The end-to-end foundation works, including real Claude Max and Codex subscriptio
 | Quota protection | Exposed reservations and shared bounded admission queues, member turn rotation, interactive priority/background aging, per-launch native workload selection with shared-service isolation, canonical model-limit bindings and retirement, weighted daily allowances, protected pools, concurrency limits, model/effort restrictions | Real-load scheduling/backpressure acceptance, soft borrowing and reconciliation/operational acceptance |
 | Native failover and experimental translation | Native account/model retries, bounded attempts, no stream replay; cross-provider translation is disabled by default behind an administrator flag, with portable-profile coding evidence when enabled | Native-provider quota/reset-boundary acceptance remains V1. Full-default cross-provider reasoning and other conversion/tool limits are experimental and do not block V1 |
 | Predictive control | Quota observations including unknown resets/rounded durations, active-target forecasts, persisted recovery hysteresis, session directives/claims, scoped pacing and automatic Claude HTTP/Codex command hooks verified with the real macOS clients | Real-load forecast accuracy, real Codex Windows hooks, subagent fan-out and forecast charts |
-| Local CLI lifecycle | Claude/Codex launchers and user services verified on macOS/Linux/Windows; shared build version and verified five-target snapshot bundles | Published signed versions, native verification, installers/update/rollback, actual reboot/logon checks and services before login |
+| Local CLI lifecycle | Claude/Codex launchers and user services verified on macOS/Linux/Windows; shared build version and verified five-target snapshot bundles; offline signature/binary verification accepted locally on JVM/macOS | Published signed versions, five-target verifier acceptance, installers/update/rollback, actual reboot/logon checks and services before login |
 | Deployment | Exposed/HikariCP/MySQL, two-process replica acceptance, Helm, tested multi-architecture Docker publishing | Deployment/recovery operations, restoration evidence, performance measurements and production SLOs |
 
 Complete the remaining native-provider, administration, predictive-control, distribution and operations gates. Cross-provider conversion is explicitly experimental at the owner's request and does not block V1; the other V1 requirements remain in scope. Open-source model providers and centralized MCP and skills management remain V2.

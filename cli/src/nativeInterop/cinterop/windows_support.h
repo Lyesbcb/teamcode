@@ -5,11 +5,32 @@
 #endif
 #include <windows.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <aclapi.h>
 #include <sddl.h>
 #include <shellapi.h>
 #include <stdlib.h>
 #include <wchar.h>
+
+/* SubjectPublicKeyInfo import uses Crypt32; signature verification stays in BCrypt. */
+static inline int teamcode_release_verify(const unsigned char *spki, size_t spki_size,
+        const unsigned char *pkcs1, size_t pkcs1_size, const unsigned char *digest, size_t digest_size,
+        const unsigned char *signature, size_t signature_size) {
+    if (!spki || spki_size == 0 || spki_size > 2048 || digest_size != 32 || signature_size != 384) return 0;
+    CERT_PUBLIC_KEY_INFO *information = NULL;
+    DWORD size = 0;
+    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, X509_PUBLIC_KEY_INFO, spki, (DWORD)spki_size,
+            CRYPT_DECODE_ALLOC_FLAG, NULL, &information, &size)) return 0;
+    BCRYPT_KEY_HANDLE key = NULL;
+    BOOL imported = CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, information, 0, NULL, &key);
+    LocalFree(information);
+    if (!imported) return 0;
+    BCRYPT_PSS_PADDING_INFO padding = {BCRYPT_SHA256_ALGORITHM, 32};
+    NTSTATUS result = BCryptVerifySignature(key, &padding, (PUCHAR)digest, 32,
+        (PUCHAR)signature, 384, BCRYPT_PAD_PSS);
+    BCryptDestroyKey(key);
+    return result == 0;
+}
 
 static inline int teamcode_windows_hook_input(unsigned char *buffer, int capacity) {
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);

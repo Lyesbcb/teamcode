@@ -18,12 +18,13 @@ import me.nathanfallet.teamcode.cli.agents.Agents
 import me.nathanfallet.teamcode.cli.launch.Run
 import me.nathanfallet.teamcode.cli.service.Service
 import me.nathanfallet.teamcode.cli.identity.*
+import me.nathanfallet.teamcode.cli.update.VerifyRelease
 
 const val VERSION = me.nathanfallet.teamcode.api.BuildInfo.VERSION
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service(), WhoAmI(), Auth(), Devices(), ServiceKeys()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service(), WhoAmI(), Auth(), Devices(), ServiceKeys(), VerifyRelease()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {
@@ -130,7 +131,10 @@ internal fun sdk(config: CliConfig) = TeamCodeClient(config.serverUrl, { config.
 fun main(args: Array<String>): Unit = runBlocking {
     try { Cli().main(platformArguments(args)) }
     catch (error: CancellationException) { throw error }
-    catch (error: CliOperationException) { SystemExit.fail("TeamCode command failed (${error.code}). Check server connectivity, authentication and private file permissions.") }
+    catch (error: CliOperationException) {
+        if (error.code.startsWith("release_")) SystemExit.fail("TeamCode release verification failed (${error.code}). Check the release files and required platform crypto libraries.")
+        SystemExit.fail("TeamCode command failed (${error.code}). Check server connectivity, authentication and private file permissions.")
+    }
     catch (_: Exception) {
         // Never print exception chains from TLS, JSON, file paths or remote servers: they may carry credentials.
         SystemExit.fail("TeamCode command failed. Check the server URL, authentication, file permissions and server availability.")
