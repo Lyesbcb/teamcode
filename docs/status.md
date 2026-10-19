@@ -1,6 +1,18 @@
 # Implementation status
 
+## Controlled HTTP scheduling under contention
+
+`FairSchedulingHttpTest` adds a real HTTP/SSE contention scenario with two embedded Netty replicas, independent database pools, shared MySQL 8.4 and an owned loopback provider fixture. Three actual members have weights 5:5:1 and verified daily shares 500,000/500,000/100,000. Two original streams occupy the only physical account. Eight background requests from the heavy member wait; its ninth pending request gets 503 without dispatch, while both other members can still enqueue interactive work. A pre-header socket reset removes one additional pending support request without reserving credits or calling the upstream.
+
+With one held stream retained, the test releases one slot at a time. The other members' six interactive requests must alternate in FIFO order ahead of unaged background work. All **16 successful streams** must preserve the complete SSE bytes, use exactly one upstream call and settle the exact final member charges **60/18/18**. The queue peaks at **15**, upstream concurrency never exceeds **2**, and final active/queued counts are zero. No real provider, subscription credentials or operator database is used.
+
+Local evidence (2026-10-19): the final app integration suite passes **4 tests**; domain passes **28**, and the unchanged selected MySQL regressions (**3**) remain verified/up to date (`/tmp/teamcode-fair-scheduling-regression.log`). The controlled fixture reports dispatch p50 **2,155 ms** and p95 **4,372 ms** for 16 streams; those include intentionally held capacity and normal polling, not gateway-added latency or a production SLO. Independent negative controls removed member-turn ordering and interactive priority; each actual HTTP run failed the intended interactive-order assertion, and the helper checked fresh JUnit failure evidence rather than accepting compiler errors (`/tmp/teamcode-http-fairness-negative-rotation.log`, `/tmp/teamcode-http-fairness-negative-priority.log`). The original scheduler source is restored with no production diff, and the final regression run is green.
+
+See [reproduction, scenario and limits](scheduling-acceptance.md). Sustained real-agent fairness, slow-reader memory/backpressure, mixed-provider/model/pool load, polling cost, borrowing, reconciliation and the other V1 gates remain open. This fixture is part of ordinary Linux app CI and does not enable native matrices. The new fixture's CI acceptance follows its commit.
+
 ## Observation-only predictive control
+
+[Run 39295508669](https://github.com/nathanfallet/teamcode/actions/runs/39295508669) is terminal **success** for source `6eba130`: JVM/MySQL/replicas, Helm and Docker publication pass, including the new observation mode and restoration checks. Every native/bundle/signing/installation matrix is skipped, as intended for an ordinary main push.
 
 Administrators can select **Observation only** in Dashboard → Agents or use `PUT /api/v1/policy/pacing` with `observationOnly: true`. The default remains false. Exposed persists the setting in a generated additive `pacing_settings` migration; mode writes, admission and delivery claims share the team lock. Current membership is revalidated and changes emit metadata-only observation/enforcement audit events. No controller state is cached in a replica.
 
