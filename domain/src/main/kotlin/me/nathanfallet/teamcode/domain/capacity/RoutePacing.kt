@@ -16,7 +16,7 @@ class RoutePacingUseCase(private val pacing: PacingUseCase = PacingUseCase()) {
             // Match placement priority. Idle low-priority capacity does not promise headroom
             // while requests still go to a pressured higher-priority account.
             val available = candidates.filter { account -> account.windows.none {
-                target.model != null && it.quota.appliesTo(target.model) && it.quota.utilization >= .95 && it.quota.resetsAtMillis > now
+                target.model != null && it.quota.appliesTo(target.model) && it.quota.utilization >= .95 && it.quota.isCurrent(now)
             } }
             val selectable = available.ifEmpty { candidates }
             val priority = selectable.maxOfOrNull { it.account.priority }

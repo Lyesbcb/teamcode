@@ -7,7 +7,7 @@ data class CapacityView(val memberId: String, val dailyUnits: Long, val maxConcu
 @Serializable
 data class PolicyRequest(val dailyUnits: Long, val maxConcurrent: Int, val poolId: String? = null, val weight: Int = 1)
 @Serializable
-data class QuotaView(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long)
+data class QuotaView(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long? = null)
 
 @Serializable
 data class PoolBudgetView(val poolId: String, val dailyUnits: Long)

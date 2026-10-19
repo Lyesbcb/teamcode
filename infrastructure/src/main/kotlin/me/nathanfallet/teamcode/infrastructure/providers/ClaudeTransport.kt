@@ -59,8 +59,12 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
         fun parseUsage(accountId: String, value: JsonObject, now: Long): List<AccountQuota> = buildList {
             fun addBucket(name: String, utilization: JsonElement?, reset: JsonElement?) {
                 val percent = (utilization as? JsonPrimitive)?.doubleOrNull ?: return
-                val resets = (reset as? JsonPrimitive)?.contentOrNull?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() } ?: return
-                if (percent.isFinite() && percent >= 0 && resets > now) add(AccountQuota(accountId, name, (percent / 100).coerceAtMost(1.0), now, resets))
+                val rawReset = (reset as? JsonPrimitive)?.contentOrNull
+                val number = rawReset?.toLongOrNull()?.takeIf { it > 0 }
+                val resets = if (number != null) {
+                    if (number < 1_000_000_000_000) number * 1000 else number
+                } else rawReset?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+                if (percent.isFinite() && percent >= 0 && (resets == null || resets > now)) add(AccountQuota(accountId, name, (percent / 100).coerceAtMost(1.0), now, resets))
             }
             for ((name, element) in value) {
                 val bucket = element as? JsonObject ?: continue
@@ -70,7 +74,8 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
                     name.startsWith("seven_day_") -> "model:" + name.removePrefix("seven_day_")
                     else -> continue
                 }
-                addBucket(window, bucket["utilization"], bucket["resets_at"])
+                addBucket(window, bucket.quotaField("used_percentage", "utilization", "usedPercentage"),
+                    bucket.quotaField("resets_at", "resetsAt", "reset_at", "resetAt"))
             }
             (value["limits"] as? JsonArray)?.forEach { element ->
                 val limit = element as? JsonObject ?: return@forEach
@@ -82,7 +87,7 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
             val used = if (headers["anthropic-ratelimit-unified-$key-status"] == "rejected") 1.0
                 else headers["anthropic-ratelimit-unified-$key-utilization"]?.toDoubleOrNull()
             val reset = headers["anthropic-ratelimit-unified-$key-reset"]?.toLongOrNull()?.takeIf { it in 1..Long.MAX_VALUE / 1000 }?.times(1000)
-            if (used != null && used.isFinite() && used >= 0 && reset != null && reset > now) AccountQuota(accountId, name, used.coerceAtMost(1.0), now, reset) else null
+            if (used != null && used.isFinite() && used >= 0 && (reset == null || reset > now)) AccountQuota(accountId, name, used.coerceAtMost(1.0), now, reset) else null
         }
     }
 }

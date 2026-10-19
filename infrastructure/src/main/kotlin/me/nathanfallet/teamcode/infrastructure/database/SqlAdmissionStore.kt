@@ -42,7 +42,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val poolSpent = c.rows("SELECT COALESCE(SUM(units), 0) FROM reservations WHERE team_id = ? AND pool_id = ? AND day_number = ?", actor.teamId, policy.poolId.orEmpty(), now / DAY) { it.getLong(1) }.single()
         if (units > current.poolDailyUnits - poolSpent) throw TeamFailure("pool_allowance", 429, "This pool's daily team budget has been reserved or consumed.")
         val candidates = c.rows("SELECT * FROM accounts WHERE team_id = ? AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ? AND pool_id <=> ? AND provider = ?", actor.teamId, now, policy.poolId, provider, map = ::accountRecord)
-        val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.resets_at > ?", actor.teamId, now, map = ::quota)
+        val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.observed_at <= ? AND (q.resets_at > ? OR (q.resets_at IS NULL AND q.observed_at >= ?))", actor.teamId, now, now, now - MAX_QUOTA_OBSERVATION_AGE_MILLIS, map = ::quota)
         val active = c.rows("SELECT account_id, COUNT(*) AS n FROM reservations WHERE team_id = ? AND state = 'ACTIVE' AND expires_at > ? GROUP BY account_id", actor.teamId, now) { it.getString(1) to it.getInt(2) }.toMap()
         val eligible = candidates.filter { account ->
             account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model) && it.utilization >= .95 }
@@ -100,7 +100,8 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     }
     override suspend fun observe(accountId: String, observations: List<AccountQuota>) {
         database.transaction { c ->
-            observations.filter { it.accountId == accountId && it.window.length <= 80 && it.utilization.isFinite() && it.utilization in 0.0..1.0 && it.resetsAtMillis > it.observedAtMillis }.forEach { q ->
+            val now = c.nowMillis()
+            observations.filter { it.accountId == accountId && it.window.length <= 80 && it.utilization.isFinite() && it.utilization in 0.0..1.0 && it.observedAtMillis in 0..now && (it.resetsAtMillis?.let { reset -> reset > it.observedAtMillis } != false) }.forEach { q ->
                 c.execute("INSERT INTO quota_windows (account_id, window_name, utilization, observed_at, resets_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE utilization = IF(observed_at <= ?, ?, utilization), resets_at = IF(observed_at <= ?, ?, resets_at), observed_at = GREATEST(observed_at, ?)", q.accountId, q.window, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis)
                 // One sample per minute/window bounds history growth independently of inference throughput.
                 c.execute("INSERT INTO quota_history (account_id, window_name, utilization, observed_at, resets_at, sample_minute) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE utilization = IF(observed_at <= ?, ?, utilization), resets_at = IF(observed_at <= ?, ?, resets_at), observed_at = GREATEST(observed_at, ?)", q.accountId, q.window, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis / 60_000, q.observedAtMillis, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis)
@@ -122,6 +123,6 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     private fun ensureMember(c: Connection, team: String, member: String) {
         if (c.rows("SELECT id FROM members WHERE team_id = ? AND id = ?", team, member) { it.getString(1) }.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")
     }
-    private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.getLong("resets_at"))
+    private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.nullableLong("resets_at"))
     companion object { private const val DAY = 86_400_000L }
 }

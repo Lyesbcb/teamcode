@@ -8,7 +8,11 @@ data class MemberPolicy(val memberId: String, val dailyUnits: Long = 0, val maxC
 data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits: Long, val activeRequests: Int, val resetsAtMillis: Long, val dailyAllowanceUnits: Long = policy.dailyUnits, val poolDailyUnits: Long = 1_000_000, val poolTotalWeight: Long = 1)
 data class PoolBudget(val poolId: String, val dailyUnits: Long)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
-data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long)
+const val MAX_QUOTA_OBSERVATION_AGE_MILLIS = 300_000L
+data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long?)
+/** Unknown reset times cannot keep an account blocked indefinitely after observations stop. */
+fun AccountQuota.isCurrent(now: Long): Boolean = observedAtMillis in 0..now &&
+    (resetsAtMillis?.let { it > now } ?: (now - observedAtMillis <= MAX_QUOTA_OBSERVATION_AGE_MILLIS))
 fun AccountQuota.appliesTo(model: String): Boolean = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
 data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {

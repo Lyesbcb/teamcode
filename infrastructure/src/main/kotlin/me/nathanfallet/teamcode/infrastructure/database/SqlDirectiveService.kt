@@ -21,7 +21,7 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
             val now = c.nowMillis()
             val accounts = c.rows("SELECT * FROM accounts WHERE team_id = 'default' AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ?", now, map = ::accountRecord)
             val samples = c.rows("SELECT h.* FROM quota_history h JOIN accounts a ON a.id = h.account_id WHERE a.team_id = 'default' AND h.observed_at >= ? ORDER BY h.observed_at DESC LIMIT 10000", now - 3_600_000) {
-                AccountQuota(it.getString("account_id"), it.getString("window_name"), it.getDouble("utilization"), it.getLong("observed_at"), it.getLong("resets_at"))
+                AccountQuota(it.getString("account_id"), it.getString("window_name"), it.getDouble("utilization"), it.getLong("observed_at"), it.nullableLong("resets_at"))
             }.groupBy { it.accountId to it.window }.mapValues { history.evaluate(it.value, now) }
             val members = c.rows("SELECT m.id, COALESCE(p.max_concurrent, 2) AS maximum, p.pool_id FROM members m LEFT JOIN member_policies p ON p.member_id = m.id WHERE m.team_id = 'default' AND m.disabled = FALSE") {
                 Triple(it.getString("id"), it.getInt("maximum"), it.getString("pool_id"))

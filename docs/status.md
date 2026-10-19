@@ -222,3 +222,19 @@ Native stdin and generated-command checks are wired into desktop CI, including W
 CI runs [39182797785](https://github.com/nathanfallet/teamcode/actions/runs/39182797785) and [39217843645](https://github.com/nathanfallet/teamcode/actions/runs/39217843645) exposed a Windows hook invocation failure. The Windows acceptance deliberately removes nonessential PATH entries; Windows PowerShell lives below `System32/WindowsPowerShell/v1.0`, outside that minimal PATH. Native/npm launches worked but the new guidance command could not find PowerShell. Docker publication remained blocked by the failing Windows gate.
 
 The launcher now adds the OS-provided PowerShell directory to the Codex child environment only. The minimal-PATH acceptance remains intact. Local CLI JVM tests, macOS/MinGW linking and the real Codex 0.163.0 five-scenario guidance fixture pass. Windows runtime confirmation awaits the fix's CI run; linking is not a substitute for it.
+
+
+## Unknown reset observations and rounded windows (2026-10-19)
+
+Provider usage and response headers now retain a valid percentage when no reset epoch is reported. `AccountQuota`, the public quota DTO, both SQL quota tables and dashboard rendering distinguish an unknown date from zero usage. Missing/invalid percentages still create no observation; known expired windows are not revived. Claude numeric/ISO reset and percentage aliases are covered. Codex usage/header durations use TeamClaude's shared 10% tolerance around five hours/seven days, rejecting unrelated hourly/monthly windows and preserving named weekly scope.
+
+Admission excludes an unknown-reset saturated window only while its observation is at most five minutes old; repeated fresh saturation extends protection. Known future resets retain the previous exclusion behavior. A newer unknown-reset zero observation can clear an old saturation; delayed observations cannot overwrite it. Forecasting never infers an idle/reset-first trajectory from an unknown epoch, while a fresh exhausted window remains actionable even if another window is absent.
+
+Evidence:
+
+- **93 tests passed**: API 2, domain 16, infrastructure 47, presentation 8, client 4, CLI 16. This includes parser aliases/duration boundaries/absent versus zero readings, unknown-reset forecasting and freshness, and API null/known-date compatibility.
+- `UnknownQuotaResetPersistenceTest` upgrades an actual MySQL V9 database with an existing quota to V10, preserves the known row, and uses two independent connection pools to prove newer/late observation ordering, scoped saturation, freshness expiry, known-reset protection and future-sample rejection.
+- The packaged two-process replica smoke passed: concurrent startup/migration, one admin bootstrap, shared members/sessions, cross-replica revocation, killed-pod recovery and database readiness/recovery. It uses only its own test database and processes.
+- Server packaging, native macOS linking and the production module graph check passed. No provider credentials or subscription calls were used.
+
+Deploy all application replicas and update quota API consumers before relying on nullable-reset protection; old readers did not understand it. Active-limit/model-family mappings, removed model caps, real-load forecast accuracy, subagent fan-out and the other full V1 gates remain open. Updated CI/Docker publication for this quota milestone is still pending.

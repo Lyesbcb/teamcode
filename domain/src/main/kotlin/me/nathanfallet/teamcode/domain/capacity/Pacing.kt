@@ -11,7 +11,7 @@ class ForecastHistoryUseCase {
         val latest = sorted.lastOrNull() ?: return null
         val sameWindow = sorted.filter { it.resetsAtMillis == latest.resetsAtMillis && it.observedAtMillis >= now - 3_600_000 }
         var rate: Double? = null
-        if (sameWindow.size >= 3 && sameWindow.last().observedAtMillis - sameWindow.first().observedAtMillis >= 60_000) {
+        if (latest.resetsAtMillis != null && sameWindow.size >= 3 && sameWindow.last().observedAtMillis - sameWindow.first().observedAtMillis >= 60_000) {
             var weighted = 0.0
             var weight = 0.0
             var monotonic = true
@@ -33,8 +33,8 @@ class PacingUseCase {
         if (accounts.isEmpty()) return advice(Pace.UNKNOWN, maximum)
         val states = accounts.map { windows ->
             when {
-                !windows.map { it.quota.window }.containsAll(listOf("five_hour", "seven_day")) -> Pace.UNKNOWN
                 windows.any { it.forecast.state == QuotaForecast.State.EXHAUSTED } -> Pace.PAUSE
+                !windows.map { it.quota.window }.containsAll(listOf("five_hour", "seven_day")) -> Pace.UNKNOWN
                 windows.any { it.forecast.state in setOf(QuotaForecast.State.UNKNOWN, QuotaForecast.State.STALE) } -> Pace.UNKNOWN
                 windows.any { it.forecast.state == QuotaForecast.State.EXHAUSTS_FIRST } -> Pace.SLOW_DOWN
                 windows.all { it.quota.utilization < .5 && it.forecast.state in setOf(QuotaForecast.State.IDLE, QuotaForecast.State.RESET_FIRST) } -> Pace.CAN_INCREASE

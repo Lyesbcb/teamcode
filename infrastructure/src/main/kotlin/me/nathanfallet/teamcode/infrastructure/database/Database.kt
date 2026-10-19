@@ -32,6 +32,7 @@ class Database(url: String, username: String, password: String) : AutoCloseable 
     override fun close() = source.close()
 }
 internal fun PreparedStatement.bind(values: Array<out Any?>) { values.forEachIndexed { index, value -> setObject(index + 1, value) } }
+internal fun ResultSet.nullableLong(column: String): Long? = getLong(column).let { if (wasNull()) null else it }
 internal fun Connection.execute(sql: String, vararg values: Any?): Int = prepareStatement(sql).use { it.bind(values); it.executeUpdate() }
 internal fun <T> Connection.rows(sql: String, vararg values: Any?, map: (ResultSet) -> T): List<T> = prepareStatement(sql).use {
     it.bind(values); it.executeQuery().use { result -> buildList { while (result.next()) add(map(result)) } }
