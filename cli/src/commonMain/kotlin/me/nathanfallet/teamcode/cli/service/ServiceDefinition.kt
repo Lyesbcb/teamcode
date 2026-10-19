@@ -49,6 +49,11 @@ internal fun serviceDefinition(settings: ServiceSettings): String {
     fun xml(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
     fun unit(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%").replace("$", "$$") + "\""
     val arguments = listOf(settings.executable, "service", "serve", "--config", settings.config)
+    // systemd rejects quotes/backslashes in the executable token even after unquoting.
+    // env execs the absolute path as an argument, preserving PID and literal $ expansion.
+    // Keep existing ordinary registrations byte-compatible with ownsRegistration().
+    val linuxArguments = if (settings.os == "linux" && settings.executable.any { it in setOf('\'', '"', '\\', '$') })
+        listOf("/usr/bin/env", "--") + arguments else arguments
     return if (settings.os == "windows") """
         <?xml version="1.0" encoding="UTF-16"?>
         <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -90,7 +95,7 @@ internal fun serviceDefinition(settings: ServiceSettings): String {
 
         [Service]
         Type=exec
-        ExecStart=${arguments.joinToString(" ", transform = ::unit)}
+        ExecStart=${linuxArguments.joinToString(" ", transform = ::unit)}
         Restart=on-failure
         RestartSec=30
         TimeoutStopSec=660
