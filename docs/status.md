@@ -1,5 +1,15 @@
 # Implementation status
 
+## Publisher-signed installation acceptance matrix
+
+The Build workflow now signs assembled bundles only on trusted pushes/manual runs, then tests actual native installation and the owned OS service on macOS ARM64/Intel, Linux ARM64/x64 and Windows x64 before trusted Docker publication. Tag publication consumes the exact accepted signed artifact; it does not resign or rebuild it. PRs never run the signing job or receive the publisher key. Their existing native store/OS-lock tests remain enabled.
+
+The matrix uses two separately signed manifests of one build, differing only by a trailing newline. Every version, commit, binary hash/size and filename remains truthful; the acceptance variant is excluded from release assets. This exercises distinct immutable payload directories, not a change between compiled versions. That separate five-target gate remains open. `installation-fixture.py` prepares only public files; runtime jobs receive no signing credentials.
+
+Local evidence (2026-10-19): the exact new preparation path and expanded native smoke passed on macOS ARM64 with the optimized executable, publisher-signed manifests, a real LaunchAgent and a synthetic central server. The expanded smoke also passed separately with the two different compiled versions. Fresh service startup-log markers prove restart even with identical build versions. Incompatible and busy updates preserve the running service; a quiet owned agent retains its activity lease; rollback works without central requests and preserves a stopped service. Eight release-script tests, `actionlint`, module/Exposed boundaries, Python compilation and whitespace checks passed. Windows now has a quiet-agent fixture using the supported npm layout; its actual runtime result is pending CI, as are the other new matrix jobs. This does not close first-publication, reboot/logon, interrupted-network or cross-version platform gates.
+
+The predecessor Build run [39277828501](https://github.com/nathanfallet/teamcode/actions/runs/39277828501) is terminal **success**, including all five native runtimes, bundle and Docker jobs. It predates the installer implementation and cannot accept the new installation matrix. The installer source run [39283937898](https://github.com/nathanfallet/teamcode/actions/runs/39283937898) remains live; the next workflow commit adds the signed matrix described here. A successful publishing job is not an independently inspected registry digest.
+
 ## J0: first verified transport slice
 
 Implemented:

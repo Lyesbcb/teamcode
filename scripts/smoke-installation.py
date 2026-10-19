@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 
@@ -153,41 +154,81 @@ def main():
                         except OSError: pass
                         time.sleep(.1)
                     raise AssertionError('Managed service did not start the selected version')
+                def start_marker(previous=None):
+                    # A new startup log proves restart even for two manifests of one build.
+                    for _ in range(50):
+                        try:
+                            lines = settings_path.with_name('service.log').read_text(encoding='utf-8').splitlines()
+                            marker = next((line for line in lines if 'Local proxy is listening.' in line), None)
+                            if marker is not None and marker != previous: return marker
+                        except OSError: pass
+                        time.sleep(.1)
+                    raise AssertionError('No fresh owned-service startup was observed')
                 identity(manifests[0]['version'])
+                first_start = start_marker()
                 api_version = 2
                 try: run(launcher, ['update', '--bundle', str(second)], error='release_candidate_incompatible')
                 finally: api_version = 1
                 selected(0); identity(manifests[0]['version'])
-                if os.name != 'nt':
-                    agents = root / 'fake agents'; agents.mkdir()
-                    ready = root / 'quiet-agent-ready'
+                assert start_marker() == first_start, 'Incompatible update restarted the service'
+                agents = root / 'fake agents'; agents.mkdir()
+                ready = root / 'quiet-agent-ready'
+                if os.name == 'nt':
+                    # Match TeamClaude's supported npm layout; do not execute a cmd shim.
+                    stub = agents / 'node_modules/@anthropic-ai/claude-code/cli.js'
+                    stub.parent.mkdir(parents=True)
+                    stub.write_text('const fs = require("fs");\n'
+                                    'fs.writeFileSync(process.env.TEAMCODE_INSTALLATION_READY, "");\n'
+                                    'const timer = setInterval(() => {\n'
+                                    'if (fs.existsSync(process.env.TEAMCODE_INSTALLATION_RELEASE)) clearInterval(timer);\n'
+                                    '}, 50);\n', encoding='utf-8')
+                    (agents / 'claude.cmd').write_text('@echo THIS_SHIM_MUST_NOT_RUN\n', encoding='ascii')
+                else:
                     stub = agents / 'claude'
                     stub.write_text('#!' + sys.executable + '\nimport os,pathlib,time\n'
                                     'pathlib.Path(os.environ["TEAMCODE_INSTALLATION_READY"]).touch()\n'
                                     'while not pathlib.Path(os.environ["TEAMCODE_INSTALLATION_RELEASE"]).exists(): time.sleep(.05)\n')
                     stub.chmod(0o700)
-                    agent_env = dict(env, PATH=str(agents) + os.pathsep + os.environ['PATH'],
-                        TEAMCODE_INSTALLATION_READY=str(ready), TEAMCODE_INSTALLATION_RELEASE=str(release))
-                    agent = subprocess.Popen([str(launcher), 'run', 'claude', '--no-guidance'], env=agent_env,
-                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    for _ in range(200):
-                        if ready.exists(): break
-                        assert agent.poll() is None, 'Synthetic quiet agent exited before taking its lease'
-                        time.sleep(.05)
-                    else: raise AssertionError('Synthetic quiet agent did not start')
-                    run(launcher, ['update', '--bundle', str(second)], error='release_installation_busy')
-                    selected(0); identity(manifests[0]['version'])
-                    assert agent.poll() is None, 'Update terminated an active agent'
-                    release.touch()
-                    agent.communicate(timeout=10)
-                    assert agent.returncode == 0
+                agent_env = dict(env, PATH=str(agents) + os.pathsep + os.environ['PATH'],
+                    TEAMCODE_INSTALLATION_READY=str(ready), TEAMCODE_INSTALLATION_RELEASE=str(release))
+                agent = subprocess.Popen([str(launcher), 'run', 'claude', '--no-guidance'], env=agent_env,
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                for _ in range(200):
+                    if ready.exists(): break
+                    assert agent.poll() is None, 'Synthetic quiet agent exited before taking its lease'
+                    time.sleep(.05)
+                else: raise AssertionError('Synthetic quiet agent did not start')
+                run(launcher, ['update', '--bundle', str(second)], error='release_installation_busy')
+                selected(0); identity(manifests[0]['version'])
+                assert agent.poll() is None, 'Update terminated an active agent'
+                assert start_marker() == first_start, 'Busy update restarted the service'
+                release.touch()
+                agent.communicate(timeout=10)
+                assert agent.returncode == 0
                 run(launcher, ['update', '--bundle', str(second)])
                 selected(1); identity(manifests[1]['version'])
+                second_start = start_marker(first_start)
                 online = False
                 before_offline = len(calls)
                 run(launcher, ['update', '--rollback'])
                 selected(0); identity(manifests[0]['version'])
+                start_marker(second_start)
                 assert len(calls) == before_offline, 'Offline rollback contacted the central server'
+                # A stopped service must stay stopped when the selected payload changes.
+                run(launcher, ['service', 'stop'])
+                run(launcher, ['update', '--rollback'])
+                selected(1)
+                try:
+                    urllib.request.urlopen(f'http://127.0.0.1:{local_port}/_teamcode/service', timeout=2)
+                    raise AssertionError('Rollback unexpectedly started a stopped service')
+                except urllib.error.HTTPError as error:
+                    raise AssertionError('Stopped service still accepted an HTTP connection') from error
+                except OSError: pass
+                run(launcher, ['service', 'start'])
+                identity(manifests[1]['version'])
+                run(launcher, ['update', '--rollback'])
+                selected(0); identity(manifests[0]['version'])
+                assert len(calls) == before_offline, 'Stopped-service rollback contacted the central server'
                 assert configuration.read_bytes() == saved_configuration
                 assert settings_path.read_bytes() == saved_settings
             finally:

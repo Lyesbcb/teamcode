@@ -50,7 +50,12 @@ jobs:
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
   image:
     timeout-minutes: 20
-    needs: [jvm, helm, native, windows, bundle]
+    needs: [jvm, helm, native, windows, bundle, signed_installation]
+    if: >-
+      !cancelled() && needs.jvm.result == 'success' && needs.helm.result == 'success' &&
+      needs.bundle.result == 'success' &&
+      (needs.signed_installation.result == 'success' ||
+      (github.event_name == 'pull_request' && needs.signed_installation.result == 'skipped'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -305,13 +310,12 @@ jobs:
           name: teamcode-release-bundle
           path: dist/*
           retention-days: 7
-  release:
-    timeout-minutes: 10
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [image, bundle]
+  signed_bundle:
+    timeout-minutes: 5
+    # Pull-request code never receives the publisher key, including same-repository PRs.
+    if: github.event_name != 'pull_request'
+    needs: [bundle]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -323,6 +327,104 @@ jobs:
           TEAMCODE_RELEASE_SIGNING_KEY: ${{ secrets.TEAMCODE_RELEASE_SIGNING_KEY }}
         run: python3 scripts/release-signature.py sign --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Verify the published signature against the pinned public key
+        run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - name: Prepare distinct same-build acceptance metadata
+        run: python3 scripts/installation-fixture.py variant --bundle dist --output variant
+      - name: Sign only the public acceptance metadata
+        env:
+          TEAMCODE_RELEASE_SIGNING_KEY: ${{ secrets.TEAMCODE_RELEASE_SIGNING_KEY }}
+        run: python3 scripts/release-signature.py sign --manifest variant/manifest.json --signature variant/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teamcode-signed-release-bundle
+          path: dist/*
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installation-acceptance-variant
+          path: variant/*
+          retention-days: 7
+  signed_installation:
+    timeout-minutes: 10
+    needs: [signed_bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+            architecture: arm64
+          - os: macos-15-intel
+            target: macos-x64
+            architecture: x86_64
+          - os: ubuntu-24.04
+            target: linux-x64
+            architecture: x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            architecture: aarch64
+          - os: windows-latest
+            target: windows-x64
+            architecture: AMD64
+    runs-on: ${{ matrix.os }}
+    # These jobs receive public signed files, never signing or team/provider credentials.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: teamcode-signed-release-bundle
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: installation-acceptance-variant
+          path: variant
+      - name: Install Linux transport and verification dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl3t64
+      - name: Start Linux user service manager
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
+          } >> "$GITHUB_ENV"
+      - name: Exercise the actual native signed installation and owned service
+        shell: bash
+        env:
+          INSTALLATION_TARGET: ${{ matrix.target }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          python -c 'import os,platform; assert platform.machine() == os.environ["EXPECTED_ARCHITECTURE"], "Wrong runtime architecture"'
+          python scripts/installation-fixture.py prepare --bundle dist --variant variant --target "$INSTALLATION_TARGET" --output installation-fixtures
+          releaseVersion="${ORG_GRADLE_PROJECT_teamcodeVersion#v}"
+          suffix=""
+          if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
+          binary="installation-fixtures/first/teamcode-${releaseVersion}-${INSTALLATION_TARGET}${suffix}"
+          python scripts/smoke-installation.py --binary "$binary" --first-bundle installation-fixtures/first --second-bundle installation-fixtures/second --service
+  release:
+    timeout-minutes: 10
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [image, signed_bundle, signed_installation]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: teamcode-signed-release-bundle
+          path: dist
+      - name: Verify the exact accepted signature before publication
         run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Publish the verified version
         env:
