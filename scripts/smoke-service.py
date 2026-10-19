@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--binary', type=Path, required=True)
 args = parser.parse_args()
 binary = str(args.binary.resolve())
+expected_version = subprocess.check_output([binary, 'version'], text=True, timeout=15).strip().split(' ', 1)[1]
 assert sys.platform in ('darwin', 'linux'), 'This acceptance script targets launchd/systemd user services'
 
 with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
@@ -99,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
                                                  headers={'Authorization': 'Bearer ' + settings['localToken']})
                 with urllib.request.urlopen(request, timeout=1) as response:
                     body = json.load(response)
-                running = body == {'id': settings['id'], 'serverUrl': origin, 'capabilities': ['workload-routing-v1']}
+                running = body == {'id': settings['id'], 'serverUrl': origin, 'version': expected_version, 'capabilities': ['workload-routing-v1']}
                 observed = 'matching identity' if running else 'identity mismatch'
             except OSError as error:
                 observed = type(error).__name__ + (f' HTTP {error.code}' if isinstance(error, urllib.error.HTTPError) else '')

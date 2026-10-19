@@ -81,6 +81,9 @@ internal class VerifyReleaseManifest(trustedKeys: List<ReleasePublicKey> = Shipp
 }
 
 internal fun readReleaseFile(path: Path, limit: Int, fs: FileSystem = FileSystem.SYSTEM): ByteArray = try {
+    val metadata = fs.metadataOrNull(path) ?: throw failure("release_file_unreadable")
+    if (!metadata.isRegularFile || metadata.symlinkTarget != null) throw failure("release_file_unreadable")
+    if ((metadata.size ?: 0) > limit) throw failure("release_metadata_size")
     fs.source(path).use { source ->
         val buffer = Buffer()
         while (buffer.size <= limit) {

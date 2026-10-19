@@ -14,28 +14,43 @@ import me.nathanfallet.teamcode.cli.VERSION
 import me.nathanfallet.teamcode.client.ReleaseClient
 import me.nathanfallet.teamcode.client.ReleaseDownloadException
 
-internal class Update : SuspendingCliktCommand(name = "update") {
-    private val check by option("--check", help = "Check signed published metadata without installing or restarting anything.").flag()
-    private val version by option("--version", help = "Check a specific version, including a prerelease; otherwise check the latest stable release.")
-    override fun help(context: Context) = "Check signed releases. Installation and rollback are not available yet. No team login is required."
+internal suspend fun <T> releaseOperation(block: suspend () -> T): T = try { block() }
+catch (error: TimeoutCancellationException) {
+    currentCoroutineContext().ensureActive()
+    throw CliOperationException("release_operation_timeout")
+} catch (error: CancellationException) { throw error }
+catch (error: ReleaseDownloadException) { throw CliOperationException(error.code) }
 
-    override suspend fun run() {
-        if (!check) throw UsageError("Use --check. Native installation and rollback are not available yet.")
-        val result = try {
-            ReleaseClient { configure -> HttpClient { configure(this) } }.use { CheckRelease(it, currentVersion = VERSION)(version) }
-        } catch (error: TimeoutCancellationException) {
-            currentCoroutineContext().ensureActive()
-            throw CliOperationException("release_check_timeout")
-        } catch (error: CancellationException) { throw error }
-        catch (error: ReleaseDownloadException) { throw CliOperationException(error.code) }
-        if (result == null) {
-            echo("No stable published release is available. Current version: $VERSION.")
-            return
+internal class Update : SuspendingCliktCommand(name = "update") {
+    private val check by option("--check", help = "Check signed metadata without installing or restarting anything.").flag()
+    private val rollback by option("--rollback", help = "Restore the previous verified local version without network access.").flag()
+    private val version by option("--version", help = "Choose a published version, including prereleases or an explicit downgrade.")
+    private val bundle by option("--bundle", help = "Use an offline signed release directory.")
+    private val root by option("--root", help = "Explicit managed installation directory; ordinary launches discover their own installation.")
+    override fun help(context: Context) = "Check or update a managed native installation; preserve login and drain its owned service."
+
+    override suspend fun run() = releaseOperation {
+        if (check) {
+            if (rollback || bundle != null || root != null) throw UsageError("--check cannot be combined with --rollback, --bundle or --root.")
+            val result = ReleaseClient { configure -> HttpClient { configure(this) } }.use { CheckRelease(it, currentVersion = VERSION)(version) }
+            if (result == null) echo("No stable published release is available. Current version: $VERSION.")
+            else {
+                echo("Current version: ${result.currentVersion}")
+                echo("Verified release: ${result.release.manifest.version} (${result.release.manifest.sourceCommit})")
+                echo("Release key: ${result.release.keyId}")
+                echo("Update available: ${result.updateAvailable}")
+                echo("Check only: no files were installed and no service was restarted.")
+            }
+        } else {
+            if (rollback && (version != null || bundle != null)) throw UsageError("--rollback cannot be combined with --version or --bundle.")
+            val store = root?.let { InstallationStore(defaultInstallationPaths(it)) } ?: managedInstallation()
+                ?: throw CliOperationException("release_not_managed")
+            store.initialize()
+            if (store.state() == null) throw CliOperationException("release_not_managed")
+            val selected = if (rollback) InstallationOperations(store).rollback() else
+                InstallationOperations(store).install(version, bundle, allowDowngrade = version != null || bundle != null)
+            echo(if (selected == null) "The managed installation is already up to date." else
+                "Selected TeamCode ${selected.version}. Launcher: ${store.paths.launcher}")
         }
-        echo("Current version: ${result.currentVersion}")
-        echo("Verified release: ${result.release.manifest.version} (${result.release.manifest.sourceCommit})")
-        echo("Release key: ${result.release.keyId}")
-        echo("Update available: ${result.updateAvailable}")
-        echo("Check only: no files were installed and no service was restarted.")
     }
 }

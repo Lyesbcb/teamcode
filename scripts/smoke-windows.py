@@ -28,6 +28,7 @@ args = parser.parse_args()
 assert os.name == 'nt', 'This acceptance test must run on Windows'
 assert args.allow_machine_test_certificate, 'Run this full acceptance in a disposable elevated environment with --allow-machine-test-certificate'
 binary = str(args.binary.resolve())
+expected_version = subprocess.check_output([binary, 'version'], text=True, timeout=15).strip().split(' ', 1)[1]
 node = Path(shutil.which('node')).resolve()
 powershell = str(Path(shutil.which('pwsh')).resolve())
 team_token = secrets.token_hex(32)
@@ -450,7 +451,7 @@ try:
                     request = urllib.request.Request(service_origin + '/_teamcode/service',
                         headers={'Authorization': 'Bearer ' + settings['localToken']})
                     with urllib.request.urlopen(request, timeout=1) as response:
-                        running = json.load(response) == {'id': settings['id'], 'serverUrl': origin, 'capabilities': ['workload-routing-v1']}
+                        running = json.load(response) == {'id': settings['id'], 'serverUrl': origin, 'version': expected_version, 'capabilities': ['workload-routing-v1']}
                 except OSError:
                     running = False
                 if running == expected:

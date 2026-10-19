@@ -24,7 +24,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             } else {
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.respondText(buildJsonObject {
-                    put("id", serviceId); put("serverUrl", serverUrl)
+                    put("id", serviceId); put("serverUrl", serverUrl); put("version", me.nathanfallet.teamcode.cli.VERSION)
                     putJsonArray("capabilities") { add(JsonPrimitive("workload-routing-v1")) }
                 }.toString(), ContentType.Application.Json)
             }

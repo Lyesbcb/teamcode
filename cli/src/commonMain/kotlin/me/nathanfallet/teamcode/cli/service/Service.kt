@@ -29,7 +29,7 @@ private fun settings(config: String, port: Int, executable: String?): ServiceSet
         "windows" -> config.toPath().parent!!.resolve("service-task.xml").toString()
         else -> "${config.toPath().parent!!.parent}/systemd/user/$label.service"
     }
-    return ServiceSettings(id, port, randomHex(32), executable ?: platform.executable, config, registration, platform.os, platform.userId)
+    return ServiceSettings(id, port, randomHex(32), executable ?: me.nathanfallet.teamcode.cli.update.managedInstallation()?.paths?.launcher?.toString() ?: platform.executable, config, registration, platform.os, platform.userId)
 }
 
 private class Print : SuspendingCliktCommand(name = "print") {
@@ -227,3 +227,9 @@ private class Serve : SuspendingCliktCommand(name = "serve") {
         serve(requireNotNull(loadService(config)) { "Service settings are missing." })
     }
 }
+
+
+internal suspend fun startManagedService(settings: ServiceSettings) = start(settings)
+internal suspend fun stopManagedService(settings: ServiceSettings) = stop(settings)
+internal suspend fun managedServiceRunning(settings: ServiceSettings): Boolean =
+    manager(settings, if (settings.os == "windows") "active" else "status", false) == 0

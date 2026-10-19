@@ -28,7 +28,7 @@ internal fun stopRequested(settings: ServiceSettings): Boolean {
 }
 
 /** A capability alone is insufficient: verify the installation ID and fixed upstream origin. */
-internal suspend fun serviceResponds(settings: ServiceSettings, origin: String, backgroundWorkload: Boolean = false): Boolean = try {
+internal suspend fun serviceResponds(settings: ServiceSettings, origin: String, backgroundWorkload: Boolean = false, expectedVersion: String? = null): Boolean = try {
     HttpClient { followRedirects = false; install(HttpTimeout) { requestTimeoutMillis = 2_000; connectTimeoutMillis = 1_000 } }.use { http ->
         http.prepareGet("http://127.0.0.1:${settings.port}/_teamcode/service") { bearerAuth(settings.localToken) }.execute { response ->
             if (response.status.value != 200 || (response.contentLength() ?: 0) > 4096) return@execute false
@@ -43,7 +43,7 @@ internal suspend fun serviceResponds(settings: ServiceSettings, origin: String, 
             }
             if (size > 4096) return@execute false
             val body = Json.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
-            serviceMatches(body, settings.id, origin, backgroundWorkload)
+            serviceMatches(body, settings.id, origin, backgroundWorkload) && (expectedVersion == null || body["version"]?.jsonPrimitive?.content == expectedVersion)
         }
     }
 } catch (error: CancellationException) { throw error } catch (_: Exception) { false }

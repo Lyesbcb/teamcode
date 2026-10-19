@@ -1,6 +1,6 @@
 # Native distribution
 
-TeamCode targets macOS Apple Silicon/Intel, Linux ARM64/x64 and Windows x64. The CLI is a Kotlin/Native executable and needs no JVM. This page describes the versioned build/release path. `teamcode update --check` checks signed metadata; self-update installation, rollback and installer automation remain V1 work.
+TeamCode targets macOS Apple Silicon/Intel, Linux ARM64/x64 and Windows x64. The CLI is a Kotlin/Native executable and needs no JVM. This page describes the versioned build/release path. `teamcode install`, managed `teamcode update` and offline `--rollback` are implemented with real macOS acceptance. Complete five-target installation/service-update acceptance and first tagged publication remain V1 gates.
 
 ## Build identity
 
@@ -31,12 +31,12 @@ Main pushes keep publishing the tested server image to `nathanfallet/teamcode:la
 
 For a published version, choose the binary for the actual OS/CPU and verify its SHA-256 against the release manifest/checksums before execution. Rename it to `teamcode` (`teamcode.exe` on Windows) and put it in a stable user-owned directory on PATH. POSIX downloads require executable permission (`chmod 755 teamcode`). Keep the same installed path when registering a user service. Never copy a personal TeamCode configuration into a release bundle.
 
-Linux binaries use platform shared libraries, including glibc/libcurl and `libcrypt.so.1`; these are not advertised as fully static builds. OS/CPU support is accepted only after its actual runner checks pass. Apple Developer notarization and Windows Authenticode signing are not currently provided. The publisher signature is independent of platform executable signing. `SHA256SUMS` is a convenience; authenticated artifact identity comes from the signed manifest and its independently pinned release key. The native `verify-release` command verifies that signature using compiled public roots and optionally checks a binary against the authenticated manifest. Automated installation still remains to be implemented. Linux verification requires OpenSSL libcrypto 3 (or a compatible libcrypto 4); a missing or incompatible library fails closed.
+Linux binaries use platform shared libraries, including glibc/libcurl and `libcrypt.so.1`; these are not advertised as fully static builds. OS/CPU support is accepted only after its actual runner checks pass. Apple Developer notarization and Windows Authenticode signing are not currently provided. The publisher signature is independent of platform executable signing. `SHA256SUMS` is a convenience; authenticated artifact identity comes from the signed manifest and its independently pinned release key. The native `verify-release` command verifies that signature using compiled public roots and optionally checks a binary against the authenticated manifest. The native installer verifies the signed manifest and exact executable bytes before staging a version; its full five-target acceptance is still pending. Linux verification requires OpenSSL libcrypto 3 (or a compatible libcrypto 4); a missing or incompatible library fails closed.
 
 ## Remaining V1 distribution acceptance
 
 - Complete five-target native signature/key-rotation runtime acceptance; local JVM/macOS verification alone does not accept the other native adapters.
-- Implement user-owned installation, bounded authenticated release discovery/downloads, update and rollback, with a fixed stable executable path and explicit version selection.
+- Complete five-target acceptance of the implemented private installation, immutable launcher, update/rollback, service restart and interrupted-transaction recovery.
 - Preserve login/device identity and never rewrite personal Claude/Codex configuration during installation or updates.
 - Drain the owned user service and handle executable replacement on Windows without stopping unrelated processes; restore working registration/binary on failure.
 - Exercise fresh installation, update/rollback, offline/interrupted download, integrity refusal and restart on each target. Continue separate clean-workstation reboot/logon and pre-login service acceptance.
@@ -70,8 +70,41 @@ The signature cannot supply a new public key. Fork maintainers replace the PEM r
 
 ## Checking published versions
 
-`teamcode update --check` explicitly checks the latest stable GitHub release, downloads its canonical `manifest.json`/`manifest.sig` and authenticates the exact bytes against the compiled publisher roots before reporting a version. `--version VERSION` checks a specific version, including prereleases. A valid signature over a different version is refused. The check compares full SemVer precedence without integer overflow, and checking an older version never advertises it as an available upgrade. A missing stable release is reported separately from HTTP, signature or schema failure. No TeamCode login is read, and this command neither installs files nor restarts services. `teamcode update` installation and `--rollback` remain unavailable until their V1 implementation/acceptance is complete.
+`teamcode update --check` explicitly checks the latest stable GitHub release, downloads its canonical `manifest.json`/`manifest.sig` and authenticates the exact bytes against the compiled publisher roots before reporting a version. `--version VERSION` checks a specific version, including prereleases. A valid signature over a different version is refused. The check compares full SemVer precedence without integer overflow, and checking an older version never advertises it as an available upgrade. A missing stable release is reported separately from HTTP, signature or schema failure. No TeamCode login is read, and this command neither installs files nor restarts services. Managed installation/update/rollback are described below; their current platform-specific evidence is recorded in the status ledger.
 
 The typed client owns a separate credential-free HTTP client; it never receives team/provider credentials. The [public GitHub release API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release) provides only a bounded version hint, not trust or arbitrary asset URLs. Canonical download paths are derived from the validated version/target. Downloads permit at most five redirects to HTTPS GitHub release/CDN hosts, with no embedded user credentials, nonstandard ports or fragment. API redirects are rejected. Metadata and binary bodies are bounded even without trustworthy Content-Length; binary transfer enforces the declared exact length and leaves SHA-256 authentication to the staging verifier. Encoded bodies and inconsistent lengths fail, and errors do not expose response bodies or signed CDN query strings. Checks/downloads have connection, socket and total deadlines; coroutine cancellation is preserved. The explicit check makes network requests each time; periodic cached checks and opt-in unattended installation remain planned.
 
 Signed golden fixtures have `-text` Git attributes. A Windows autocrlf checkout must preserve their authenticated bytes; the verifier deliberately rejects CRLF-translated payloads rather than repairing them. A regression test performs a real Git index checkout with autocrlf enabled and checks both successful unchanged-byte verification and rejection after newline translation.
+
+
+## Managed native installation and rollback
+
+Starting with a trusted native executable built from this source, use:
+
+```sh
+teamcode install --version VERSION
+# Or use a directory containing an already downloaded signed release:
+teamcode install --bundle /absolute/path/to/release
+```
+
+The first published version is still pending. The installer requires its source bundle to include `manifest.sig`, not just checksums. It chooses the current OS/CPU asset, authenticates its metadata, verifies exact size/SHA-256 in private staging and executes a bounded version/API compatibility probe before selection. A saved TeamCode login causes a capability check against that configured server; installation/update refuses an unavailable or incompatible server. A fresh installation requires no login. Rollback uses a previously accepted local payload and remains available with the central server offline.
+
+The default application-data root is `~/Library/Application Support/TeamCode` on macOS, `$XDG_DATA_HOME/teamcode` or `~/.local/share/teamcode` on Linux, and `%LOCALAPPDATA%\TeamCode` on Windows. A configured XDG data home is also honored on macOS. Use `install --root ABSOLUTE_PATH` for an explicit private location. Add its `bin` directory to PATH; the command prints its absolute launcher path. Configuration/session credentials remain under the existing configuration directory. Installation refuses a nonempty unowned layout and does not replace an arbitrary executable or source checkout.
+
+```sh
+teamcode update --check
+teamcode update
+teamcode update --version VERSION
+teamcode update --bundle /absolute/path/to/release
+teamcode update --rollback
+```
+
+The check only reports authenticated metadata. A default update selects a newer stable release; explicit `--version` or `--bundle` permits a deliberate downgrade. Ordinary updates discover their own managed installation; `--root` may select one explicitly. A manually copied/source executable must first use `install`. Repeated installation reuses verified immutable bytes. A valid cached payload may be reused even if an unused source copy is damaged; corrupted installed bytes fail verification.
+
+The root contains an immutable `bin` launcher, immutable `versions/MANIFEST_SHA256/` payloads and an atomically selected `current.json`. An owner-only local attestation binds each selected payload to its publisher-authenticated manifest and exact binary digest. Files/ownership/permissions and hashes are checked before dispatch; public roots still authenticate every newly introduced manifest. The original launcher remains untouched across upgrades, including Windows while it is executing. POSIX replaces the launcher process with the selected executable; Windows waits for its owned child. Previously installed payloads remain on disk, so active/older processes never lose their executable. Automatic payload garbage collection is not implemented.
+
+A persistent OS writer lock serializes installers. A separate activity lock is shared for the complete `teamcode run` lifetime, including quiet gaps; update can stage while an agent works but requires exclusive activity access before activation. A busy installation refuses the switch without stopping the agent. POSIX flock descriptors and Windows file-region locks release automatically on process exit; lock files are never deleted to guess that a writer is stale.
+
+For a matching owned service, activation cooperatively drains/stops it, atomically changes the selected version, starts the service through the stable launcher and verifies its authenticated local identity/version. A previously stopped service stays stopped. A startup failure restores the old selection and attempts to restart the old service. `transaction.json` records the before/after selection before interruption-sensitive work; the next invocation recovers an interrupted transaction only after acquiring the exclusive lock. Failed recovery keeps the journal for retry and is not announced as success. A source/manual service registered to another executable is preserved; reinstall that service through the managed launcher before using service-aware updates.
+
+`smoke-installation.py --binary PATH --first-bundle DIR --second-bundle DIR [--service]` accepts two signed local fixtures without reading private signing keys. It exercises real installation/idempotence, immutable launcher selection, two-version update, offline rollback, interrupted-selection recovery, tampered-byte refusal, Unicode paths, private local attestations and input/configuration preservation. Its optional service mode checks actual OS registration, selected-version restart, configuration preservation and rollback while the synthetic central server is offline; POSIX additionally runs a quiet synthetic agent and proves the update refuses to switch until it exits. No real provider calls are made. The current real acceptance is macOS ARM64; the five-target tagged-release/OS lifecycle gates remain open.

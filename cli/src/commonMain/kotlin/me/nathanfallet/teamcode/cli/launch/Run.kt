@@ -24,6 +24,11 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
     private val workload by option("--workload", help = "Scheduling class for this launch; quotas and permissions still apply.").choice("interactive", "background").default("interactive")
     private val arguments by argument("AGENT_ARGS").multiple()
     override suspend fun run() {
+        val service = loadService(configPath())
+        val lease = me.nathanfallet.teamcode.cli.update.agentInstallationLease(service?.executable)
+        try { runAgent() } finally { lease?.close() }
+    }
+    private suspend fun runAgent() {
         val config = loadConfig()
         val service = loadService(configPath())
         if (service != null && serviceResponds(service, config.serverUrl, backgroundWorkload = workload == "background")) {

@@ -47,6 +47,7 @@ def main():
 
         vector('valid', good)
         vector('rotated', good, pairs[1])
+        vector('newer', {**good, 'version': '1.2.4', 'tag': 'v1.2.4', 'sourceCommit': 'b' * 40, 'assets': {target: {**asset, 'fileName': asset['fileName'].replace(version, '1.2.4')} for target, asset in assets.items()}})
         vector('salt20', good, options=['-sigopt', 'rsa_padding_mode:pss', '-sigopt', 'rsa_pss_saltlen:20'])
         vector('mgf384', good, options=['-sigopt', 'rsa_padding_mode:pss', '-sigopt', 'rsa_pss_saltlen:32', '-sigopt', 'rsa_mgf1_md:sha384'])
         vector('pkcs1', good, options=[])

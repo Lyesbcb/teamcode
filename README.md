@@ -182,4 +182,4 @@ The subscription adapter uses ChatGPT's Codex endpoint, never the metered OpenAI
 
 To exercise the actual Codex CLI instead of Claude in the opt-in acceptance script, add `--skip-claude --codex-model gpt-6-luna`. Model availability depends on the subscription. Native Codex-to-Codex transport is verified; Claude-to-Codex translation requires the experimental settings flag and the documented compatible profile.
 
-Versioned native assets are being prepared with shared CLI/server build identity, five-target runtime acceptance and a checked release manifest. See [native distribution and remaining update/rollback work](docs/distribution.md). No `teamcode update` command or published stable CLI release is currently claimed.
+Native `install`, `update --check`, managed `update` and offline `update --rollback` are implemented, with signed metadata, an immutable launcher and service-aware switching. Real installation/update acceptance currently covers macOS ARM64; full five-target acceptance and the first published version remain pending. See [native distribution, commands and remaining gates](docs/distribution.md). No stable CLI release is currently claimed.

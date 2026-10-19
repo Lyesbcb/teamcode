@@ -157,6 +157,67 @@ cleanup:
     return success ? 0 : stage;
 }
 
+static inline int teamcode_windows_install_private_path(const wchar_t *path, int directory) {
+    DWORD flags = GetFileAttributesW(path);
+    if (flags == INVALID_FILE_ATTRIBUTES || (flags & FILE_ATTRIBUTE_REPARSE_POINT) ||
+        (((flags & FILE_ATTRIBUTE_DIRECTORY) != 0) != (directory != 0))) return 0;
+    wchar_t *text = teamcode_windows_user_sid();
+    PSID expected = NULL, owner = NULL;
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    int valid = text && ConvertStringSidToSidW(text, &expected) &&
+        GetNamedSecurityInfoW((wchar_t *)path, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &owner, NULL, &dacl, NULL, &descriptor) == ERROR_SUCCESS && owner && EqualSid(owner, expected) && dacl && dacl->AceCount == 1;
+    if (valid) {
+        ACCESS_ALLOWED_ACE *ace = NULL;
+        valid = GetAce(dacl, 0, (void **)&ace) && ace && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+            EqualSid((PSID)&ace->SidStart, expected);
+    }
+    if (descriptor) LocalFree(descriptor);
+    if (expected) LocalFree(expected);
+    if (text) LocalFree(text);
+    return valid;
+}
+static inline int teamcode_windows_install_owned(HANDLE file) {
+    BY_HANDLE_FILE_INFORMATION information;
+    if (!GetFileInformationByHandle(file, &information) || information.nNumberOfLinks != 1 ||
+        (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return 0;
+    wchar_t *text = teamcode_windows_user_sid();
+    PSID expected = NULL, actual = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    int valid = text && ConvertStringSidToSidW(text, &expected) &&
+        GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+            &actual, NULL, NULL, NULL, &descriptor) == ERROR_SUCCESS && actual && EqualSid(actual, expected);
+    if (descriptor) LocalFree(descriptor);
+    if (expected) LocalFree(expected);
+    if (text) LocalFree(text);
+    return valid;
+}
+/* Share the persistent file; only the one-byte lock region controls shared/exclusive access. */
+static inline int teamcode_windows_install_lock(const wchar_t *path, int exclusive, void **handle) {
+    HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE) return -1;
+    if (!teamcode_windows_install_owned(file)) { CloseHandle(file); return -1; }
+    OVERLAPPED position = {0};
+    if (!LockFileEx(file, LOCKFILE_FAIL_IMMEDIATELY | (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0), 0, 1, 0, &position)) {
+        DWORD error = GetLastError();
+        CloseHandle(file);
+        return error == ERROR_LOCK_VIOLATION ? 0 : -1;
+    }
+    *handle = file;
+    return 1;
+}
+static inline void teamcode_windows_install_unlock(void *handle) { CloseHandle((HANDLE)handle); }
+static inline int teamcode_windows_install_seal(const wchar_t *path) {
+    HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | READ_CONTROL, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE) return -1;
+    int valid = teamcode_windows_install_owned(file) && FlushFileBuffers(file);
+    CloseHandle(file);
+    return valid ? 0 : -1;
+}
+
 /* Duplicate only standard streams; do not make arbitrary parent handles inheritable. */
 static inline HANDLE teamcode_windows_standard(DWORD kind, int quiet) {
     HANDLE result = NULL;
