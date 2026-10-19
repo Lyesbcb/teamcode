@@ -11,7 +11,7 @@ Application replicas share one MySQL database and one credential encryption key.
 | Agent launches | Shared credential-bound lifecycle, original reservation links, atomic lifetime accounting, run policy and current delivery metadata; no sticky sessions |
 | Groups and delegated managers | Shared scoped assignments, current authorization, cumulative caps and original reservation/group snapshots; no process cache |
 | Active requests | Unexpired SQL reservations, not per-pod counters |
-| Completed requests | Exactly-once settlement increments a durable team counter; counted after this migration, not reconstructed from historical traffic |
+| Completed requests | Exactly-once settlement increments a durable team counter for observed valid terminal provider usage, including a client closing before HTTP EOF; this is not a delivery acknowledgement and historical traffic is not reconstructed |
 | Quotas and forecasts | Database observations/history, stale-data handling and expiring directives |
 | Scheduled work | Database-clock owner leases with compare-and-set release; account polling order survives restart |
 | Credentials | AES-GCM envelopes, account row lock, credential versions and committed refresh intent |

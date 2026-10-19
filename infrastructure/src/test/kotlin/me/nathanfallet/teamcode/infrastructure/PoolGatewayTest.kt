@@ -185,7 +185,32 @@ class PoolGatewayTest {
             assertEquals(1, calls)
             assertTrue(store.didSettle)
             assertNull(store.settled)
+            assertEquals(listOf(false), store.settlementCompletions)
             assertEquals(0, gateway.status().active)
+        }
+    }
+    @Test fun observedTerminalUsageCountsWhenTheClientClosesBeforeHttpEofWithoutReplaying() = runBlocking {
+        for (protocol in WireProtocol.entries) {
+            val provider = if (protocol == WireProtocol.MESSAGES) "anthropic" else "codex"
+            val store = FakeAdmission(account.copy(identity = account.identity.copy(provider = provider)))
+            var calls = 0
+            val events = if (protocol == WireProtocol.MESSAGES) FixtureGatewayService.EVENTS.joinToString("") else
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            HttpClient(MockEngine {
+                calls++; respond(events, headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            }) { install(HttpTimeout) }.use { http ->
+                val transport = if (protocol == WireProtocol.MESSAGES) ClaudeTransport(http) else CodexTransport(http)
+                val body = if (protocol == WireProtocol.MESSAGES) request() else GenerationRequest(
+                    """{"model":"gpt-test","stream":true,"input":"synthetic"}""".toByteArray(), emptyMap(), actor, protocol)
+                val gateway = PoolGateway(store, credentials, listOf(transport), FakeModelPolicies())
+                val closed = assertFailsWith<CancellationException> {
+                    gateway.forward(body) { _, chunks -> chunks.collect { throw CancellationException("client closed after terminal event") } }
+                }
+                assertEquals("client closed after terminal event", closed.message)
+                assertEquals(1, calls)
+                assertEquals(6, store.settled)
+                assertEquals(listOf(true), store.settlementCompletions)
+            }
         }
     }
     @Test fun providerRejectionDoesNotExposeCredentialsOrBurnAllowance() = runBlocking {
@@ -516,6 +541,7 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     val providerRequests = mutableListOf<Pair<String, String>>()
     override suspend fun recordProviderRequest(reservation: Reservation, requestId: String) { providerRequests += reservation.id to requestId }
     val charges = mutableListOf<Long?>()
+    val settlementCompletions = mutableListOf<Boolean>()
     val observations = mutableListOf<Pair<String, QuotaUpdate>>()
     var settled: Long? = null
     var didSettle = false
@@ -529,7 +555,9 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
         affinity?.let { affinities[it] = RouteTarget(provider, model) }
         return Reservation("request-$id", account.copy(id = id, identity = account.identity.copy(provider = provider)), units)
     }
-    override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) { didSettle = true; settled = actualUnits; charges += actualUnits }
+    override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {
+        didSettle = true; settled = actualUnits; charges += actualUnits; settlementCompletions += completed
+    }
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = error("unused")
     override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = error("unused")
     override suspend fun poolBudgets(actor: Principal) = emptyList<PoolBudget>()

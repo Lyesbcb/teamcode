@@ -67,7 +67,7 @@ teamcode auth sessions revoke SESSION_ID
 teamcode devices revoke DEVICE_ID
 ```
 
-Revoking a device signs out its sessions across replicas. Usage remains shared by member; adding or reconnecting devices does not reset allowances. The non-secret installation identity survives logout, while the credential file is removed. See [device lifecycle and authorization](docs/devices.md). Authentication sessions are separate from the planned agent-run registry.
+Revoking a device signs out its sessions across replicas. Usage remains shared by member; adding or reconnecting devices does not reset allowances. The non-secret installation identity survives logout, while the credential file is removed. See [device lifecycle and authorization](docs/devices.md). Authentication sessions are separate from the [agent-run registry](docs/agent-sessions.md).
 
 ## Kubernetes
 

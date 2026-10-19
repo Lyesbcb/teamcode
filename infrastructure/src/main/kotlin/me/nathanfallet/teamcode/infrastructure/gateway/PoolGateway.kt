@@ -126,7 +126,6 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
         var knownCharge: Long? = null
         var dispatched = false
         var committed = false
-        var completed = false
         try {
             suspend fun credential(rejected: String? = null): ProviderCredentials = try {
                 credentials.fresh(reservation.account, rejected)
@@ -193,7 +192,6 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                         }
                         val chunks = if (translated) StreamTranslation(codecs).translate(source, transport.protocol, request.protocol, requestedModel, replyTools) else source
                         receive(GenerationHead(status, "text/event-stream", mapOf("x-teamcode-request-id" to reservation.id, "x-teamcode-model" to model, "x-teamcode-provider" to transport.provider)), chunks)
-                        completed = meter.settledUnits != null
                     }
                     if (!refreshRejected) break
                     // execute has closed the rejected response before renewing or retrying.
@@ -210,9 +208,13 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             throw TeamFailure("upstream_unavailable", 502, "The provider request could not complete.")
         } finally {
             withContext(NonCancellable) {
-                val charge = if (!dispatched) 0 else knownCharge ?: meter.settledUnits
+                // Native clients can close immediately after the terminal SSE
+                // event, cancelling receive before HTTP EOF. Count the observed
+                // provider terminal usage, independently of downstream delivery.
+                val terminalUsage = meter.settledUnits
+                val charge = if (!dispatched) 0 else knownCharge ?: terminalUsage
                 try {
-                    withTimeout(5_000) { admission.settle(reservation, charge, completed) }
+                    withTimeout(5_000) { admission.settle(reservation, charge, terminalUsage != null) }
                     System.out.println("TeamCode inference settled request=${reservation.id} units=${charge ?: "unknown"} terminal=${meter.lastEvent} failure=${meter.failureCategory}")
                 } catch (_: Exception) {
                     // The durable reservation remains charged; never mask cancellation or a stream failure.
