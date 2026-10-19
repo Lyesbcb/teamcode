@@ -1,2 +1,5 @@
-headers = process.h
+headers = process.h release_crypto.h
 package = me.nathanfallet.teamcode.cli.interop.process
+
+linkerOpts.osx = -framework Security -framework CoreFoundation
+linkerOpts.linux = -ldl

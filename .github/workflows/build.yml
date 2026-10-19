@@ -109,7 +109,9 @@ jobs:
             echo "NATIVE_ASSET=$asset"
             echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}"
           } >> "$GITHUB_ENV"
-      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" :app:buildFatJar
+      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" ":cli:linkDebugTest${NATIVE_TARGET}" :app:buildFatJar
+      - run: '"cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"'
+      - run: python3 scripts/smoke-release-verification.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - run: python3 scripts/smoke-native.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
       - run: python3 scripts/smoke-devices.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - run: python3 scripts/smoke-run.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
@@ -154,7 +156,9 @@ jobs:
         with:
           node-version: '22'
       - uses: gradle/actions/setup-gradle@v4
-      - run: .\gradlew.bat :cli:linkReleaseExecutableMingwX64
+      - run: .\gradlew.bat :cli:linkReleaseExecutableMingwX64 :cli:linkDebugTestMingwX64
+      - run: .\cli\build\bin\mingwX64\debugTest\test.exe
+      - run: python scripts/smoke-release-verification.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
       - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --allow-machine-test-certificate
       - run: python scripts/smoke-devices.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
       - run: python scripts/smoke-queued-cancel.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
@@ -201,7 +205,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
-      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}"
+      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" ":cli:linkDebugTest${NATIVE_TARGET}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-tests-${{ matrix.asset }}
+          path: cli/build/bin/${{ matrix.directory }}/debugTest/test.kexe
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ matrix.asset }}
@@ -241,13 +250,19 @@ jobs:
           path: cli/build/bin/${{ matrix.directory }}/releaseExecutable
       - uses: actions/download-artifact@v4
         with:
+          name: candidate-tests-${{ matrix.asset }}
+          path: cli/build/bin/${{ matrix.directory }}/debugTest
+      - uses: actions/download-artifact@v4
+        with:
           name: server-jar
           path: app/build/libs
       - name: Select the actual target runtime
         run: |
           test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
-          chmod 755 "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+          chmod 755 "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" "cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"
           echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}" >> "$GITHUB_ENV"
+      - run: '"cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"'
+      - run: python3 scripts/smoke-release-verification.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - run: python3 scripts/smoke-native.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
       - run: python3 scripts/smoke-devices.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - run: python3 scripts/smoke-run.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar

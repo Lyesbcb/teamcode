@@ -1,0 +1,33 @@
+{
+  "assets": {
+    "linux-arm64": {
+      "fileName": "teamcode-0.1.0-SNAPSHOT-linux-arm64",
+      "sha256": "3efecc2588c1238f1d519bb136afa0fc0a1ee0dbafea57280bc818306f3ba5b5",
+      "size": 15959784
+    },
+    "linux-x64": {
+      "fileName": "teamcode-0.1.0-SNAPSHOT-linux-x64",
+      "sha256": "3b13aebb608dd0238e00b0e1bff4546524a57023ba8ae566272957e516932bd8",
+      "size": 17265584
+    },
+    "macos-arm64": {
+      "fileName": "teamcode-0.1.0-SNAPSHOT-macos-arm64",
+      "sha256": "7cc218bd0a9d3bc048aa85a792952d5a6ecf6d5baf60ea28ef09aee87e9f4cff",
+      "size": 8243248
+    },
+    "macos-x64": {
+      "fileName": "teamcode-0.1.0-SNAPSHOT-macos-x64",
+      "sha256": "78276b00690b30413c9d331cc4a886e34596b14994ec4102abe5c7a7d18779dc",
+      "size": 8468120
+    },
+    "windows-x64": {
+      "fileName": "teamcode-0.1.0-SNAPSHOT-windows-x64.exe",
+      "sha256": "d88a5ccbfd248bbe1d4410130fadca15bc9aa393f6370cb4a0b86d3193c6da74",
+      "size": 9610752
+    }
+  },
+  "schemaVersion": 1,
+  "sourceCommit": "7121be7065b7e60433a99e81463ffc0c7e99a9ca",
+  "tag": "v0.1.0-SNAPSHOT",
+  "version": "0.1.0-SNAPSHOT"
+}
