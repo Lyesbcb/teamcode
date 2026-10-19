@@ -69,7 +69,7 @@ def run_agent(command, work, env):
 
 def run_coding_tasks(args, binary, root, env, request, token, log):
     policy = json.loads(request('/api/v1/policy/models', token=token)[1])
-    policy['experimentalCrossProviderTranslation'] = True
+    policy['experimentalCrossProviderTranslation'] = args.coding_route == 'translated'
     if args.coding_reasoning == 'portable':
         policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
     assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
@@ -108,10 +108,10 @@ if __name__ == '__main__':
 ''')
         digest = hashlib.sha256(tests.read_bytes()).hexdigest()
         incoming = args.model if agent == 'claude' else target_codex
-        provider = 'codex' if agent == 'claude' else 'anthropic'
-        target = target_codex if agent == 'claude' else args.model
-        rule = {'id': 'coding-' + agent, 'pattern': incoming, 'targets': [{'provider': provider, 'model': target}]}
         native_provider = 'anthropic' if agent == 'claude' else 'codex'
+        provider = native_provider if args.coding_route == 'native' else ('codex' if agent == 'claude' else 'anthropic')
+        target = incoming if args.coding_route == 'native' else (target_codex if agent == 'claude' else args.model)
+        rule = {'id': 'coding-' + agent, 'pattern': incoming, 'targets': [{'provider': provider, 'model': target}]}
         if args.coding_fallback:
             rule['targets'].insert(0, {'provider': native_provider, 'model': incoming})
         route_status, route_body = request('/api/v1/routes/' + rule['id'], rule, token, method='PUT')
@@ -134,7 +134,7 @@ if __name__ == '__main__':
                   'Do not delegate or start additional agents. '
                   'Finish with CODING_TASK_OK only after the tests pass.')
         command = coding_command(binary, agent, incoming, prompt, child_env, args.coding_reasoning)
-        print(f'Coding acceptance: agent={agent} reasoning_profile={args.coding_reasoning}; isolated tools, hooks and homes.', flush=True)
+        print(f'Coding acceptance: agent={agent} route={args.coding_route} reasoning_profile={args.coding_reasoning}; isolated tools, hooks and homes.', flush=True)
         log_offset = len(log.read_text())
         config = json.loads((root / 'config/teamcode/config.json').read_text())
         boundary = coding_fallback(request, token, config['serverUrl'], work, child_env, native_provider,

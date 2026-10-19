@@ -32,7 +32,9 @@ parser.add_argument('--translation-smoke', action='store_true', help='Run two sm
 parser.add_argument('--translation-direction', choices=('both','messages','responses'), default='both')
 parser.add_argument('--launcher', action='store_true', help='Use teamcode run to manage the agent proxy')
 parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
-parser.add_argument('--coding-task', choices=('claude', 'codex', 'both'), help='Run real agents through forced cross-provider routes on an isolated coding task')
+parser.add_argument('--coding-task', choices=('claude', 'codex', 'both'), help='Run real agents on an isolated coding task through a native or experimental translated route')
+parser.add_argument('--coding-route', choices=('native', 'translated'), default='native',
+                    help='Coding tasks use native subscription routes by default; translated explicitly opts into experimental conversion')
 parser.add_argument('--coding-reasoning', choices=('portable', 'default'), default='portable',
                     help='With --coding-task: portable explicitly disables reasoning; default leaves client reasoning settings unchanged')
 parser.add_argument('--coding-fallback', action='store_true', help='With --coding-task, remove native capacity at a tool-result boundary to exercise configured fallback')
@@ -43,6 +45,10 @@ if args.coding_reasoning != 'portable' and not args.coding_task:
     parser.error('--coding-reasoning requires --coding-task')
 if args.coding_fallback and not args.coding_task:
     parser.error('--coding-fallback requires --coding-task')
+if args.coding_fallback and args.coding_route != 'translated':
+    parser.error('--coding-fallback requires --coding-route translated')
+if args.coding_route != 'native' and not args.coding_task:
+    parser.error('--coding-route requires --coding-task')
 binary, jar = str(Path(args.binary).resolve()), str(Path(args.jar).resolve())
 name = 'teamcode-acceptance-' + secrets.token_hex(6)
 process = None

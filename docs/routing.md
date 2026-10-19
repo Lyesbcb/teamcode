@@ -60,7 +60,23 @@ Protocol references: [Anthropic streaming](https://platform.claude.com/docs/en/b
 
 ## Real coding-task acceptance
 
-`acceptance-provider.py --coding-task claude|codex|both` runs actual coding clients through the native launcher and central server, with forced cross-provider routes in either direction. It imports authorized subscriptions in access-only mode into its own disposable database, creates a small broken Python module and unchanged tests, and requires actual tool execution, corrected source, four independently rerun passing tests, multiple provider dispatches and settled usage. Claude uses Read/Edit/Bash; Codex uses its normal namespaced/code-mode tool inventory. Only metadata and matched public error categories are printed; raw agent output and subscription credentials are withheld. Process lifetime is bounded for both clients; Claude additionally has a twelve-turn bound. Test resources are removed afterward.
+The coding harness defaults to `--coding-route native`, leaving experimental translation disabled. Add `--coding-reasoning default` to retain each client's default reasoning controls while still isolating homes, hooks, tools and the workspace:
+
+```sh
+python3 scripts/acceptance-provider.py \
+  --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
+  --jar app/build/libs/app-all.jar \
+  --source /path/to/authorized/teamclaude.json \
+  --skip-claude --skip-reimport \
+  --coding-task both --coding-route native --coding-reasoning default \
+  --codex-model gpt-6-luna
+```
+
+On macOS ARM64, Claude Code 2.1.302 through Claude Haiku 4.5 completed the task in seven settled requests; Codex 0.163.0 through GPT-6 Luna completed it in four. Both corrected the source, preserved the tests and passed all four independent assertions, with only their native provider/model in dispatch metadata. No reasoning-disable override was used. This proves these isolated native tool tasks, not every personal configuration, architecture or quota-reset scenario.
+
+### Optional experimental conversion acceptance
+
+`acceptance-provider.py --coding-task claude|codex|both --coding-route translated` runs actual coding clients through the native launcher and central server, with forced cross-provider routes in either direction. It imports authorized subscriptions in access-only mode into its own disposable database, creates a small broken Python module and unchanged tests, and requires actual tool execution, corrected source, four independently rerun passing tests, multiple provider dispatches and settled usage. Claude uses Read/Edit/Bash; Codex uses its normal namespaced/code-mode tool inventory. Only metadata and matched public error categories are printed; raw agent output and subscription credentials are withheld. Process lifetime is bounded for both clients; Claude additionally has a twelve-turn bound. Test resources are removed afterward.
 
 Example from a local build (never run this in CI):
 
@@ -69,12 +85,12 @@ python3 scripts/acceptance-provider.py \
   --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
   --jar app/build/libs/app-all.jar \
   --source /path/to/authorized/teamclaude.json \
-  --coding-task claude --claude /path/to/actual/claude
+  --coding-task claude --coding-route translated --claude /path/to/actual/claude
 ```
 
 Verified with Claude Code 2.1.302 requesting `claude-haiku-4-5-20251001`, routed to the Codex subscription model `gpt-6-luna`: eight requests settled and all four independent tests passed. This uses the portable reasoning-disabled profile and isolated built-in tools; it is not full-default-client acceptance or proof of a mid-conversation provider switch.
 
-For the reverse direction, use `--coding-task codex --codex /path/to/actual/codex`. Codex 0.163.0 requesting `gpt-6-luna` completed the same coding task through the real Claude Max model `claude-haiku-4-5-20251001`: sixteen requests settled, the source was corrected, the test file was unchanged and all four independent tests passed. This exercises `additional_tools`, namespaced function/custom text tools, replayed history and verbosity. Reasoning was explicitly disabled and the destination was forced from the first turn. Full-default reasoning, other tool grammars and actual cross-provider quota/reset-boundary fallback remain experimental acceptance work outside V1. Controlled mid-conversation acceptance is described below.
+For the reverse direction, use `--coding-task codex --coding-route translated --codex /path/to/actual/codex`. Codex 0.163.0 requesting `gpt-6-luna` completed the same coding task through the real Claude Max model `claude-haiku-4-5-20251001`: sixteen requests settled, the source was corrected, the test file was unchanged and all four independent tests passed. This exercises `additional_tools`, namespaced function/custom text tools, replayed history and verbosity. Reasoning was explicitly disabled and the destination was forced from the first turn. Full-default reasoning, other tool grammars and actual cross-provider quota/reset-boundary fallback remain experimental acceptance work outside V1. Controlled mid-conversation acceptance is described below.
 
 
 ## Mid-conversation fallback acceptance
@@ -86,7 +102,7 @@ python3 scripts/acceptance-provider.py \
   --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
   --jar app/build/libs/app-all.jar \
   --source /path/to/authorized/teamclaude.json \
-  --coding-task claude --coding-fallback --claude /path/to/actual/claude
+  --coding-task claude --coding-route translated --coding-fallback --claude /path/to/actual/claude
 ```
 
 Every client inference must return HTTP 200 from the expected provider/model. Response request IDs correlate to provider dispatches and usage settlements; extra attempts are allowed only when they settled with zero charge before a safe retry. The route must retain its original version and targets. The same source-change, unchanged-test and four independent test assertions apply. The fixture's HTTP forwarding, exact history preservation, authentication and cleanup have provider-free tests in CI.
@@ -100,4 +116,4 @@ Verified on macOS ARM64 with reasoning disabled:
 | Claude Code 2.1.302 | One Claude Haiku request | Nine Codex `gpt-6-luna` requests | Source corrected, tests unchanged, four independent tests passed |
 | Codex 0.163.0 | One Codex `gpt-6-luna` request | Eleven Claude Haiku requests | Source corrected, tests unchanged, four independent tests passed |
 
-Every response in these runs was HTTP 200 with successful terminal usage, and every dispatch was correlated to a response request ID. No route edit or source credential refresh was used. Codex acceptance uses `--coding-task codex --coding-fallback --codex /path/to/actual/codex`; `--coding-task both` runs the directions sequentially and restores account availability between them.
+Every response in these runs was HTTP 200 with successful terminal usage, and every dispatch was correlated to a response request ID. No route edit or source credential refresh was used. Codex acceptance uses `--coding-task codex --coding-route translated --coding-fallback --codex /path/to/actual/codex`; `--coding-task both` runs the directions sequentially and restores account availability between them.

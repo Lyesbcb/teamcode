@@ -451,3 +451,17 @@ Verified locally:
 - The actual macOS native CLI against the packaged server/MySQL passes team bootstrap, password change, browser member creation, device/session commands, restart/reconnect and multi-session revocation. Exposed generated one additive boolean migration; replaying all **19 migrations** generates **zero additional migrations**. Published migrations are unchanged. Module/query conventions and whitespace checks pass.
 
 The pre-flag main commit `951de02` passed [CI run 39253886675](https://github.com/nathanfallet/teamcode/actions/runs/39253886675), including every native platform and image publication. This new feature-flag slice still requires CI after its push. All other V1 requirements remain in scope. The updated V2 roadmap separately records environment/MCP variants and a versioned skill catalog with yes/no access assignments; GitHub synchronization versus CI/API publication remains an open V2 choice, and skills do not use variants.
+
+
+## Native coding tasks with default reasoning (2026-10-19)
+
+The coding harness now defaults to native-provider routes. Experimental conversion requires explicit `--coding-route translated`, and the cross-provider boundary fixture additionally requires that route selection. `--coding-reasoning default` retains client reasoning defaults; the portable profile is still explicit and separately reproducible. Eight script tests pass, and syntax/whitespace checks pass.
+
+Opt-in real acceptance passed on macOS ARM64 through the actual native launcher, central server and access-only subscription pool, with `experimentalCrossProviderTranslation=false`:
+
+- Claude Code **2.1.302**, requesting `claude-haiku-4-5-20251001`, used only Anthropic. **Seven requests** completed with HTTP 200, known settled usage and `message_stop`.
+- Codex **0.163.0**, requesting `gpt-6-luna`, used only Codex. **Four requests** completed with HTTP 200, known settled usage and `response.completed`.
+- Each agent read the broken source/tests, reproduced the failure, edited only the source and ran the tests. The independent post-agent run passed all four tests, and the test-file hash stayed unchanged. Claude's Read/Edit/Bash tools and Codex's real tool execution were exercised. No `MAX_THINKING_TOKENS=0`, `alwaysThinkingEnabled=false` or `model_reasoning_effort=none` override was used.
+- Six accounts were imported in access-only mode; partial import rejection remained explicit. The source TeamClaude configuration hash stayed unchanged, no refresh ran and the owned processes/disposable database were removed. Only metadata and result assertions were logged, without raw agent content or provider credentials.
+
+See [native reproduction and separate experimental conversion tests](routing.md#real-coding-task-acceptance). This closes these two native default-reasoning coding cases; native quota/reset-boundary behavior, wider workload/architecture coverage and the other V1 gates remain open. It does not turn experimental conversion into a V1 requirement again.

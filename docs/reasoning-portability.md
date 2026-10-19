@@ -14,11 +14,11 @@ python3 scripts/acceptance-provider.py \
   --jar app/build/libs/app-all.jar \
   --source "$HOME/.config/teamclaude.json" \
   --skip-claude --skip-reimport \
-  --coding-task claude --coding-reasoning default \
+  --coding-task claude --coding-route translated --coding-reasoning default \
   --codex-model gpt-6-luna
 ```
 
-Use `--claude`/`--codex` to select actual installed executables when terminal integrations insert shims. The fixture imports access-only credentials into its disposable encrypted database, never refreshes them, and removes its own database/processes on exit. Real-provider tests are opt-in and must never be part of ordinary CI. The coding fixture explicitly enables the experiment in its disposable server. Selecting `default` must not silently fall back to the portable profile to obtain a passing result.
+Use `--claude`/`--codex` to select actual installed executables when terminal integrations insert shims. The fixture imports access-only credentials into its disposable encrypted database, never refreshes them, and removes its own database/processes on exit. Real-provider tests are opt-in and must never be part of ordinary CI. The `--coding-route translated` fixture explicitly enables the experiment in its disposable server; native routes leave conversion disabled. Selecting `default` must not silently fall back to the portable profile to obtain a passing result.
 
 ## Observed failures on 2026-10-19
 
