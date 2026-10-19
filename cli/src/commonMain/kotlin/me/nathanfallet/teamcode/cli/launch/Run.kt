@@ -4,6 +4,7 @@ import com.github.ajalt.clikt.command.*
 import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.arguments.*
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.choice
 import me.nathanfallet.teamcode.cli.SystemExit
 import me.nathanfallet.teamcode.cli.loadConfig
 import me.nathanfallet.teamcode.cli.sdk
@@ -20,11 +21,12 @@ class Run : SuspendingNoOpCliktCommand(name = "run") {
 
 private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(name = agent) {
     private val noGuidance by option("--no-guidance", help = "Disable automatic session guidance for this launch.").flag()
+    private val workload by option("--workload", help = "Scheduling class for this launch; quotas and permissions still apply.").choice("interactive", "background").default("interactive")
     private val arguments by argument("AGENT_ARGS").multiple()
     override suspend fun run() {
         val config = loadConfig()
         val service = loadService(configPath())
-        if (service != null && serviceResponds(service, config.serverUrl)) {
+        if (service != null && serviceResponds(service, config.serverUrl, backgroundWorkload = workload == "background")) {
             sdk(config).use { it.capabilities() }
             echo("Running $agent through the TeamCode user service.", err = true)
             val code = launch(service.port, service.localToken)
@@ -68,7 +70,7 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
             AgentLaunch(emptyList(), emptyMap())
         } else AgentLaunch(emptyList(), emptyMap())
         try {
-            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString(), guidance.arguments)
+            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString(), guidance.arguments, workload)
             return runInteractiveProcess(agent, plan.arguments, plan.environment + guidance.environment)
         } finally {
             try { plugin?.close() } catch (_: Exception) { echo("The temporary guidance plugin could not be removed.", err = true) }
@@ -78,9 +80,9 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
 
 /** Null values remove inherited provider credentials without changing the parent environment or config files. */
 internal class AgentLaunch(val arguments: List<String>, val environment: Map<String, String?>)
-internal fun agentLaunch(agent: String, arguments: List<String>, port: Int, token: String, guidancePlugin: String? = null, codexGuidance: List<String> = emptyList()): AgentLaunch {
-    require(agent in setOf("claude", "codex") && port in 1..65535 && token.length >= 32)
-    val origin = "http://127.0.0.1:$port"
+internal fun agentLaunch(agent: String, arguments: List<String>, port: Int, token: String, guidancePlugin: String? = null, codexGuidance: List<String> = emptyList(), workload: String = "interactive"): AgentLaunch {
+    require(agent in setOf("claude", "codex") && port in 1..65535 && token.length >= 32 && workload in setOf("interactive", "background"))
+    val origin = "http://127.0.0.1:$port" + if (workload == "background") "/_teamcode/workloads/background" else ""
     return if (agent == "claude") AgentLaunch((guidancePlugin?.let { listOf("--plugin-dir", it) }.orEmpty()) + arguments, mapOf(
         "TEAMCODE_HOOK_TOKEN" to if (guidancePlugin != null) token else null,
         "ANTHROPIC_BASE_URL" to origin,

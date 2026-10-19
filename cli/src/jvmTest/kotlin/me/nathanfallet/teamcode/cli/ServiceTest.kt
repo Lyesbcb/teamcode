@@ -12,11 +12,22 @@ import me.nathanfallet.teamcode.client.TeamCodeClient
 import java.io.ByteArrayInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.test.*
+import kotlinx.serialization.json.*
 
 class ServiceTest {
     private val token = "b".repeat(64)
     private fun settings(os: String) = ServiceSettings("a".repeat(32), 8789, token,
         "/home/user/Team & Code/\"100%\$x\"", "/home/user/config dir/config.json", "/home/user/service", os, "501")
+
+    @Test fun backgroundLaunchRequiresAnAuthenticatedMatchingServiceWithWorkloadSupport() {
+        val old = buildJsonObject { put("id", "installation"); put("serverUrl", "https://team.example") }
+        val current = JsonObject(old + ("capabilities" to JsonArray(listOf(JsonPrimitive("workload-routing-v1")))))
+        assertTrue(serviceMatches(old, "installation", "https://team.example", false))
+        assertFalse(serviceMatches(old, "installation", "https://team.example", true))
+        assertTrue(serviceMatches(current, "installation", "https://team.example", true))
+        assertFalse(serviceMatches(current, "another-installation", "https://team.example", true))
+        assertFalse(serviceMatches(current, "installation", "https://other-team.example", true))
+    }
 
     @Test fun manifestsPreserveLiteralPathsWithoutExposingCredentials() {
         val mac = settings("macos")

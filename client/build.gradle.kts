@@ -10,6 +10,7 @@ kotlin {
         commonMain.dependencies {
             api(projects.api)
             api(libs.ktor.client.core)
+            implementation(libs.coroutines)
             implementation(libs.ktor.client.resources)
             implementation(libs.ktor.client.json)
             implementation(libs.ktor.json)

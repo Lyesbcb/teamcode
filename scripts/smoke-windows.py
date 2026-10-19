@@ -39,6 +39,7 @@ login_password = initial_password
 login_change_required = True
 revoked = False
 calls = []
+workloads = []
 checks = []
 stream_started = threading.Event()
 stream_release = threading.Event()
@@ -107,6 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         assert self.path in ('/v1/messages', '/v1/responses')
         assert json.loads(body)['model'] == 'fixture'
         calls.append(self.path)
+        workloads.append(self.headers.get('x-teamcode-workload'))
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -385,16 +387,17 @@ try:
             finally:
                 kernel.CloseHandle(handle)
 
-        for name in ('claude', 'codex'):
+        for name, workload in [('claude', 'interactive'), ('codex', 'interactive'), ('claude', 'background'), ('codex', 'background')]:
             record = root / (name + '.json')
             env['TEAMCODE_TEST_AGENT'] = name
             env['TEAMCODE_RUN_RECORD'] = str(record)
-            result = command('run', name, '--', *arguments, stdin='stdin reaches the child\n', check=False)
+            result = command('run', name, '--workload', workload, '--', *arguments, stdin='stdin reaches the child\n', check=False)
             assert result.returncode == 37, f'{name} failed: {result.stdout}\n{result.stderr}'
             assert result.stdout == 'CHILD_STDOUT_OK\n' and 'CHILD_STDERR_OK' in result.stderr
             captured = json.loads(record.read_text(encoding='utf-8'))
             descendant_exited(captured['descendant'])
             assert captured['args'] == arguments, 'Windows argument encoding changed the agent arguments'
+            assert workloads[-1] == ('background' if workload == 'background' else None)
             assert captured['cwd'] == str(Path.cwd())
             address = urllib.parse.urlsplit(captured['origin'])
             try:
@@ -447,7 +450,7 @@ try:
                     request = urllib.request.Request(service_origin + '/_teamcode/service',
                         headers={'Authorization': 'Bearer ' + settings['localToken']})
                     with urllib.request.urlopen(request, timeout=1) as response:
-                        running = json.load(response) == {'id': settings['id'], 'serverUrl': origin}
+                        running = json.load(response) == {'id': settings['id'], 'serverUrl': origin, 'capabilities': ['workload-routing-v1']}
                 except OSError:
                     running = False
                 if running == expected:
@@ -470,6 +473,14 @@ try:
         result = command('run', 'claude', '--', *arguments, stdin='stdin reaches the child\n', check=False)
         assert result.returncode == 37
         assert json.loads(record.read_text(encoding='utf-8'))['origin'] == service_origin
+        for name, workload in [('claude', 'background'), ('codex', 'background'), ('claude', 'interactive')]:
+            env['TEAMCODE_TEST_AGENT'] = name
+            result = command('run', name, '--workload', workload, '--', *arguments, stdin='stdin reaches the child\n', check=False)
+            assert result.returncode == 37
+            captured = json.loads(record.read_text(encoding='utf-8'))
+            assert captured['origin'] == service_origin
+            descendant_exited(captured['descendant'])
+            assert workloads[-1] == ('background' if workload == 'background' else None)
         service_health()
 
         def service_inference():

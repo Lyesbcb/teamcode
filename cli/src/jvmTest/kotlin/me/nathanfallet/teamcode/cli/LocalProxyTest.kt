@@ -59,4 +59,32 @@ class LocalProxyTest {
             assertEquals(0, calls)
         } finally { sdk.close() }
     }
+
+    @Test fun `shared proxy isolates background launches and rejects conflicting metadata`() = testApplication {
+        val forwarded = mutableListOf<Pair<String, String?>>()
+        val sdk = TeamCodeClient("https://team.example", { "server-token" }) { config -> HttpClient(MockEngine { request ->
+            assertEquals("Bearer server-token", request.headers[HttpHeaders.Authorization])
+            forwarded += request.url.encodedPath to request.headers["x-teamcode-workload"]
+            respond("data: {}\n\n", headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { config(this) } }
+        application { localProxy(sdk, localToken, serviceId = "shared", serverUrl = "https://team.example") }
+        try {
+            for (path in listOf("/v1/messages", "/v1/responses")) {
+                val background = "/_teamcode/workloads/background$path"
+                suspend fun request(url: String, workload: List<String> = emptyList(), authenticated: Boolean = true) = client.post(url) {
+                    if (authenticated) bearerAuth(localToken)
+                    workload.forEach { header("x-teamcode-workload", it) }
+                    contentType(ContentType.Application.Json); setBody(payload())
+                }
+                assertEquals(HttpStatusCode.OK, request(background).status)
+                assertEquals(HttpStatusCode.OK, request(path).status)
+                assertEquals(listOf(path to "background", path to null), forwarded.takeLast(2))
+                assertEquals(HttpStatusCode.BadRequest, request(background, listOf("interactive")).status)
+                assertEquals(HttpStatusCode.BadRequest, request(background, listOf("background", "background")).status)
+                assertEquals(HttpStatusCode.Unauthorized, request(background, authenticated = false).status)
+            }
+            assertEquals(4, forwarded.size, "Rejected requests must not reach the server")
+            assertEquals(HttpStatusCode.NotFound, client.post("/_teamcode/workloads/urgent/v1/messages") { bearerAuth(localToken) }.status)
+        } finally { sdk.close() }
+    }
 }

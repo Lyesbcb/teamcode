@@ -32,6 +32,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
     started = threading.Event()
     release = threading.Event()
     calls = []
+    workloads = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -63,6 +64,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
                 self.send_error(401)
                 return
             calls.append(self.path)
+            workloads.append(self.headers.get('x-teamcode-workload'))
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
@@ -97,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
                                                  headers={'Authorization': 'Bearer ' + settings['localToken']})
                 with urllib.request.urlopen(request, timeout=1) as response:
                     body = json.load(response)
-                running = body == {'id': settings['id'], 'serverUrl': origin}
+                running = body == {'id': settings['id'], 'serverUrl': origin, 'capabilities': ['workload-routing-v1']}
                 observed = 'matching identity' if running else 'identity mismatch'
             except OSError as error:
                 observed = type(error).__name__ + (f' HTTP {error.code}' if isinstance(error, urllib.error.HTTPError) else '')
@@ -187,14 +189,23 @@ with tempfile.TemporaryDirectory(prefix='teamcode-service-smoke-') as directory:
 
         # run must reuse this installation and leave it running when the child exits.
         agent = root / 'claude'
-        agent.write_text('#!' + sys.executable + '\nimport os, sys\n'
-                         f'assert os.environ["ANTHROPIC_BASE_URL"] == {service_origin!r}\n'
+        agent.write_text('#!' + sys.executable + '\nimport os, sys, urllib.request\n'
+                         f'assert os.environ["ANTHROPIC_BASE_URL"] == {service_origin!r} + os.environ.get("TEST_WORKLOAD_PREFIX", "")\n'
                          'assert len(os.environ["ANTHROPIC_API_KEY"]) == 64\n'
+                         'request = urllib.request.Request(os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages", b\'{"model":"fixture"}\', '
+                         '{"Content-Type":"application/json", "Authorization":"Bearer " + os.environ["ANTHROPIC_API_KEY"]})\n'
+                         'with urllib.request.urlopen(request, timeout=5) as response: assert b"done" in response.read()\n'
                          'print("SERVICE_REUSED")\nsys.exit(17)\n')
         agent.chmod(0o700)
         env['PATH'] = str(root) + os.pathsep + os.environ['PATH']
         result = command('run', 'claude', '--', '--literal', check=False)
         assert result.returncode == 17 and result.stdout == 'SERVICE_REUSED\n'
+        env['TEST_WORKLOAD_PREFIX'] = '/_teamcode/workloads/background'
+        background = command('run', 'claude', '--workload', 'background', '--', '--literal', check=False)
+        assert background.returncode == 17 and background.stdout == 'SERVICE_REUSED\n'
+        del env['TEST_WORKLOAD_PREFIX']
+        interactive = command('run', 'claude', '--', '--literal', check=False)
+        assert interactive.returncode == 17 and workloads[-3:] == [None, 'background', None]
         health(settings)
 
         # Stop while streaming: the already accepted response must finish before exit.

@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.client
 
+import kotlinx.coroutines.*
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
@@ -16,11 +17,11 @@ import me.nathanfallet.teamcode.api.Serialization
 import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.api.resources.*
 
-/** The caller owns platform engines and credential storage; this client owns its HTTP lifetime. */
+/** The factory must create independently owned HTTP clients; this SDK owns their lifetime. */
 class TeamCodeClient(
     serverUrl: String,
     private val token: suspend () -> String?,
-    createHttpClient: (io.ktor.client.HttpClientConfig<*>.() -> Unit) -> HttpClient,
+    private val createHttpClient: (io.ktor.client.HttpClientConfig<*>.() -> Unit) -> HttpClient,
 ) : AutoCloseable {
     private val origin = Url(serverUrl.also { require(it.isNotBlank()) { "A TeamCode server URL is required." } }).also {
         require(it.protocol == URLProtocol.HTTPS ||
@@ -30,7 +31,7 @@ class TeamCodeClient(
         require(it.user.isNullOrEmpty() && it.password.isNullOrEmpty() && it.encodedPath in setOf("", "/") &&
             it.parameters.isEmpty() && it.fragment.isEmpty()) { "Use a server origin without credentials, path, query or fragment." }
     }.toString().trimEnd('/')
-    private val http = createHttpClient {
+    private val configureHttpClient: io.ktor.client.HttpClientConfig<*>.() -> Unit = {
         expectSuccess = false
         followRedirects = false // A redirect must not carry a team credential to another origin.
         install(HttpTimeout) {
@@ -41,6 +42,10 @@ class TeamCodeClient(
         install(Resources)
         install(ContentNegotiation) { json(Serialization.json) }
     }
+
+    private val http = createHttpClient(configureHttpClient)
+
+    private val inferenceClosed = CompletableDeferred<Unit>()
 
     suspend fun capabilities(): Capabilities {
         val response = http.get(CapabilitiesResource()) { url.takeFrom("$origin/api/v1/capabilities"); authenticate(); timeout { requestTimeoutMillis = 10_000 } }
@@ -102,15 +107,31 @@ class TeamCodeClient(
 
     suspend fun forwardInference(path: String, body: ByteArray, headers: Map<String, String> = emptyMap(), receive: suspend (HttpResponse) -> Unit) {
         require(path in setOf("/v1/messages", "/v1/responses")) { "Unsupported inference path." }
-        http.preparePost("$origin$path") {
-            contentType(ContentType.Application.Json)
-            for ((name, value) in headers) {
-                require(name.lowercase() in FORWARDED_HEADERS) { "Unsupported inference header." }
-                header(name, value)
+        check(!inferenceClosed.isCompleted) { "The TeamCode client is closed." }
+        // Curl/WinHTTP can retain a pre-header request after coroutine cancellation. An
+        // independently owned engine lets us close that transport without cancelling peers.
+        // Management keeps its shared connection pool; inference engines live for one call.
+        createHttpClient(configureHttpClient).use { inference ->
+            lateinit var requestJob: Job
+            val statement = inference.preparePost("$origin$path") {
+                requestJob = executionContext
+                contentType(ContentType.Application.Json)
+                for ((name, value) in headers) {
+                    require(name.lowercase() in FORWARDED_HEADERS) { "Unsupported inference header." }
+                    header(name, value)
+                }
+                authenticate()
+                setBody(body)
             }
-            authenticate()
-            setBody(body)
-        }.execute { response -> receive(response) }
+            coroutineScope {
+                val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                    try { inferenceClosed.await() }
+                    finally { requestJob.cancel(); inference.close() }
+                }
+                try { statement.execute { response -> receive(response) } }
+                finally { cancellation.cancel() }
+            }
+        }
     }
 
     private suspend fun HttpRequestBuilder.authenticate() {
@@ -124,7 +145,7 @@ class TeamCodeClient(
         }
     }
 
-    override fun close() = http.close()
+    override fun close() { inferenceClosed.complete(Unit); http.close() }
 
     companion object {
         val FORWARDED_HEADERS: Set<String> = me.nathanfallet.teamcode.api.InferenceHeaders.names

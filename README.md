@@ -125,9 +125,12 @@ After signing in to TeamCode and importing/activating an eligible Claude Max acc
 ```sh
 teamcode run claude -- --dangerously-skip-permissions
 teamcode run claude -- --model claude-haiku-4-5-20251001 -p "Hello"
+teamcode run claude --workload background -- -p "Review the test coverage"
 ```
 
-`run` reuses a matching authenticated TeamCode service when available; otherwise it starts a dedicated proxy on a free loopback port. It launches the installed agent from your PATH, forwards the arguments after `--` literally and preserves your working directory and terminal. The dedicated proxy closes when the agent exits; a shared service stays running. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each dedicated proxy gets its own local capability. Native `run` is verified on macOS/Linux; Windows runtime acceptance is in progress.
+`run` reuses a matching authenticated TeamCode service when available; otherwise it starts a dedicated proxy on a free loopback port. It launches the installed agent from your PATH, forwards the arguments after `--` literally and preserves your working directory and terminal. The dedicated proxy closes when the agent exits; a shared service stays running. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each dedicated proxy gets its own local capability. Native launcher and user-service acceptance has passed on macOS/Linux/Windows; see [status](docs/status.md) for feature-specific evidence.
+
+Use `--workload background` before `--` for unattended work, or `--workload interactive` (the default) for interactive sessions. This is a scheduling hint for the [shared admission queue](docs/capacity.md#shared-admission-queue); it does not detach the process, change permissions or bypass quotas. Each launch keeps its own class even when sharing the local service. An older service without workload support is left running while the launcher uses a dedicated proxy for the background session.
 
 For a manually managed proxy:
 
@@ -147,6 +150,7 @@ Remove conflicting `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` environme
 ```sh
 teamcode run codex --
 teamcode run codex -- exec --model gpt-6-luna "Explain this repository"
+teamcode run codex --workload background -- exec "Review the test coverage"
 ```
 
 The launcher supplies the custom TeamCode provider for this invocation, using your saved server configuration and a temporary loopback capability. All remaining CLI arguments are passed through. An explicit client-side provider override can override these launch settings; server policy applies only to requests sent through TeamCode.

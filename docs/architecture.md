@@ -78,6 +78,8 @@ Run `python3 scripts/generate-migrations.py` after changing the table definition
 
 Ktor's route-scoped `HttpRequestLifecycle` enables `cancelCallOnClose` on inference endpoints in both the central server and local CLI proxy. This also cancels work waiting before response headers. Management and enrollment routes retain their existing lifecycle. Real TCP regressions cover the server and native CLI, because coroutine-only tests cannot establish socket-close propagation.
 
+The SDK gives each inference call its own HTTP engine and closes that engine on cancellation, with an explicit request-job cancellation guard. A shared native engine can retain a request waiting for headers even after its caller is cancelled; this was reproduced with Ktor 3.6.0 on Linux and observed on Windows CI. Isolating ownership lets TeamCode close one transport without interrupting concurrent requests. Closing the SDK also cancels its active inference transports. Management calls retain their shared client. The HTTP factory supplied to the SDK must create independently owned clients, and the universal engine dependency remains unchanged. This trades inference connection reuse and TLS-session setup for deterministic cleanup; measuring that overhead is part of the performance acceptance gate.
+
 Deploy every server replica on the queue-aware version before relying on fair admission: an older replica can bypass the new queue. Upgrade native clients as well for pre-response cancellation across both hops. Existing versioned update/service restart automation remains planned; it is not supplied by this schema migration. See [capacity](capacity.md) for bounds, scheduling semantics and limits.
 
 ## Implemented provider and protocol extension points

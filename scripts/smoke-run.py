@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', type=Path, required=True)
@@ -113,9 +114,10 @@ sys.exit(37)
         original_config = config.read_bytes()
         supplied = ['--dangerously-skip-permissions', '--model', 'literal model with spaces',
                     '-p', 'literal $(touch should-not-exist); "quotes"\nand a newline']
-        def launch(name, arguments=supplied, expected=37, guidance=True):
+        def launch(name, arguments=supplied, expected=37, guidance=True, workload=None):
             record = root / (name + ('-signal' if expected != 37 else '') + '.json')
-            result = subprocess.run([binary, 'run', name, *([] if guidance else ['--no-guidance']), '--', *arguments],
+            result = subprocess.run([binary, 'run', name, *([] if guidance else ['--no-guidance']),
+                                    *(['--workload', workload] if workload else []), '--', *arguments],
                                     input='stdin reaches the child\n', text=True, capture_output=True,
                                     env=dict(env, TEAMCODE_RUN_RECORD=str(record), TEAMCODE_TEST_GUIDANCE='1' if guidance and '--bare' not in arguments else '0'), cwd=root, timeout=45)
             assert result.returncode == expected, f'{name} launch failed with exit code {result.returncode}'
@@ -126,7 +128,9 @@ sys.exit(37)
             assert recorded['args'] == arguments, 'Agent arguments changed'
             if recorded['plugin']: assert not Path(recorded['plugin']).exists(), 'Ephemeral plugin was not removed'
             assert Path(recorded['cwd']).resolve() == root.resolve(), 'Working directory changed'
-            local_port = int(recorded['origin'].rsplit(':', 1)[1])
+            address = urllib.parse.urlsplit(recorded['origin'])
+            assert address.path == ('/_teamcode/workloads/background' if workload == 'background' else '')
+            local_port = address.port
             with socket.socket() as probe:
                 probe.settimeout(1)
                 assert probe.connect_ex(('127.0.0.1', local_port)) != 0, 'Owned proxy survived agent exit'
@@ -140,9 +144,15 @@ sys.exit(37)
         launch('claude', ['--bare', 'literal'])
         launch('codex', ['exec', '--ignore-user-config', '--json', 'Literal prompt'])
         launch('codex', ['exec', 'resume', '--last', '--', '-literal prompt'])
+        launch('claude', workload='background')
+        launch('codex', ['exec', '--ignore-user-config', '--', 'literal'], workload='background')
+        launch('claude', ['--workload', 'literal-agent-value'], workload='interactive')
+        invalid = subprocess.run([binary, 'run', 'claude', '--workload', 'urgent', '--', 'literal'],
+                                 env=env, text=True, capture_output=True, timeout=15)
+        assert invalid.returncode != 0 and 'CHILD_STDOUT_OK' not in invalid.stdout
         assert config.read_bytes() == original_config
         assert not (root / 'should-not-exist').exists()
-        print('Native run smoke passed: Claude/Codex launch, literal arguments, inherited stdio/cwd, isolated capabilities, simultaneous proxies, exit/signal status, unchanged config and cleanup.')
+        print('Native run smoke passed: Claude/Codex launch, per-launch workload, literal arguments, inherited stdio/cwd, isolated capabilities, simultaneous proxies, exit/signal status, unchanged config and cleanup.')
     finally:
         server.terminate()
         try:
