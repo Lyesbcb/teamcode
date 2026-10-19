@@ -70,7 +70,7 @@ class UsageReconciliationServiceImpl(private val database: Database) : UsageReco
         } }
         UsageReconciliations.insert {
             it[UsageReconciliations.id] = id; it[teamId] = actor.teamId; it[memberId] = row[Reservations.memberId]; it[accountId] = row[Reservations.accountId]
-            it[poolId] = row[Reservations.poolId]; it[runId] = row[Reservations.runId]; it[dayNumber] = row[Reservations.dayNumber]
+            it[poolId] = row[Reservations.poolId]; it[sourcePoolId] = row[Reservations.sourcePoolId]; it[runId] = row[Reservations.runId]; it[dayNumber] = row[Reservations.dayNumber]
             it[providerRequestId] = row[Reservations.providerRequestId]; it[previousState] = row[Reservations.state]
             it[previousUnits] = row[Reservations.units]; it[actualUnits] = input.actualUnits; it[evidenceSource] = input.source.name
             it[reference] = input.reference; it[reason] = input.reason; it[actorId] = actor.member.id; it[reconciledAt] = now
@@ -101,7 +101,7 @@ private fun pendingUsageQuery() = Reservations.join(Members, JoinType.INNER, Res
     .select(Reservations.columns + listOf(Members.username, Accounts.displayName, Accounts.provider))
 private fun pendingUsageRecord(row: ResultRow) = with(Reservations) {
     PendingUsage(row[id], row[memberId], row[Members.username], row[accountId], row[Accounts.displayName], row[Accounts.provider], row[providerRequestId],
-        row[poolId], row[runId], row[dayNumber], row[units], row[state], row[createdAt], row[expiresAt])
+        row[poolId], row[runId], row[dayNumber], row[units], row[state], row[createdAt], row[expiresAt], row[sourcePoolId] ?: row[poolId])
 }
 private fun reconciledUsageRecords(rows: List<ResultRow>): List<ReconciledUsage> {
     if (rows.isEmpty()) return emptyList()
@@ -111,5 +111,5 @@ private fun reconciledUsageRecords(rows: List<ResultRow>): List<ReconciledUsage>
 }
 private fun reconciledUsageRecord(row: ResultRow, groups: List<String>) = with(UsageReconciliations) {
     ReconciledUsage(row[id], row[memberId], row[accountId], row[poolId], row[runId], row[dayNumber], row[providerRequestId], row[previousState], row[previousUnits],
-        row[actualUnits], UsageEvidence.valueOf(row[evidenceSource]), row[reference], row[reason], row[actorId], row[reconciledAt], groups)
+        row[actualUnits], UsageEvidence.valueOf(row[evidenceSource]), row[reference], row[reason], row[actorId], row[reconciledAt], groups, row[sourcePoolId] ?: row[poolId])
 }

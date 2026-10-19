@@ -98,6 +98,12 @@ class TeamCodeClient(
         return request("/api/v1/members/$memberId/budget-overrides/$id/revoke", HttpMethod.Post, RevokeBudgetOverrideRequest(reason))
     }
     suspend fun capacity(): CapacityView = request("/api/v1/capacity", HttpMethod.Get)
+    /** Allocation and shared physical reserves require an interactive administrator. */
+    suspend fun saveMemberPolicy(memberId: String, input: PolicyRequest): CapacityView {
+        identifier(memberId); return request("/api/v1/members/$memberId/policy", HttpMethod.Patch, input)
+    }
+    suspend fun poolBudgets(): List<PoolBudgetView> = request("/api/v1/pools/budgets", HttpMethod.Get)
+    suspend fun savePoolBudget(input: PoolBudgetView): PoolBudgetView = request("/api/v1/pools/budgets", HttpMethod.Put, input)
     /** Controller configuration is managed with an interactive administrator login. */
     suspend fun pacingSettings(): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Get)
     suspend fun savePacingSettings(settings: PacingSettingsView): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Put, settings)

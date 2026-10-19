@@ -4,9 +4,9 @@ import me.nathanfallet.teamcode.domain.accounts.AccountRecord
 import me.nathanfallet.teamcode.domain.team.Principal
 import me.nathanfallet.teamcode.domain.routing.*
 
-data class MemberPolicy(val memberId: String, val dailyUnits: Long = 0, val maxConcurrent: Int = 2, val poolId: String? = null, val weight: Int = 1)
+data class MemberPolicy(val memberId: String, val dailyUnits: Long = 0, val maxConcurrent: Int = 2, val poolId: String? = null, val weight: Int = 1, val allowSharedOverflow: Boolean = false)
 data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits: Long, val activeRequests: Int, val resetsAtMillis: Long, val dailyAllowanceUnits: Long = policy.dailyUnits, val poolDailyUnits: Long = 1_000_000, val poolTotalWeight: Long = 1, val queuedRequests: Int = 0, val groups: List<GroupAllowance> = emptyList(), val budgetOverride: BudgetOverrideSummary? = null, val baseDailyAllowanceUnits: Long = dailyAllowanceUnits)
-data class PoolBudget(val poolId: String, val dailyUnits: Long)
+data class PoolBudget(val poolId: String, val dailyUnits: Long, val sharedOverflow: Boolean = false)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
 const val MAX_QUOTA_OBSERVATION_AGE_MILLIS = 300_000L
 data class AccountQuota(val accountId: String, val window: String, val utilization: Double, val observedAtMillis: Long, val resetsAtMillis: Long?)

@@ -10,6 +10,7 @@ object UsageReconciliations : Table("usage_reconciliations") {
     val memberId = varchar("member_id", 36)
     val accountId = varchar("account_id", 36)
     val poolId = varchar("pool_id", 36)
+    val sourcePoolId = varchar("source_pool_id", 36).nullable()
     val runId = varchar("run_id", 36).nullable()
     val dayNumber = long("day_number")
     val providerRequestId = varchar("provider_request_id", 128).nullable()

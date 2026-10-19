@@ -9,13 +9,13 @@ data class UsageReconciliationChange(val expectedUnits: Long, val actualUnits: L
 data class PendingUsage(
     val id: String, val memberId: String, val username: String, val accountId: String, val accountName: String, val provider: String,
     val providerRequestId: String?, val poolId: String, val runId: String?, val dayNumber: Long, val units: Long,
-    val state: String, val createdAtMillis: Long, val leaseExpiresAtMillis: Long,
+    val state: String, val createdAtMillis: Long, val leaseExpiresAtMillis: Long, val sourcePoolId: String = poolId,
 )
 /** Durable correction metadata survives ordinary detailed-ledger retention. No prompt or response content. */
 data class ReconciledUsage(
     val id: String, val memberId: String, val accountId: String, val poolId: String, val runId: String?, val dayNumber: Long,
     val providerRequestId: String?, val previousState: String, val previousUnits: Long, val actualUnits: Long,
-    val source: UsageEvidence, val reference: String, val reason: String, val actorId: String, val reconciledAtMillis: Long, val groupIds: List<String> = emptyList(),
+    val source: UsageEvidence, val reference: String, val reason: String, val actorId: String, val reconciledAtMillis: Long, val groupIds: List<String> = emptyList(), val sourcePoolId: String = poolId,
 )
 data class PendingUsagePage(val requests: List<PendingUsage>, val nextBeforeId: String?)
 data class ReconciledUsagePage(val reconciliations: List<ReconciledUsage>, val nextBeforeId: String?)

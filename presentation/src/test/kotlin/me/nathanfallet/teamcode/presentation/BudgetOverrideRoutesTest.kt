@@ -14,6 +14,48 @@ import me.nathanfallet.teamcode.domain.team.*
 import kotlin.test.*
 
 class BudgetOverrideRoutesTest {
+    @Test fun sharedOverflowRoundTripsThroughSdkAndCsrfProtectedForms() = testApplication {
+        val admission = CapacityOnlyAdmission(BudgetOverrideSummary("fixture", 500, 3_600_000))
+        val team = object : TeamService by FakeTeam() {
+            override suspend fun authenticate(token: String): Principal? = if (token == "service") FakeTeam().authenticate("admin")!!.copy(serviceScopes = ServiceScope.entries.toSet()) else FakeTeam().authenticate(token)
+        }
+        val gateway = object : GatewayService {
+            override suspend fun status() = GatewaySnapshot("test", 0, 0)
+            override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) = error("No inference")
+        }
+        application { configureGateway(gateway, team = team, admission = admission, publicOrigin = "http://localhost") }
+        TeamCodeClient("http://localhost", { "admin" }) { config -> createClient { config(this); install(HttpTimeout) { socketTimeoutMillis = null } } }.use { sdk ->
+            assertTrue(sdk.capabilities().features.contains("capacity.shared-overflow.v1"))
+            assertTrue(sdk.saveMemberPolicy("member-id", PolicyRequest(100, 2, "home", allowSharedOverflow = true)).allowSharedOverflow)
+            assertEquals(PoolBudgetView("reserve", 1000, true), sdk.savePoolBudget(PoolBudgetView("reserve", 1000, true)))
+            assertEquals(listOf(PoolBudgetView("reserve", 1000, true)), sdk.poolBudgets())
+            assertFailsWith<IllegalArgumentException> { sdk.saveMemberPolicy("../escape", PolicyRequest(0, 2)) }
+        }
+        val html = client.get("/dashboard/capacity") { header(HttpHeaders.Cookie, "teamcode_session=admin") }.bodyAsText()
+        assertTrue(html.contains("Allow shared overflow accounts")); assertTrue(html.contains("Shared overflow reserve"))
+        assertTrue(html.contains("name=\"overflow\" checked"))
+        for (path in listOf("/dashboard/capacity/member-id", "/dashboard/capacity/pool")) {
+            assertEquals(HttpStatusCode.Forbidden, client.post(path) {
+                header(HttpHeaders.Cookie, "teamcode_session=admin"); header(HttpHeaders.Origin, "https://attacker.test")
+                contentType(ContentType.Application.FormUrlEncoded); setBody("csrf=session&daily=100&concurrent=2&weight=1&pool=home&overflow=on")
+            }.status)
+        }
+        assertTrue(admission.policy.allowSharedOverflow)
+        assertEquals(HttpStatusCode.Found, client.post("/dashboard/capacity/member-id") {
+            header(HttpHeaders.Cookie, "teamcode_session=admin"); header(HttpHeaders.Origin, "http://localhost")
+            contentType(ContentType.Application.FormUrlEncoded); setBody("csrf=session&daily=100&concurrent=2&weight=1&pool=home")
+        }.status)
+        assertFalse(admission.policy.allowSharedOverflow)
+        for (token in listOf("member", "service")) {
+            assertEquals(HttpStatusCode.Forbidden, client.put("/api/v1/pools/budgets") {
+                bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"poolId":"reserve","dailyUnits":1000,"sharedOverflow":true}""")
+            }.status)
+            assertEquals(HttpStatusCode.Forbidden, client.patch("/api/v1/members/member-id/policy") {
+                bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"dailyUnits":100,"maxConcurrent":2,"allowSharedOverflow":true}""")
+            }.status)
+        }
+    }
+
     @Test fun typedSdkHistoryCapacityAndBrowserFormsPreserveScopeAndEscapeReasons() = testApplication {
         val calls = mutableListOf<String>()
         val record = BudgetOverride("override-id", "member-id", null, 500, "admin-id", "<img src=x onerror=alert(1)>", 1, 3_600_000)
@@ -96,17 +138,19 @@ class BudgetOverrideRoutesTest {
 }
 
 private class CapacityOnlyAdmission(private val temporary: BudgetOverrideSummary) : AdmissionStore {
+    var policy = MemberPolicy("member-id", 100)
+    private val budgets = mutableMapOf<String, PoolBudget>()
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity {
         actor.requireScope(ServiceScope.USAGE_READ); if (memberId != actor.member.id) actor.requireAdmin()
-        return MemberCapacity(MemberPolicy(memberId, 100), 50, 0, 86_400_000, 500, budgetOverride = temporary, baseDailyAllowanceUnits = 100)
+        return MemberCapacity(policy.copy(memberId = memberId), 50, 0, 86_400_000, 500, budgetOverride = temporary, baseDailyAllowanceUnits = 100)
     }
     override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = error("unused")
     override suspend fun statistics(): AdmissionStatistics = error("unused")
     override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation = error("unused")
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) = error("unused")
-    override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = error("unused")
-    override suspend fun poolBudgets(actor: Principal): List<PoolBudget> = error("unused")
-    override suspend fun configurePool(actor: Principal, budget: PoolBudget): PoolBudget = error("unused")
+    override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy { actor.requireAdmin(); this.policy = policy; return policy }
+    override suspend fun poolBudgets(actor: Principal): List<PoolBudget> { actor.requireAdmin(); return budgets.values.toList() }
+    override suspend fun configurePool(actor: Principal, budget: PoolBudget): PoolBudget { actor.requireAdmin(); budgets[budget.poolId] = budget; return budget }
     override suspend fun quotas(actor: Principal): List<AccountQuota> = emptyList()
     override suspend fun observe(accountId: String, observations: List<AccountQuota>) = error("unused")
     override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) = error("unused")

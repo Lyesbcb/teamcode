@@ -14,6 +14,8 @@ interface AdmissionQueueStore {
     suspend fun enqueue(actor: Principal, input: AdmissionInput): AdmissionTicket
     suspend fun reserveQueued(actor: Principal, ticket: AdmissionTicket, input: AdmissionInput): Reservation
     suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean)
+    /** Refresh physical queue scope from the request metadata; no body is persisted. */
+    suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean, input: AdmissionInput) = renew(actor, ticket, blocked)
     suspend fun release(actor: Principal, ticket: AdmissionTicket)
 }
 
@@ -29,7 +31,7 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
                     try { return@withTimeoutOrNull queue.reserveQueued(actor, ticket, input).also { admitted = true } }
                     catch (error: TeamFailure) {
                         if (error.code !in WAITABLE) throw error
-                        queue.renew(actor, ticket, error.code in setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay"))
+                        queue.renew(actor, ticket, error.code in setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay"), input)
                         delay(POLL_MILLIS)
                     }
                 }
