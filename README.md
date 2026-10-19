@@ -105,7 +105,7 @@ The dashboard exposes member weights, per-member concurrency and optional hard d
 
 Default model policy permits `claude-*` and `gpt-*` (existing saved policies are not broadened) and denies `*fable*`. Administrators can set allowed/denied patterns and reasoning efforts in `/dashboard/models`. Requests are rejected before dispatch when a policy is violated. No effort is silently replaced.
 
-`teamcode run claude -- ...` automatically adds temporary HTTP hooks for scoped, deduplicated guidance without editing personal settings. Use `--no-guidance` before `--` to opt out. `teamcode agents watch --session SESSION_ID` prints scoped updates; `teamcode agents hint --session SESSION_ID --format claude` supports manual bridges. Receipts record bridge emission, not model compliance. Codex automatic context injection remains planned; its guidance is accessible through the same CLI/API. See [agent guidance](docs/agent-guidance.md) and [capacity behavior](docs/capacity.md).
+`teamcode run claude -- ...` automatically adds temporary HTTP hooks for scoped, deduplicated guidance without editing personal settings. Use `--no-guidance` before `--` to opt out. `teamcode agents watch --session SESSION_ID` prints scoped updates; `teamcode agents hint --session SESSION_ID --format claude` supports manual bridges. Receipts record bridge emission, not model compliance. `teamcode run codex -- ...` adds native command hooks for the same events; review and trust them in Codex `/hooks` before first use. Existing hook files are preserved and explicit CLI hook overrides remain authoritative. See [agent guidance](docs/agent-guidance.md) and [capacity behavior](docs/capacity.md).
 
 Real-provider acceptance is explicitly opt-in and never runs in CI:
 

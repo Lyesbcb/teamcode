@@ -7,10 +7,8 @@ import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.*
-import me.nathanfallet.teamcode.api.models.DirectiveClaimResponse
+import me.nathanfallet.teamcode.cli.agents.HookGuidance
 import me.nathanfallet.teamcode.client.TeamCodeClient
-import kotlin.time.Clock
 
 /** Tool inputs and transcript paths stop here. Only the session identifier reaches TeamCode. */
 internal fun Route.guidanceHook(client: TeamCodeClient, localToken: String) {
@@ -22,7 +20,8 @@ internal fun Route.guidanceHook(client: TeamCodeClient, localToken: String) {
             call.respond(HttpStatusCode.Forbidden); return@post
         }
         call.response.header(HttpHeaders.CacheControl, "no-store")
-        var emitted: Pair<String, DirectiveClaimResponse>? = null
+        val bridge = HookGuidance(client)
+        var emitted: HookGuidance.Emission? = null
         var output = "{}"
         try {
             withTimeoutOrNull(2_500) {
@@ -36,27 +35,12 @@ internal fun Route.guidanceHook(client: TeamCodeClient, localToken: String) {
                     size += count
                 }
                 if (size > 65_536) return@withTimeoutOrNull
-                val body = Json.parseToJsonElement(buffer.decodeToString(0, size)).jsonObject
-                val event = (body["hook_event_name"] as? JsonPrimitive)?.contentOrNull
-                if (event !in setOf("PreToolUse", "UserPromptSubmit")) return@withTimeoutOrNull
-                val session = (body["session_id"] as? JsonPrimitive)?.contentOrNull ?: return@withTimeoutOrNull
-                if (!Regex("[A-Za-z0-9._-]{1,128}").matches(session)) return@withTimeoutOrNull
-                val claim = client.claimDirective(session, "EMITTED_TO_HOOK")
-                val value = claim.directive ?: return@withTimeoutOrNull
-                if (claim.claimId == null || value.expiresAtMillis <= Clock.System.now().toEpochMilliseconds()) return@withTimeoutOrNull
-                output = buildJsonObject { putJsonObject("hookSpecificOutput") {
-                    put("hookEventName", event)
-                    put("additionalContext", "TeamCode capacity guidance: ${value.message}")
-                } }.toString()
-                emitted = session to claim
+                emitted = bridge.prepare(buffer.copyOf(size))
+                output = emitted?.output ?: "{}"
             }
         } catch (error: CancellationException) { throw error }
         catch (_: Exception) { /* Advice failures never block work or expose diagnostics to model context. */ }
         call.respondText(output, ContentType.Application.Json)
-        emitted?.let { (session, claim) ->
-            try { withTimeoutOrNull(750) { client.acknowledgeDirective(claim.directive!!.id, "EMITTED_TO_HOOK", session, claim.claimId) } }
-            catch (error: CancellationException) { throw error }
-            catch (_: Exception) { /* Lost acknowledgments may cause a bounded retry after the claim lease. */ }
-        }
+        emitted?.let { bridge.acknowledge(it) }
     }
 }

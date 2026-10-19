@@ -14,7 +14,7 @@ import me.nathanfallet.teamcode.cli.sdk
 import kotlin.time.Clock
 
 class Agents : SuspendingNoOpCliktCommand(name = "agents") {
-    init { subcommands(Watch(), Hint()) }
+    init { subcommands(Watch(), Hint(), Hook()) }
 }
 private class Watch : SuspendingCliktCommand(name = "watch") {
     private val session by option("--session")

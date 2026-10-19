@@ -307,7 +307,22 @@ try:
             assert.deepStrictEqual(args.slice(end-4, end-2), ['-c', 'model_provider="teamcode"']);
             url = /base_url="([^"]+)"/.exec(args[end-1])[1] + '/responses';
             token = process.env.TEAMCODE_LOCAL_TOKEN;
-            args = args.slice(0, end-4).concat(args.slice(end));
+            stage = 'codex-guidance';
+            for (const [offset, event] of [[8, 'UserPromptSubmit'], [6, 'PreToolUse']]) {
+              assert.strictEqual(args[end-offset], '-c');
+              const definition = args[end-offset+1];
+              assert(definition.startsWith('hooks.' + event + '='));
+              const match = /command=("(?:[^"\\]|\\.)*")/.exec(definition);
+              assert(match);
+              const hookCommand = JSON.parse(match[1]);
+              assert(hookCommand.startsWith('powershell.exe ') && !hookCommand.includes(token));
+              const output = require('child_process').spawnSync(hookCommand, {
+                shell:true, input:JSON.stringify({session_id:'windows-smoke',hook_event_name:event,tool_input:'private-tool-input'}), encoding:'utf8',timeout:6000
+              });
+              assert.strictEqual(output.status, 0); assert.strictEqual(output.stderr, '');
+              assert.deepStrictEqual(JSON.parse(output.stdout), {});
+            }
+            args = args.slice(0, end-8).concat(args.slice(end));
           }
           stage = 'stdin';
           assert.strictEqual(fs.readFileSync(0, 'utf8'), 'stdin reaches the child\n');

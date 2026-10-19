@@ -198,3 +198,20 @@ Forecast-scope CI acceptance: run `39180421393` for commit `6bee322` completed s
 - `scripts/smoke-claude-guidance.py` passed with the actual installed Claude Code **2.1.302** and native TeamCode. The isolated deterministic server proved both UserPromptSubmit and PreToolUse context injection, correlation of real hook/inference session IDs, an actual harmless Bash tool round trip, emission receipts and temporary-plugin cleanup. It used no provider credentials or subscription calls. This proves client integration, not forecast accuracy or model obedience under real load.
 
 See [agent guidance](agent-guidance.md) for the retry/receipt contract, defaults and limits. Automatic Codex injection, independent subagent fan-out, forecast replay/observation rollout and the other [V1 review gates](v1-review.md) remain open. Cross-platform CI for this milestone is pending the push; do not infer its acceptance from the previous green run.
+
+
+## Native Codex guidance (2026-10-19)
+
+The preceding session-guidance commit `f1327d8` completed [CI 39181558080](https://github.com/nathanfallet/teamcode/actions/runs/39181558080) successfully: JVM, macOS, Linux, Windows, Helm and multi-architecture Docker publication all passed. This includes the previously pending Claude Windows plugin/HTTP-hook fixture.
+
+This milestone implements `teamcode agents hook` and automatic command hooks in `teamcode run codex`, sharing parsing, scoped claim lookup and receipt handling with Claude. Hook definitions contain only stable executable/config paths; credentials remain in private configuration. Input and network deadlines are bounded. Codex trust review remains mandatory; the launcher does not bypass it or alter existing configuration files. Explicit CLI hook overrides are preserved with a notice and a documented manual bridge.
+
+Local evidence:
+
+- `:cli:jvmTest`, macOS native linking and MinGW native linking passed. Production module boundaries and whitespace checks passed.
+- `scripts/smoke-hook.py` passed on the actual macOS binary: both supported events, exact 64-KiB boundary, malformed/invalid UTF-8 input, held-open stdin deadline, network deadline, expiry, receipts/deduplication, private payload isolation and Unicode configuration path.
+- `scripts/smoke-run.py` passed with the actual native launcher, including execution of generated Codex hook commands, literal arguments, opt-out, concurrent proxies and cleanup.
+- `scripts/smoke-codex-guidance.py` passed with actual **codex-cli 0.163.0** and native TeamCode. Five isolated scenarios cover both context boundaries, an actual harmless `exec_command` round trip, correlation of hook/inference session IDs, receipts, preservation of user hooks, refusal to run untrusted hooks, opt-out, leaf-scope overrides with `--ignore-user-config`, and preservation of custom CLI hooks. Executable/configuration paths include spaces, Unicode, an apostrophe and a dollar sign. No real provider requests or user configuration were used.
+- The shared bridge refactor also passed the real **Claude Code 2.1.302** guidance fixture with its Bash tool round trip.
+
+Native stdin and generated-command checks are wired into desktop CI, including Windows PowerShell execution. Their updated cross-platform run is pending this push; MinGW linking alone is not Windows runtime acceptance. Full real Codex Windows client acceptance, independent subagent fan-out, forecast load replay/charts, and the remaining [V1 gates](v1-review.md) stay open.

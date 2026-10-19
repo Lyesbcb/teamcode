@@ -11,6 +11,30 @@
 #include <stdlib.h>
 #include <wchar.h>
 
+static inline int teamcode_windows_hook_input(unsigned char *buffer, int capacity) {
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD type = GetFileType(input);
+    if (type != FILE_TYPE_PIPE && type != FILE_TYPE_DISK) return -1;
+    ULONGLONG start = GetTickCount64();
+    int total = 0;
+    for (;;) {
+        if (GetTickCount64() - start >= 1000) return -1;
+        DWORD available = (DWORD)(capacity - total);
+        if (type == FILE_TYPE_PIPE) {
+            if (!PeekNamedPipe(input, NULL, 0, NULL, &available, NULL))
+                return GetLastError() == ERROR_BROKEN_PIPE ? total : -1;
+            if (available == 0) { Sleep(10); continue; }
+            if (available > (DWORD)(capacity - total)) available = (DWORD)(capacity - total);
+        }
+        DWORD count = 0;
+        if (!ReadFile(input, buffer + total, available, &count, NULL))
+            return GetLastError() == ERROR_BROKEN_PIPE ? total : -1;
+        if (count == 0) return total;
+        total += (int)count;
+        if (total >= capacity) return -1;
+    }
+}
+
 static inline wchar_t **teamcode_windows_arguments(int *count) { return CommandLineToArgvW(GetCommandLineW(), count); }
 
 static inline int teamcode_windows_random(void *buffer, unsigned long count) {

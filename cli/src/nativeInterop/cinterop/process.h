@@ -7,6 +7,31 @@
 #include <errno.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <time.h>
+
+/* Hook commands receive a pipe, never interactive input. Bound both input and wait. */
+static inline int teamcode_hook_input(unsigned char *buffer, int capacity) {
+    if (isatty(STDIN_FILENO)) return -1;
+    struct timespec start, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return -1;
+    int total = 0;
+    for (;;) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed >= 1000) return -1;
+        struct pollfd input = {STDIN_FILENO, POLLIN, 0};
+        int ready = poll(&input, 1, (int)(1000 - elapsed));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0 || (input.revents & (POLLERR | POLLNVAL))) return -1;
+        ssize_t count = read(STDIN_FILENO, buffer + total, (size_t)(capacity - total));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return -1;
+        if (count == 0) return total;
+        total += (int)count;
+        if (total >= capacity) return -1;
+    }
+}
 #ifdef __APPLE__
 #include <crt_externs.h>
 #include <mach-o/dyld.h>

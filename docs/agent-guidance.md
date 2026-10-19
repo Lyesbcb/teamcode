@@ -17,6 +17,21 @@ Only the session ID and delivery stage reach the TeamCode management API. The lo
 
 Explicit `--bare` skips automatic guidance. Claude's managed hook restrictions, HTTP allowlists and disabled hooks remain authoritative and can prevent delivery. The launcher does not override those choices. Failure to prepare the optional plugin reports a short notice and continues with server-side limits.
 
+## Codex integration
+
+```sh
+teamcode run codex --
+teamcode run codex --no-guidance -- exec 'Your task'
+```
+
+The launcher adds invocation-only command hooks for `UserPromptSubmit` and `PreToolUse`, using the [Codex hook protocol](https://learn.chatgpt.com/docs/hooks). On first use, review and trust the TeamCode definitions in Codex's `/hooks` browser. TeamCode does not bypass hook trust, enable disabled hooks or override managed-only policies. Untrusted hooks remain inactive; hard server limits still apply. This integration is verified with Codex CLI 0.163.0; use `--no-guidance` with clients that do not support these hooks.
+
+Each hook invokes the native `teamcode agents hook --config /absolute/path/to/config.json` command. It reads at most 64 KiB of redirected stdin, requires EOF within one second, validates the event/session and discards all other fields. Lookup has a 2.5-second deadline and acknowledgment a separate 750-millisecond deadline; the Codex hook timeout is five seconds. Malformed input, missing configuration, expired advice and outages emit `{}` without diagnostics. A terminal is never read. The command uses the same SDK and durable delivery contract as Claude's local HTTP hook.
+
+Only the executable/configuration paths appear in the hook definition. No credentials, transient port or token appear in the command. The definition therefore stays stable across launches and token rotation. POSIX paths are shell-quoted; Windows invokes an encoded PowerShell script to preserve literal Unicode paths. The hook reads the private configuration itself, so a Codex daemon does not need to inherit an ephemeral proxy credential.
+
+Existing hooks from active configuration files are merged by Codex; TeamCode does not edit those files. Overrides are inserted in the leaf command scope so `exec --ignore-user-config` retains TeamCode's invocation configuration. If the caller explicitly supplies `-c hooks...`/`--config hooks...`, the launcher preserves those overrides and reports that automatic guidance was skipped: Codex replaces arrays within one CLI layer. Add `teamcode agents hook` to that custom configuration to opt in without losing existing hooks. `--no-guidance` always disables TeamCode's automatic additions.
+
 ## Scoped state and receipts
 
 Each client session has its own directive version, expiry and recovery hysteresis. The dashboard/member endpoint retains an aggregate view. Several targets within the same session use their most constrained advice. Sessions belonging to the same member can therefore receive different advice, while still sharing that member's hard quota and concurrency ceiling.
@@ -37,9 +52,9 @@ teamcode agents hint --session SESSION_ID --format json
 teamcode agents hint --session SESSION_ID --format claude
 ```
 
-Watch uses the received-by-CLI stage; hint uses emitted-to-hook. Manual bridges must supply the session ID actually attached to inference. Codex already forwards its session header and can consume this API/CLI contract; automatic Codex context injection is still pending.
+Watch uses the received-by-CLI stage; hint uses emitted-to-hook. Manual bridges must supply the session ID actually attached to inference. The native `teamcode agents hook` command also accepts a complete Codex/Claude hook JSON payload on stdin and preserves the supported event name in its output.
 
-Claude subagents can share their parent's session ID. They currently share that session's aggregate advice and delivery record; the first matching hook receives a changed version. Independent fan-out to every subagent requires an additional consumer identity and remains explicit work. A receipt does not prove that every subagent received the instruction. Inference without a session header retains member-level limits and advice, but cannot receive automatic scoped messages.
+Claude and Codex subagents can share their parent's session ID. They currently share that session's aggregate advice and delivery record; the first matching hook receives a changed version. Independent fan-out to every subagent requires an additional consumer identity and remains explicit work. A receipt does not prove that every subagent received the instruction. Inference without a session header retains member-level limits and advice, but cannot receive automatic scoped messages.
 
 ## Verification
 
@@ -56,3 +71,15 @@ python3 scripts/smoke-claude-guidance.py \
 ```
 
 This isolated fixture supplies deterministic inference and directive responses. It proves real hook loading, correlation between hook/inference session IDs, UserPromptSubmit/PreToolUse context injection, a harmless Bash tool round trip, receipts and plugin cleanup. It does not establish forecast accuracy under real quota consumption or prove model compliance with pacing. See [status](status.md) for completed runs and pending platform CI.
+
+For the real Codex client, without consuming a subscription:
+
+```sh
+python3 scripts/smoke-codex-guidance.py \
+  --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
+  --codex /absolute/path/to/the/actual/codex/executable
+```
+
+The isolated fixture runs a real `exec_command` tool round trip through deterministic Responses streams. It verifies both hook events, session correlation, receipts, preserved user-file hooks, literal executable/configuration paths, refusal to run untrusted hooks, `--no-guidance`, `--ignore-user-config` and preservation of explicit CLI hooks. Only this fixture uses the hook-trust bypass with its two known synthetic hooks and an empty temporary home; the product never adds that flag.
+
+`scripts/smoke-hook.py` tests the native stdin bridge on every desktop CI platform, including exact byte limits, held-open stdin, lookup deadlines, deduplication and silent errors. Launcher acceptance also executes the actual generated hook command, including the encoded PowerShell command on Windows. The full real-client fixtures currently run on POSIX; their evidence does not imply a full real Codex Windows acceptance run.

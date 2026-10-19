@@ -99,6 +99,7 @@ jobs:
       - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
       - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
       - run: python3 scripts/smoke-run.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-hook.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
       - name: Start Linux user service manager
         if: runner.os == 'Linux'
         shell: bash
@@ -130,6 +131,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
       - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe --allow-machine-test-certificate
+      - run: python scripts/smoke-hook.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
       - uses: actions/upload-artifact@v4
         with:
           name: teamcode-windows-x64

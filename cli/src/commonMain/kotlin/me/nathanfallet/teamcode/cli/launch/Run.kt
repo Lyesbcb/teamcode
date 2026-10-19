@@ -19,7 +19,7 @@ class Run : SuspendingNoOpCliktCommand(name = "run") {
 }
 
 private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(name = agent) {
-    private val noGuidance by option("--no-guidance", help = "Disable automatic Claude session guidance for this launch.").flag()
+    private val noGuidance by option("--no-guidance", help = "Disable automatic session guidance for this launch.").flag()
     private val arguments by argument("AGENT_ARGS").multiple()
     override suspend fun run() {
         val config = loadConfig()
@@ -55,8 +55,20 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
             echo("Automatic guidance could not be prepared; continuing with server-side limits.", err = true)
             null
         } else null
+        val customCodexHooks = agent == "codex" && hasCodexHookOverrides(arguments)
+        if (customCodexHooks && !noGuidance) {
+            echo("Custom Codex CLI hook overrides detected; add teamcode agents hook to those hooks for guidance.", err = true)
+        }
+        val codexGuidance = if (agent == "codex" && !noGuidance && !customCodexHooks) try {
+            codexGuidanceOptions(servicePlatform(), configPath()).also {
+                echo("TeamCode guidance hooks are available. Review and trust them in Codex /hooks before first use.", err = true)
+            }
+        } catch (_: Exception) {
+            echo("Automatic guidance could not be prepared; continuing with server-side limits.", err = true)
+            emptyList()
+        } else emptyList()
         try {
-            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString())
+            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString(), codexGuidance)
             return runInteractiveProcess(agent, plan.arguments, plan.environment)
         } finally {
             try { plugin?.close() } catch (_: Exception) { echo("The temporary guidance plugin could not be removed.", err = true) }
@@ -66,7 +78,7 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
 
 /** Null values remove inherited provider credentials without changing the parent environment or config files. */
 internal class AgentLaunch(val arguments: List<String>, val environment: Map<String, String?>)
-internal fun agentLaunch(agent: String, arguments: List<String>, port: Int, token: String, guidancePlugin: String? = null): AgentLaunch {
+internal fun agentLaunch(agent: String, arguments: List<String>, port: Int, token: String, guidancePlugin: String? = null, codexGuidance: List<String> = emptyList()): AgentLaunch {
     require(agent in setOf("claude", "codex") && port in 1..65535 && token.length >= 32)
     val origin = "http://127.0.0.1:$port"
     return if (agent == "claude") AgentLaunch((guidancePlugin?.let { listOf("--plugin-dir", it) }.orEmpty()) + arguments, mapOf(
@@ -79,7 +91,7 @@ internal fun agentLaunch(agent: String, arguments: List<String>, port: Int, toke
         "CLAUDE_CODE_USE_VERTEX" to null,
         "CLAUDE_CODE_USE_FOUNDRY" to null,
     )) else {
-        val overrides = listOf(
+        val overrides = codexGuidance + listOf(
         "-c", "model_provider=\"teamcode\"",
         "-c", "model_providers.teamcode={name=\"TeamCode\",base_url=\"$origin/v1\",env_key=\"TEAMCODE_LOCAL_TOKEN\",wire_api=\"responses\",request_max_retries=0,stream_max_retries=0}",
         )

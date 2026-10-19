@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-run-smoke-') as directory:
                CLAUDE_CODE_OAUTH_TOKEN='inherited-oauth-must-be-removed',
                PATH=str(root) + os.pathsep + os.environ['PATH'])
     agent_source = r'''
-import json, os, pathlib, signal, sys, tomllib, urllib.request
+import json, os, pathlib, signal, subprocess, sys, tomllib, urllib.request
 name = pathlib.Path(sys.argv[0]).name
 arguments = sys.argv[1:]
 plugin = None
@@ -66,7 +66,16 @@ else:
     origin = provider['base_url'].removesuffix('/v1')
     token = os.environ[provider['env_key']]
     route = '/v1/responses'
-    arguments = arguments[:end-4] + arguments[end:]
+    if os.environ.get('TEAMCODE_TEST_GUIDANCE', '1') == '1':
+        for offset, event in [(8, 'UserPromptSubmit'), (6, 'PreToolUse')]:
+            assert arguments[end-offset] == '-c'
+            hook = tomllib.loads(arguments[end-offset+1])['hooks'][event][0]['hooks'][0]
+            assert hook['timeout'] == 5 and token not in hook['command']
+            result = subprocess.run(hook['command'], shell=True, input=json.dumps({'session_id':'native-smoke','hook_event_name':event}), capture_output=True, text=True, timeout=6)
+            assert result.returncode == 0 and json.loads(result.stdout) == {} and not result.stderr
+        arguments = arguments[:end-8] + arguments[end:]
+    else:
+        arguments = arguments[:end-4] + arguments[end:]
 assert len(token) >= 32 and token != os.environ['TEAMCODE_ACCESS_TOKEN']
 assert sys.stdin.read() == 'stdin reaches the child\n'
 payload = {'model':'fixture','stream':True,'messages':[],'input':[]}
@@ -127,6 +136,7 @@ sys.exit(37)
         assert len(set(ports)) == 2
         launch('claude', ['--signal-test'], 143)
         launch('claude', guidance=False)
+        launch('codex', guidance=False)
         launch('claude', ['--bare', 'literal'])
         launch('codex', ['exec', '--ignore-user-config', '--json', 'Literal prompt'])
         launch('codex', ['exec', 'resume', '--last', '--', '-literal prompt'])

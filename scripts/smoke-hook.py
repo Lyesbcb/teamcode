@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Exercise the actual native stdin guidance bridge without provider calls or user configuration."""
+import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import tempfile
+import threading
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--binary', type=Path, required=True)
+args = parser.parse_args()
+binary = str(args.binary.resolve())
+
+with tempfile.TemporaryDirectory(prefix='teamcode-hook-') as directory:
+    root = Path(directory)
+    config = root / "configuration é space's.json"
+    token = secrets.token_hex(32)
+    state = {'calls': [], 'mode': 'fresh', 'emitted': False, 'errors': []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_): pass
+        def do_POST(self):
+            try:
+                assert self.headers.get('Authorization') == 'Bearer ' + token
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                state['calls'].append((self.path, body))
+                assert 'PRIVATE_TOOL_INPUT' not in json.dumps(body)
+                if self.path == '/api/v1/directives/claim':
+                    assert body == {'sessionId': 'native-session', 'stage': 'EMITTED_TO_HOOK'}
+                    if state['mode'] == 'outage':
+                        self.send_error(503, 'PRIVATE_DIAGNOSTIC'); return
+                    if state['mode'] == 'slow': time.sleep(3)
+                    response = {'directive': None} if state['emitted'] else {
+                        'claimId': 'claim', 'directive': {
+                            'id': 'directive', 'pace': 'SLOW_DOWN', 'maxConcurrent': 1,
+                            'minIntervalMillis': 10000, 'message': 'Reduce optional parallel work.',
+                            'createdAtMillis': 1, 'expiresAtMillis': 1 if state['mode'] == 'expired' else 9223372036854775807}}
+                else:
+                    assert self.path == '/api/v1/directives/receipt'
+                    assert body == {'id': 'directive', 'stage': 'EMITTED_TO_HOOK', 'sessionId': 'native-session', 'claimId': 'claim'}
+                    state['emitted'] = True
+                    response = {'success': True}
+                data = json.dumps(response).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError): pass  # Expected deadline cancellation.
+            except Exception as error: state['errors'].append(type(error).__name__)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    config.write_text(json.dumps({'serverUrl': f'http://127.0.0.1:{server.server_port}', 'accessToken': token}), encoding='utf-8')
+    config.chmod(0o600)
+    command = [binary, 'agents', 'hook', '--config', str(config)]
+    payload = {'session_id': 'native-session', 'hook_event_name': 'PreToolUse', 'tool_input': 'PRIVATE_TOOL_INPUT', 'transcript_path': 'PRIVATE_TOOL_INPUT'}
+
+    def run(body):
+        result = subprocess.run(command, input=body, capture_output=True, timeout=6)
+        assert result.returncode == 0, 'Hook must never fail an agent operation'
+        assert result.stderr == b'', 'Hook diagnostics must remain silent'
+        assert token.encode() not in result.stdout and b'PRIVATE_' not in result.stdout
+        return json.loads(result.stdout)
+
+    try:
+        data = json.dumps(payload).encode()
+        result = run(data)
+        assert result == {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': 'TeamCode capacity guidance: Reduce optional parallel work.'}}
+        assert state['emitted'] and len(state['calls']) == 2
+        assert run(data) == {}, 'Already emitted guidance must be suppressed'
+        state['emitted'] = False
+        payload['hook_event_name'] = 'UserPromptSubmit'
+        data = json.dumps(payload).encode()
+        assert run(data + b' ' * (65536 - len(data)))['hookSpecificOutput']['hookEventName'] == 'UserPromptSubmit'
+        before = len(state['calls'])
+        for body in [b'', b'{', b'\xff', b'[]', data + b' ' * (65537 - len(data)),
+                     b'{"session_id":12,"hook_event_name":"PreToolUse"}',
+                     b'{"session_id":"bad/session","hook_event_name":"PreToolUse"}',
+                     b'{"session_id":"native-session","hook_event_name":"Stop"}']:
+            assert run(body) == {}
+        assert len(state['calls']) == before, 'Invalid input reached the server'
+        for mode in ['expired', 'outage', 'slow']:
+            state.update(mode=mode, emitted=False)
+            started = time.monotonic()
+            assert run(data) == {}
+            assert time.monotonic() - started < 5, 'Guidance lookup exceeded its deadline'
+        # A writer holding stdin open cannot stall the agent, including an otherwise complete JSON body.
+        child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            child.stdin.write(data); child.stdin.flush()
+            child.wait(timeout=3)
+            assert child.returncode == 0 and json.loads(child.stdout.read()) == {} and child.stderr.read() == b''
+        finally:
+            child.stdin.close()
+            if child.poll() is None: child.kill(); child.wait(timeout=3)
+            child.stdout.close(); child.stderr.close()
+        config.unlink()
+        assert run(data) == {}, 'Missing configuration must not surface in agent context'
+        assert not state['errors'], state['errors']
+        print('PASS: native stdin guidance, both events, scoped receipts, deduplication, Unicode config path, privacy, byte bound, input/network deadlines and silent outages.')
+    finally:
+        server.shutdown(); server.server_close(); worker.join(timeout=3)
