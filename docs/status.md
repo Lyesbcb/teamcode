@@ -1,5 +1,11 @@
 # Implementation status
 
+## Release acceptance follow-up
+
+The first full publication attempt, [39341571577](https://github.com/nathanfallet/teamcode/actions/runs/39341571577), passed the actual Linux native tests and owned login/boot service fixtures but stopped its Linux job on a stale team-smoke expectation: the bootstrap account now has role `owner`, not `admin`. Both native identity assertions are corrected. The complete native team walkthrough passes locally afterward (`/tmp/teamcode-release-team-final.log`), covering bootstrap/password replacement, browser member creation, device/session identity, scoped keys, persistence, revocation and audit. This is a test-fixture correction; no production behavior changed. Publication still requires successful release acceptance.
+
+The post-release brief contains only unfinished implementation/validation from the original V1 scope. New V2 product features stay in the separate roadmap.
+
 ## Boot startup and finalized 0.1.0 release scope
 
 On 2026-10-20 the owner explicitly requested boot-startup implementation followed by the unprefixed `0.1.0` tag/release. Remaining extended validation/operations moves to V2 for another agent's PR. The [handoff](v2-validation-handoff.md) preserves each pending scenario and existing evidence; publication does not claim those scenarios passed. Built-in release workflow checks and delivery of the native installers/image/deployable chart still gate publication.

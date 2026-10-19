@@ -1,8 +1,10 @@
-# V2 validation handoff after 0.1.0
+# Unfinished V1 work deferred after 0.1.0
 
 ## Owner decision and baseline
 
 On 2026-10-20 the owner finalized V1: finish startup before login, then publish the unprefixed `0.1.0` tag/release. The additional validation and operational work below moves to V2 and will be handled by another agent in a PR. This is an explicit scope decision, not a claim that the remaining scenarios have passed.
+
+This brief covers only unfinished implementation or validation from the original V1 scope. It is not the V2 product plan and does not assign new V2 features. Cloud sessions, centralized MCP, skills and open-source providers remain in the separate [product roadmap](roadmap.md).
 
 Start from `0.1.0`, fetch current `origin/main` and rebase the working branch before review. Other V2 agents already own separate branches/worktrees; preserve them and coordinate overlaps. Squash-merge PRs. Repository content stays English. Keep provider credentials, prompts and response bodies out of git/logs. Never stop another person's processes or Gradle daemons. Do not deploy an operator/user cluster.
 
