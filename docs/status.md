@@ -1,5 +1,13 @@
 # Implementation status
 
+## Windows installation-lock creation correction
+
+Windows native execution exposed three failing lock cases in [job 118164484890](https://github.com/nathanfallet/teamcode/actions/runs/39283937898/job/118164484890): installation update/rollback under an activity lock, competing writers and native shared-reader/exclusive-updater locking. The other 26 native cases passed. The subsequent matrix source also fails its Windows native test step, so its signed bundle/image gates cannot be accepted.
+
+New lock files used the token's default owner. On the elevated Windows runner that can be Administrators, causing the existing current-user ownership guard to reject the lock immediately. Lock creation now uses the same explicit current-user owner and protected user-only DACL as private configuration files. Existing-file ownership/link/reparse checks and nonblocking shared/exclusive file-region locking remain enforced; unowned existing locks are not repaired or adopted. The descriptor builder is shared with the private-file writer. The actual native lock test additionally checks that the opened lock has private current-user permissions.
+
+Local evidence: the changed C interop and Windows Kotlin sources compile (`/tmp/teamcode-windows-owned-lock-build.log`); all 37 actual macOS native tests, including the strengthened lock assertion, pass (`/tmp/teamcode-native-lock-permissions-test.log`). Windows runtime proof still requires the next CI run. No signing-root, credential or ownership check was weakened. Background-cache acceptance recorded below remains local macOS evidence.
+
 ## Shared daily release notifications
 
 Managed user services and agent launches now run credential-free signed-release checks alongside normal work. A separate native OS lock coordinates local processes; a private bounded cache stores exact signed metadata for 24 hours, including completed failure/no-release checks. Every cached notification reauthenticates against the current compiled roots. Invalid/retired-root entries are discarded, backwards clocks force a refresh, caller cancellation propagates, and the watcher's own five-second timeout becomes a redacted unavailable result. Source/manual copies and root processes skip the watcher. No executable is downloaded or selected automatically.
