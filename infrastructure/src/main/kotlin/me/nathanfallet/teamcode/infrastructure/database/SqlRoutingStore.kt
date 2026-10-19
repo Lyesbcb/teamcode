@@ -7,13 +7,7 @@ import me.nathanfallet.teamcode.domain.team.*
 
 class SqlRoutingStore(private val database: Database) : RoutingStore {
     override suspend fun list(teamId: String): List<RouteRule> = database.transaction { c ->
-        c.rows("SELECT * FROM model_routes WHERE team_id = ? ORDER BY priority DESC, id", teamId) { row ->
-            val targets = Json.parseToJsonElement(row.getString("targets")).jsonArray.map { value ->
-                val target = value.jsonObject
-                RouteTarget(target.getValue("provider").jsonPrimitive.content, target["model"]?.jsonPrimitive?.contentOrNull)
-            }
-            RouteRule(row.getString("id"), row.getString("model_pattern"), targets, row.getInt("priority"), row.getBoolean("enabled"), row.getLong("version"))
-        }
+        readRoutes(c, teamId)
     }
     override suspend fun save(actor: Principal, rule: RouteRule): RouteRule {
         actor.requireAdmin()
@@ -46,3 +40,12 @@ class SqlRoutingStore(private val database: Database) : RoutingStore {
         if (valid == null) throw TeamFailure("authentication_required", 401, "Sign in as an administrator again.")
     }
 }
+
+internal fun readRoutes(c: Connection, teamId: String): List<RouteRule> =
+    c.rows("SELECT * FROM model_routes WHERE team_id = ? ORDER BY priority DESC, id", teamId) { row ->
+        val targets = Json.parseToJsonElement(row.getString("targets")).jsonArray.map { value ->
+            val target = value.jsonObject
+            RouteTarget(target.getValue("provider").jsonPrimitive.content, target["model"]?.jsonPrimitive?.contentOrNull)
+        }
+        RouteRule(row.getString("id"), row.getString("model_pattern"), targets, row.getInt("priority"), row.getBoolean("enabled"), row.getLong("version"))
+    }

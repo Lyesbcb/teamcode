@@ -23,8 +23,8 @@ internal class SqlSessionAffinity {
 
     fun record(c: Connection, actor: Principal, affinity: RequestAffinity, target: RouteTarget, accountId: String, now: Long) {
         val updated = c.execute(
-            "UPDATE conversation_affinities SET provider = ?, resolved_model = ?, account_id = ?, last_seen_at = ?, expires_at = ? WHERE team_id = ? AND member_id = ? AND conversation_key = ? AND requested_model = ? AND route_key = ?",
-            target.provider, target.model, accountId, now, now + KNOWN_TTL, actor.teamId, actor.member.id, affinity.conversationKey, affinity.requestedModel, affinity.routeKey,
+            "UPDATE conversation_affinities SET wire_protocol = ?, requested_effort = ?, thinking_tokens = ?, provider = ?, resolved_model = ?, account_id = ?, last_seen_at = ?, expires_at = ? WHERE team_id = ? AND member_id = ? AND conversation_key = ? AND requested_model = ? AND route_key = ?",
+            affinity.protocol.name, affinity.effort, affinity.thinkingTokens, target.provider, target.model, accountId, now, now + KNOWN_TTL, actor.teamId, actor.member.id, affinity.conversationKey, affinity.requestedModel, affinity.routeKey,
         )
         if (updated != 0) return
         // Bound persistent hints per member and team. At capacity, admission still works without
@@ -34,8 +34,8 @@ internal class SqlSessionAffinity {
         }.single()
         if (counts.first >= MAX_TEAM_HINTS || counts.second >= MAX_MEMBER_HINTS) return
         c.execute(
-            "INSERT INTO conversation_affinities (team_id, member_id, session_key, conversation_key, requested_model, route_key, provider, resolved_model, account_id, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE last_seen_at = ?, expires_at = ?",
-            actor.teamId, actor.member.id, affinity.sessionKey, affinity.conversationKey, affinity.requestedModel, affinity.routeKey, target.provider, target.model, accountId, now, now + KNOWN_TTL, now, now + KNOWN_TTL,
+            "INSERT INTO conversation_affinities (team_id, member_id, session_key, conversation_key, requested_model, route_key, wire_protocol, requested_effort, thinking_tokens, provider, resolved_model, account_id, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE last_seen_at = ?, expires_at = ?",
+            actor.teamId, actor.member.id, affinity.sessionKey, affinity.conversationKey, affinity.requestedModel, affinity.routeKey, affinity.protocol.name, affinity.effort, affinity.thinkingTokens, target.provider, target.model, accountId, now, now + KNOWN_TTL, now, now + KNOWN_TTL,
         )
     }
     companion object {

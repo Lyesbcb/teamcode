@@ -9,18 +9,21 @@ data class QuotaForecast(val reachesThresholdAtMillis: Long?, val pointsPerHour:
 class ForecastQuotaUseCase(private val maximumAgeMillis: Long = 300_000) {
     fun forecast(observation: QuotaObservation?, ratePerHour: Double?, nowMillis: Long, threshold: Double = 0.9): QuotaForecast {
         require(threshold.isFinite() && threshold > 0 && threshold <= 1)
-        if (observation == null || ratePerHour == null || !ratePerHour.isFinite() || ratePerHour < 0 ||
+        if (observation == null ||
             !observation.utilization.isFinite() || observation.utilization !in 0.0..1.0) {
             return QuotaForecast(null, null, QuotaForecast.State.UNKNOWN)
         }
         if (observation.observedAtMillis > nowMillis || observation.resetsAtMillis <= nowMillis ||
             nowMillis - observation.observedAtMillis > maximumAgeMillis) {
-            return QuotaForecast(null, ratePerHour * 100, QuotaForecast.State.STALE)
+            return QuotaForecast(null, null, QuotaForecast.State.STALE)
         }
-        if (observation.utilization >= threshold) return QuotaForecast(nowMillis, ratePerHour * 100, QuotaForecast.State.EXHAUSTED)
-        if (ratePerHour == 0.0) return QuotaForecast(null, 0.0, QuotaForecast.State.IDLE)
-        val eta = observation.observedAtMillis + ((threshold - observation.utilization) / ratePerHour * 3_600_000).toLong()
-        return QuotaForecast(eta, ratePerHour * 100,
+        val validRate = ratePerHour?.takeIf { it.isFinite() && it >= 0 }
+        if (observation.utilization >= threshold) return QuotaForecast(nowMillis, validRate?.times(100), QuotaForecast.State.EXHAUSTED)
+        if (validRate == null) return QuotaForecast(null, null, QuotaForecast.State.UNKNOWN)
+        if (validRate == 0.0) return QuotaForecast(null, 0.0, QuotaForecast.State.IDLE)
+        val duration = ((threshold - observation.utilization) / validRate * 3_600_000).toLong()
+        val eta = if (observation.observedAtMillis > 0 && duration > Long.MAX_VALUE - observation.observedAtMillis) Long.MAX_VALUE else observation.observedAtMillis + duration
+        return QuotaForecast(eta, validRate * 100,
             if (eta < observation.resetsAtMillis) QuotaForecast.State.EXHAUSTS_FIRST else QuotaForecast.State.RESET_FIRST)
     }
 }

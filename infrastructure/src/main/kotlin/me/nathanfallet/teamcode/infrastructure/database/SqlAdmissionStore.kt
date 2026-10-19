@@ -25,8 +25,8 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         c.lockTeam(actor.teamId)
         val now = c.nowMillis()
         requireCurrent(c, actor)
-        val policy = policy(c, actor.member.id)
-        val current = capacity(c, policy, now, actor.teamId)
+        val policy = readMemberPolicy(c, actor.member.id)
+        val current = readMemberCapacity(c, policy, now, actor.teamId)
         val directive = c.rows("SELECT max_concurrent, min_interval FROM directives WHERE member_id = ? AND expires_at > ? AND pace IN ('SLOW_DOWN', 'PAUSE')", actor.member.id, now) { it.getInt(1) to it.getLong(2) }.singleOrNull()
         if (directive != null) {
             val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ? AND units > 0", actor.member.id, now / DAY) { it.getLong(1) }.single()
@@ -67,7 +67,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         requireCurrent(c, actor)
         if (memberId != actor.member.id) actor.requireAdmin()
         ensureMember(c, actor.teamId, memberId)
-        capacity(c, policy(c, memberId), c.nowMillis(), actor.teamId)
+        readMemberCapacity(c, readMemberPolicy(c, memberId), c.nowMillis(), actor.teamId)
     }
     override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = database.transaction { c ->
         actor.requireAdmin()
@@ -113,16 +113,6 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
             c.execute("DELETE FROM quota_history WHERE observed_at < ? LIMIT 1000", c.nowMillis() - 7 * DAY)
             c.execute("DELETE FROM reservations WHERE day_number < ? LIMIT 1000", c.nowMillis() / DAY - 90)
         }
-    }
-    private fun policy(c: Connection, member: String): MemberPolicy = c.rows("SELECT * FROM member_policies WHERE member_id = ?", member) { MemberPolicy(member, it.getLong("daily_units"), it.getInt("max_concurrent"), it.getString("pool_id"), it.getInt("weight")) }.singleOrNull() ?: MemberPolicy(member)
-    private fun capacity(c: Connection, policy: MemberPolicy, now: Long, teamId: String): MemberCapacity {
-        val charged = c.rows("SELECT COALESCE(SUM(units), 0) FROM reservations WHERE member_id = ? AND day_number = ?", policy.memberId, now / DAY) { it.getLong(1) }.single()
-        val active = c.rows("SELECT COUNT(*) FROM reservations WHERE member_id = ? AND state = 'ACTIVE' AND expires_at > ?", policy.memberId, now) { it.getInt(1) }.single()
-        val totalWeight = c.rows("SELECT COALESCE(SUM(COALESCE(p.weight, 1)), 0) FROM members m LEFT JOIN member_policies p ON p.member_id = m.id WHERE m.team_id = ? AND m.disabled = FALSE AND p.pool_id <=> ?", teamId, policy.poolId) { it.getLong(1) }.single()
-        val budget = c.rows("SELECT daily_units FROM pool_budgets WHERE team_id = ? AND pool_id = ?", teamId, policy.poolId.orEmpty()) { it.getLong(1) }.singleOrNull() ?: 1_000_000
-        val share = if (totalWeight == 0L) 0 else budget * policy.weight / totalWeight
-        val allowance = if (policy.dailyUnits == 0L) share else minOf(share, policy.dailyUnits)
-        return MemberCapacity(policy, charged, active, (now / DAY + 1) * DAY, allowance, budget, totalWeight)
     }
     private fun ensureMember(c: Connection, team: String, member: String) {
         if (c.rows("SELECT id FROM members WHERE team_id = ? AND id = ?", team, member) { it.getString(1) }.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")

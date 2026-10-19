@@ -2,7 +2,7 @@
 
 ## Two independent limits
 
-Subscription windows are provider observations: account-wide five-hour and weekly windows, plus model-specific windows when reported. TeamCode never sums percentages across plans or invents a token-to-subscription exchange rate. An account at 95% of a relevant window is excluded until its reset. HTTP 429 adds a bounded cooldown; credential rejection requires reconnect.
+Subscription windows are provider observations: account-wide five-hour and weekly windows, plus model-specific windows when reported. TeamCode never sums percentages across plans or invents a token-to-subscription exchange rate. An account at 95% of a relevant window is excluded until its reset. HTTP 429 updates relevant windows or adds a bounded cooldown. A rejected access token allows one coordinated renewal attempt; uncertain refresh ownership requires reconnect.
 
 Team credits are an administrator-controlled daily budget. Current accounting is input tokens plus cached/read/creation input tokens plus five times output tokens. The request reserves raw request bytes + 16,384 + five times maximum output tokens before dispatch. Actual usage replaces the reservation on complete streams; missing usage or interruption retains the estimate. Failed admission spends nothing. A provider 4xx settles to zero. This conservative estimate can reject a large request even if its eventual output would be short.
 
@@ -12,11 +12,15 @@ Budgets and reservations persist in MySQL. Member requests are admitted under a 
 
 ## Forecasting
 
-Usage is sampled sequentially, with at most eight accounts per sampling pass. Inference headers supply additional observations. History retains one sample per minute per account/window, with seven-day retention; forecasts use the latest hour and matching reset epoch. At least three observations spanning one minute are required to infer a rate. Decreasing utilization, missing windows and observations older than five minutes yield unknown/stale guidance rather than optimistic headroom.
+Usage is sampled sequentially, with at most eight accounts per sampling pass. Inference headers supply additional observations. History retains one sample per minute per account/window, with seven-day retention; forecasts use the latest hour and matching reset epoch. At least three observations spanning one minute are required to infer a rate. A fresh reading already at the pressure threshold does not require a learned rate to identify exhaustion. Decreasing utilization, missing windows and observations older than five minutes yield unknown/stale guidance rather than optimistic headroom.
 
-The controller compares projected exhaustion to reset for every observed window. It emits NORMAL, SLOW_DOWN, CAN_INCREASE, PAUSE or UNKNOWN. A two-minute hysteresis limits transitions except urgent exhaustion. Advice expires after three minutes without renewal. SLOW_DOWN limits admission to one concurrent request with a ten-second gap; PAUSE uses a thirty-second gap. The 95% account exclusion is enforced separately. Advice to increase parallelism only applies to useful work already queued and remains bounded by the administrator's concurrency limit.
+The controller compares projected exhaustion to reset for every applicable observed window. It emits NORMAL, SLOW_DOWN, CAN_INCREASE, PAUSE or UNKNOWN. Tightening and unknown data take effect immediately. Easing requires the candidate state to remain stable across observations for two minutes; renewed pressure or a different candidate resets that recovery timer. The pending state is stored in MySQL and survives replica changes. Advice expires after three minutes without renewal. SLOW_DOWN limits admission to one concurrent request with a ten-second gap; PAUSE uses a thirty-second gap. The 95% account exclusion is enforced separately. Advice to increase parallelism only applies to useful work already queued and remains bounded by the administrator's concurrency limit.
 
-Generic advice conservatively includes model-scoped windows. A nearly exhausted model-specific window can therefore slow unrelated requests; per-route forecasts are a follow-up. Forecast accuracy and oscillation under real load still require validation. This is an initial controller, not a claim of optimal scheduling.
+Forecast contexts come from conversation placements admitted within the last two minutes. They retain the original input protocol and must match the current route fingerprint, requested/resolved model policy, reasoning effort and explicit thinking-budget ceiling. Without a valid active context, advice is UNKNOWN; idle capacity on an unrelated provider never justifies acceleration. Old hints without protocol metadata become usable after their next admission.
+
+Each active target uses only its provider's eligible accounts in the member's assigned pool, the current placement priority, shared quota windows and model windows applicable to the resolved model. For example, a Fable-only window does not pressure Opus; idle Codex does not hide Claude burn until work actually moves to Codex. Accounts already excluded at 95% do not conceal a selectable lower-priority account. Advice is capped by the administrator's ceiling and the relevant accounts' two-slot physical capacity. Exhausted member shares, hard caps or pool budgets produce an allowance-specific PAUSE; admission and advice read the same weighted-share calculation.
+
+Delivery remains member-wide for now: when several targets are active, the most constrained target controls the advice. A changed route, model policy, pool, priority or eligible account set invalidates the old recovery state. Advice is recalculated by the controller, while hard authorization and budgets are checked at every admission. This does not reserve physical slots for advice recipients, predict the next request's cost or guarantee that another member will not consume available capacity. Requests without session metadata receive no route-based acceleration advice. Sparse per-session delivery, replay accuracy under real load and an observation-only controller mode remain acceptance work.
 
 ## Agent integration
 
@@ -26,7 +30,7 @@ Current hint output repeats on invocation; automatic hook installation and per-s
 
 ## Models and effort
 
-Administrators edit the allow/deny patterns and allowed efforts in the dashboard. Deny takes precedence. Missing effort is represented as `provider-default`; an explicit token thinking budget also requires `budgeted` permission and must fit the administrator's cap. This policy validates the requested and resolved model names, so route aliases cannot bypass a forbidden model. The currently enabled gateway serves native explicit Claude or GPT model IDs on their respective endpoints; cross-provider routing is still under implementation.
+Administrators edit the allow/deny patterns and allowed efforts in the dashboard. Deny takes precedence. Missing effort is represented as `provider-default`; an explicit token thinking budget also requires `budgeted` permission and must fit the administrator's cap. This policy validates the requested and resolved model names, so route aliases cannot bypass a forbidden model. The gateway checks native Claude/GPT requests and both sides of configured cross-provider routes; see [routing](routing.md) for conversion capability limits.
 
 ## Refresh ownership
 

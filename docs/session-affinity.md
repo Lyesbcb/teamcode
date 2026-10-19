@@ -8,7 +8,7 @@ Claude Code sends `x-claude-code-session-id`; Codex sends `session-id`. The loca
 
 One client session can contain multiple subagents. Following TeamClaude's `conversation.js` and session distribution tests, the conversation key includes the opening message instead of pinning every subagent to the session's first account. Later turns keep the same key; a fresh subagent or front-compacted history gets another key. Forks with the same opening intentionally share affinity because they share a cached prefix.
 
-TeamCode already parses bounded request JSON for policy inspection, so it hashes a bounded serialization of the first Messages element or first Responses user input. At most 64 KiB of that opening enters the digest; later turns are not serialized for this purpose. Identical bounded prefixes may share a hint without sharing conversation state. The original session ID and message content are never persisted: the table stores SHA-256 session/conversation digests and routing metadata, scoped by authenticated team and member.
+TeamCode already parses bounded request JSON for policy inspection, so it hashes a bounded serialization of the first Messages element or first Responses user input. At most 64 KiB of that opening enters the digest; later turns are not serialized for this purpose. Identical bounded prefixes may share a hint without sharing conversation state. The original session ID and message content are never persisted: the table stores SHA-256 session/conversation digests and routing metadata, scoped by authenticated team and member. It also retains the input protocol, requested effort and explicit thinking budget so forecasts can recheck the policy after administrative changes.
 
 ## Placement and fallback
 

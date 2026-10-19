@@ -1,12 +1,13 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import java.sql.Connection
 import kotlinx.serialization.json.Json
 import me.nathanfallet.teamcode.domain.policy.*
 import me.nathanfallet.teamcode.domain.team.*
 
 class SqlModelPolicyStore(private val database: Database) : ModelPolicyStore {
     override suspend fun get(teamId: String): ModelPolicy = database.transaction { c ->
-        c.rows("SELECT * FROM model_policies WHERE team_id = ?", teamId) { ModelPolicy(Json.decodeFromString(it.getString("allowed_models")), Json.decodeFromString(it.getString("denied_models")), Json.decodeFromString(it.getString("allowed_efforts")), it.getLong("maximum_thinking_tokens")) }.singleOrNull() ?: ModelPolicy()
+        readModelPolicy(c, teamId)
     }
     override suspend fun save(actor: Principal, policy: ModelPolicy): ModelPolicy {
         actor.requireAdmin()
@@ -22,3 +23,6 @@ class SqlModelPolicyStore(private val database: Database) : ModelPolicyStore {
         }
     }
 }
+
+internal fun readModelPolicy(c: Connection, teamId: String): ModelPolicy =
+    c.rows("SELECT * FROM model_policies WHERE team_id = ?", teamId) { ModelPolicy(Json.decodeFromString(it.getString("allowed_models")), Json.decodeFromString(it.getString("denied_models")), Json.decodeFromString(it.getString("allowed_efforts")), it.getLong("maximum_thinking_tokens")) }.singleOrNull() ?: ModelPolicy()

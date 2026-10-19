@@ -1,6 +1,7 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
 import kotlinx.coroutines.*
+import me.nathanfallet.teamcode.domain.gateway.WireProtocol
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.routing.*
@@ -11,7 +12,7 @@ import kotlin.test.*
 
 class SessionAffinityPersistenceTest {
     private fun hint(conversation: Char = 'b', model: String = "claude-opus-test", route: Char = 'c') =
-        RequestAffinity("a".repeat(64), conversation.toString().repeat(64), model, route.toString().repeat(64))
+        RequestAffinity("a".repeat(64), conversation.toString().repeat(64), model, route.toString().repeat(64), WireProtocol.MESSAGES)
 
     @Test fun independentReplicasPreserveAffinityWithoutBypassingEligibilityOrOwnership() = runBlocking {
         MySQLContainer("mysql:8.4").withDatabaseName("teamcode").withTmpFs(mapOf("/var/lib/mysql" to "rw,nosuid,size=1g")).use { container ->

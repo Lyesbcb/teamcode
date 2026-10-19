@@ -169,3 +169,17 @@ See [V1 review](v1-review.md) for the product walkthrough and the remaining rele
 - The rebuilt macOS ARM64 native binary passed `scripts/smoke-native.py` against the rebuilt server: private configuration, authenticated SDK/proxy transport and progressive SSE. No real provider calls were made for this milestone. Cross-platform CI for this change remains pending publication.
 
 See [conversation affinity](session-affinity.md) for behavior, bounds and remaining live-agent/reset-boundary acceptance. This milestone does not close the remaining [V1 review gates](v1-review.md).
+
+
+Conversation-affinity CI acceptance: run `39179684615` for commit `d96aee1` completed successfully across JVM/MySQL, Helm and actual native macOS/Linux/Windows tests, followed by successful Docker publication. Registry inspection verified the commit image as OCI index `sha256:c2fb9e389a5af7158fe16959060e37fd00e61684d311cfcf4a4e7fcedb0de362`, containing `linux/amd64` and `linux/arm64`. The subsequent forecast changes have separate local/CI acceptance and are not covered by that run.
+
+
+### Forecast scope and durable recovery
+
+- Advice now uses recently admitted provider/model targets, their original protocol and current route fingerprint. Requested/resolved model policy, effort and explicit thinking budgets are rechecked. Missing/inactive/invalid contexts yield UNKNOWN, rather than borrowing headroom from idle providers or unrelated model windows.
+- Only accessible pool accounts in the selectable priority tier contribute. Proven 95% exhaustion allows the same lower-priority eligibility as admission. Advice respects physical account ceilings and the identical weighted member/pool allowance calculation used for reservations; zero share or exhausted budget produces an allowance-specific PAUSE.
+- Tightening and unknown data apply immediately. Recovery must remain stable for two minutes; the pending candidate/timestamp persist in MySQL, and route/policy/pool/eligibility changes invalidate the previous context. Fresh observed exhaustion no longer requires a learned rate, and extremely small rates cannot overflow the forecast timestamp.
+- Local evidence (2026-10-19): `:domain:test :infrastructure:test :presentation:test :app:buildFatJar` passed: 14 domain, 42 infrastructure and 7 presentation tests, zero failures/errors/skips. MySQL tests use independent connection pools and cover route/provider/model scope, effort changes, pool isolation, missing/stale observations, weighted allowances, recovery continuity and context invalidation. Existing account-affinity and replica regressions pass with the additive V8 migration.
+- The actual macOS ARM64 CLI passed `scripts/smoke-native.py` against the rebuilt packaged server (private configuration, authenticated proxy/SDK, progressive SSE). Module boundaries and diff whitespace checks passed. Tests used synthetic data and no real provider requests. Cross-platform CI for this milestone is pending the new push.
+
+Advice is still delivered per member, conservatively taking the most constrained active target. Sparse per-session delivery, automatic hook integration, outside-spend/reset/bursty real-load replay, observation-only rollout and fair scheduling remain V1 work; this milestone does not claim optimal orchestration or finish the full roadmap.

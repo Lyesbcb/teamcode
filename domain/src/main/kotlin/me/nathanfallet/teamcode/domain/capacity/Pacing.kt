@@ -44,7 +44,7 @@ class PacingUseCase {
         val selected = states.minBy { when (it) { Pace.CAN_INCREASE -> 0; Pace.NORMAL -> 1; Pace.SLOW_DOWN -> 2; Pace.UNKNOWN -> 3; Pace.PAUSE -> 4 } }
         return advice(selected, maximum)
     }
-    private fun advice(pace: Pace, maximum: Int) = when (pace) {
+    internal fun advice(pace: Pace, maximum: Int) = when (pace) {
         Pace.UNKNOWN -> PacingAdvice(pace, maximum, 0, "Quota observations are missing or stale. Keep current useful work; do not increase parallelism based on this signal.")
         Pace.NORMAL -> PacingAdvice(pace, maximum, 0, "Consumption is within the observed capacity trajectory. Continue useful work within your team limits.")
         Pace.SLOW_DOWN -> PacingAdvice(pace, 1, 10_000, "The current burn rate is projected to reach a quota before reset. Reduce optional parallel work and use one request at a time; the gateway enforces a short admission delay.")

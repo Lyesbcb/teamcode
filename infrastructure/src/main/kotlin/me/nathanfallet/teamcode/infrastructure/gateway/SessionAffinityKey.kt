@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.infrastructure.gateway
 
+import me.nathanfallet.teamcode.infrastructure.routing.routeFingerprint
 import java.io.OutputStream
 import java.security.MessageDigest
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -41,8 +42,11 @@ internal object SessionAffinityKey {
             }
             try { Json.encodeToStream(JsonElement.serializer(), opening, sink) } catch (_: PrefixComplete) { /* A shared prefix is a harmless affinity collision. */ }
         }
-        val route = targets.joinToString("\n") { "${it.provider}:${it.model ?: model}" }
-        return RequestAffinity(hash(id), digest.digest().hex(), model, hash("${protocol.name}\n$route"))
+        val effortField = if (protocol == WireProtocol.MESSAGES) "output_config" else "reasoning"
+        val effort = ((body[effortField] as? JsonObject)?.get("effort") as? JsonPrimitive)?.contentOrNull
+        val thinking = body["thinking"] as? JsonObject
+        val budget = if ((thinking?.get("type") as? JsonPrimitive)?.contentOrNull == "enabled") (thinking["budget_tokens"] as? JsonPrimitive)?.longOrNull else null
+        return RequestAffinity(hash(id), digest.digest().hex(), model, routeFingerprint(protocol, model, targets), protocol, effort, budget)
     }
     private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).hex()
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
