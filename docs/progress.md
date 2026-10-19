@@ -4,7 +4,7 @@ Execution scope is **V1 only**. The owner will implement V2 separately; V2 roadm
 
 The end-to-end foundation works, including real Claude Max and Codex subscription requests. **V1 release acceptance is not complete.** Successful individual smoke tests do not imply that every client, fallback route or operating-system lifecycle is supported.
 
-The owner clarified the completion order: finish and validate the entire V1 plan, then create the `v0.1.0` tag and publish GitHub release **0.1.0**. Delivery includes a documented one-command native installation for every advertised macOS/Linux/Windows target, the accepted server image, and a distributed Helm chart ready for users to deploy on their own infrastructure. An agent-operated deployment on an owner or user cluster is neither requested nor a release prerequisite. These delivery requirements do not replace any remaining V1 functional or acceptance work.
+The owner clarified the completion order: finish and validate the entire V1 plan, then create the `0.1.0` tag and publish GitHub release **0.1.0**. Delivery includes a documented one-command native installation for every advertised macOS/Linux/Windows target, the accepted server image, and a distributed Helm chart ready for users to deploy on their own infrastructure. An agent-operated deployment on an owner or user cluster is neither requested nor a release prerequisite. These delivery requirements do not replace any remaining V1 functional or acceptance work.
 
 | Area | Implemented and verified | Remaining acceptance work |
 | --- | --- | --- |

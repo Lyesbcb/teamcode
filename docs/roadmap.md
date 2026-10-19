@@ -18,7 +18,7 @@ Tests use synthetic fixtures and local fake providers. Real-provider acceptance 
 
 ## Release acceptance
 
-Complete the entire V1 plan and its acceptance before creating the `v0.1.0` tag and publishing GitHub release **0.1.0**. The release must provide documented one-command installation on every advertised macOS/Linux/Windows target, accepted server images and a versioned, distributed Helm chart ready for users to deploy wherever they choose. Preparing and validating the deployable chart is in scope; deploying it on an owner or user cluster is not requested or required. Publishing a tag does not substitute for unfinished V1 work.
+Complete the entire V1 plan and its acceptance before creating the `0.1.0` tag and publishing GitHub release **0.1.0**. The release must provide documented one-command installation on every advertised macOS/Linux/Windows target, accepted server images and a versioned, distributed Helm chart ready for users to deploy wherever they choose. Preparing and validating the deployable chart is in scope; deploying it on an owner or user cluster is not requested or required. Publishing a tag does not substitute for unfinished V1 work.
 
 - Standalone public checkout; only `cli -> client -> api` on the local side.
 - Native HTTPS, streaming, backpressure and cancellation on advertised OS targets.

@@ -19,7 +19,7 @@ class InstallationFixtureTest(unittest.TestCase):
         binary = struct.pack('<II', 0xFEEDFACF, 0x100000C) + bytes(24) + payload
         name = fixtures.bundle.asset_name(version, 'macos-arm64')
         (directory / name).write_bytes(binary)
-        manifest = {'schemaVersion': 1, 'version': version, 'tag': 'v' + version, 'sourceCommit': commit,
+        manifest = {'schemaVersion': 1, 'version': version, 'tag': version, 'sourceCommit': commit,
                     'assets': {'macos-arm64': {'fileName': name, 'sha256': hashlib.sha256(binary).hexdigest(), 'size': len(binary)}}}
         (directory / 'manifest.json').write_text(json.dumps(manifest))
         (directory / 'manifest.sig').write_bytes(b'public unit fixture, not a publisher signature')

@@ -2,7 +2,7 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ['v[0-9]*']
+    tags: ['[0-9]*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -49,11 +49,18 @@ jobs:
           version: v3.19.0
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 scripts/check-helm.py
+      - name: Package the chart with the exact build version
+        run: helm package helm/teamcode --destination chart-dist --version "$ORG_GRADLE_PROJECT_teamcodeVersion" --app-version "$ORG_GRADLE_PROJECT_teamcodeVersion"
       - name: Validate Kubernetes schemas
         run: |
           curl --fail --location --retry 2 https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
-          helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
-          helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
+          helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
+          helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teamcode-helm-chart
+          path: chart-dist/*.tgz
+          retention-days: 7
   image:
     timeout-minutes: 20
     needs: [jvm, helm, signed_installation]
@@ -61,7 +68,7 @@ jobs:
       !cancelled() && needs.jvm.result == 'success' && needs.helm.result == 'success' &&
       (needs.signed_installation.result == 'success' ||
       (needs.signed_installation.result == 'skipped' &&
-      !startsWith(github.ref, 'refs/tags/v') &&
+      github.ref_type != 'tag' &&
       !(github.event_name == 'workflow_dispatch' && inputs.full_validation)))
     runs-on: ubuntu-latest
     permissions:
@@ -91,7 +98,7 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
   native:
     # Keep paid native runners off ordinary pushes and pull requests.
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -121,7 +128,7 @@ jobs:
             echo "NATIVE_TARGET=$target"
             echo "NATIVE_DIRECTORY=$directory"
             echo "NATIVE_ASSET=$asset"
-            echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}"
+            echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion}"
           } >> "$GITHUB_ENV"
       - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" ":cli:linkDebugTest${NATIVE_TARGET}" :app:buildFatJar
       - run: '"cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"'
@@ -167,7 +174,7 @@ jobs:
           path: installation-dist/*
           retention-days: 7
   windows:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     runs-on: windows-latest
     steps:
@@ -190,7 +197,7 @@ jobs:
       - name: Stage the tested native release asset
         shell: pwsh
         run: |
-          $releaseVersion = $env:ORG_GRADLE_PROJECT_teamcodeVersion -replace '^v', ''
+          $releaseVersion = $env:ORG_GRADLE_PROJECT_teamcodeVersion
           python scripts/release-bundle.py stage --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --target windows-x64 --version $releaseVersion --commit $env:GITHUB_SHA --output dist
       - uses: actions/upload-artifact@v4
         with:
@@ -215,7 +222,7 @@ jobs:
           retention-days: 7
 
   cross_build:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -307,7 +314,7 @@ jobs:
         run: |
           test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
           chmod 755 "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" "cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"
-          echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}" >> "$GITHUB_ENV"
+          echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion}" >> "$GITHUB_ENV"
       - run: '"cli/build/bin/${NATIVE_DIRECTORY}/debugTest/test.kexe"'
       - run: python3 scripts/smoke-release-verification.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - run: python3 scripts/smoke-native.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
@@ -355,7 +362,7 @@ jobs:
           merge-multiple: true
           path: staged
       - name: Verify and assemble all five tested targets
-        run: python3 scripts/release-bundle.py assemble --inputs staged --version "${ORG_GRADLE_PROJECT_teamcodeVersion#v}" --commit "$GITHUB_SHA" --output dist
+        run: python3 scripts/release-bundle.py assemble --inputs staged --version "${ORG_GRADLE_PROJECT_teamcodeVersion}" --commit "$GITHUB_SHA" --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: teamcode-release-bundle
@@ -471,14 +478,14 @@ jobs:
         run: |
           python -c 'import os,platform; assert platform.machine() == os.environ["EXPECTED_ARCHITECTURE"], "Wrong runtime architecture"'
           python scripts/installation-fixture.py --first-bundle installation-dist --second-bundle dist --target "$INSTALLATION_TARGET" --output installation-fixtures
-          releaseVersion="${ORG_GRADLE_PROJECT_teamcodeVersion#v}"
+          releaseVersion="${ORG_GRADLE_PROJECT_teamcodeVersion}"
           suffix=""
           if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
           binary="installation-fixtures/second/teamcode-${releaseVersion}-${INSTALLATION_TARGET}${suffix}"
           python scripts/smoke-installation.py --binary "$binary" --first-bundle installation-fixtures/first --second-bundle installation-fixtures/second --notification-bundle installation-fixtures/second --service
   release:
     timeout-minutes: 10
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [image, signed_bundle, signed_installation]
     runs-on: ubuntu-latest
     permissions:
@@ -489,6 +496,10 @@ jobs:
         with:
           name: teamcode-signed-release-bundle
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: teamcode-helm-chart
+          path: dist
       - name: Verify the exact accepted signature before publication
         run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Publish the verified version
@@ -498,5 +509,5 @@ jobs:
         run: |
           flags=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "TeamCode ${GITHUB_REF_NAME#v}" "${flags[@]}" --draft
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME" "${flags[@]}" --draft
           gh release edit "$GITHUB_REF_NAME" --draft=false
