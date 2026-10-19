@@ -7,6 +7,9 @@ import re
 import shutil
 import subprocess
 import time
+from contextlib import nullcontext
+
+from acceptance_fallback import coding_fallback, verify_fallback
 
 
 def run_agent(command, work, env):
@@ -68,7 +71,12 @@ if __name__ == '__main__':
         provider = 'codex' if agent == 'claude' else 'anthropic'
         target = target_codex if agent == 'claude' else args.model
         rule = {'id': 'coding-' + agent, 'pattern': incoming, 'targets': [{'provider': provider, 'model': target}]}
-        assert request('/api/v1/routes/' + rule['id'], rule, token, method='PUT')[0] == 200
+        native_provider = 'anthropic' if agent == 'claude' else 'codex'
+        if args.coding_fallback:
+            rule['targets'].insert(0, {'provider': native_provider, 'model': incoming})
+        route_status, route_body = request('/api/v1/routes/' + rule['id'], rule, token, method='PUT')
+        assert route_status == 200
+        saved_route = json.loads(route_body)
         child_env = {key: value for key, value in env.items()
                      if not key.startswith(('ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'CMUX_', 'TEAMCODE_')) and key != 'CLAUDECODE'}
         child_env.update(PATH=str(agent_bin) + os.pathsep + child_env['PATH'],
@@ -91,7 +99,7 @@ if __name__ == '__main__':
             child_env['MAX_THINKING_TOKENS'] = '0'
             command += ['--bare', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                         '--tools', 'Read,Edit,Bash', '--allowedTools', 'Read,Edit,Bash(python3 -m unittest*)',
-                        '--no-session-persistence', '--disable-slash-commands', '--max-turns', '8',
+                        '--no-session-persistence', '--disable-slash-commands', '--max-turns', '12',
                         '--model', incoming, '--settings', '{"alwaysThinkingEnabled":false}',
                         '--system-prompt', 'Complete the small local coding task using the supplied tools. Stay in the current directory.',
                         '--verbose', '--output-format', 'stream-json', '-p', prompt]
@@ -101,7 +109,13 @@ if __name__ == '__main__':
                         '-c', 'model_reasoning_effort="none"', '-c', 'web_search="disabled"',
                         '--model', incoming, prompt]
         log_offset = len(log.read_text())
-        result = run_agent(command, work, child_env)
+        config = json.loads((root / 'config/teamcode/config.json').read_text())
+        boundary = coding_fallback(request, token, config['serverUrl'], work, child_env, native_provider,
+                                   incoming, 'messages' if agent == 'claude' else 'responses') if args.coding_fallback else nullcontext()
+        with boundary as gate:
+            result = run_agent(command, work, child_env)
+        if gate is not None:
+            assert gate.failure is None, 'Acceptance boundary failed: ' + str(gate.failure)
         events = []
         for line in result.stdout.splitlines():
             try:
@@ -116,6 +130,13 @@ if __name__ == '__main__':
                        'invalid_thinking', 'invalid_max_tokens', 'invalid_effort', 'invalid_request', 'api error']
             print('Coding task failure categories:', [m for m in markers if m in diagnostics], flush=True)
             print('Coding task event types:', sorted({str(event.get('type')) for event in events}), flush=True)
+            for event in events:
+                if event.get('type') == 'result':
+                    subtype = event.get('subtype')
+                    known = {'success', 'error_max_turns', 'error_during_execution', 'error_max_budget_usd', 'error_max_structured_output_retries'}
+                    print('Coding task result category:', subtype if subtype in known else 'unknown', flush=True)
+            print('Coding task file state:', {'source_changed': source.read_text() != initial,
+                                             'tests_unchanged': hashlib.sha256(tests.read_bytes()).hexdigest() == digest}, flush=True)
             for names in re.findall(r'cannot preserve: ([a-zA-Z0-9_, ]{1,512})\.', diagnostics):
                 print('Rejected request field identifiers:', names, flush=True)
             # Match only public, source-authored compatibility messages. Never print
@@ -133,7 +154,7 @@ if __name__ == '__main__':
                             print('Tool argument types:', {key: type(value).__name__ for key, value in block.get('input', {}).items()}, flush=True)
                         else:
                             content = str(block.get('content', '')).lower()
-                            print('Tool error categories:', [word for word in ['validation', 'invalid', 'null', 'pages', 'permission', 'denied', 'not found', 'does not exist', 'absolute'] if word in content], flush=True)
+                            print('Tool error categories:', [word for word in ['validation', 'invalid', 'null', 'pages', 'permission', 'denied', 'not found', 'does not exist', 'absolute', 'cancel', 'sibling', 'interrupt', 'not allowed', 'approval', 'exit code', 'rejected'] if word in content], flush=True)
             for line in log.read_text()[log_offset:].splitlines():
                 if line.startswith('TeamCode inference '): print(line, flush=True)
             raise AssertionError(f'{agent} coding task failed; raw output withheld to protect credentials.')
@@ -161,7 +182,15 @@ if __name__ == '__main__':
             assert time.monotonic() < deadline, 'Coding task usage did not settle'
             time.sleep(.05)
         dispatches = [line for line in metadata if ' dispatch ' in line]
-        assert len(dispatches) >= 2, 'A multi-turn tool task must dispatch multiple requests'
-        assert all(f'provider={provider} model={target}' in line for line in dispatches), 'The coding task escaped its forced route'
-        print(f'Real {agent} coding task passed via {provider}:{target}: source corrected, tools executed, four independent tests passed, {len(dispatches)} requests settled.', flush=True)
         for line in metadata: print(line, flush=True)
+        assert len(dispatches) >= 2, 'A multi-turn tool task must dispatch multiple requests'
+        if gate is None:
+            assert all(f'provider={provider} model={target}' in line for line in dispatches), 'The coding task escaped its forced route'
+        else:
+            assert gate.switched, 'The real agent did not replay a completed tool before switching'
+            routes = json.loads(request('/api/v1/routes', token=token)[1])
+            assert next(route for route in routes if route['id'] == rule['id']) == saved_route, 'Fallback must not rewrite the configured route'
+            print('Fallback boundary responses:', gate.records, flush=True)  # Metadata only; no headers, bodies or tool IDs.
+            verify_fallback(gate.records, metadata, native_provider, incoming, provider, target)
+            print(f'Real {agent} continued its tool conversation after {native_provider} capacity was removed; configured fallback served the remaining task.', flush=True)
+        print(f'Real {agent} coding task passed via {provider}:{target}: source corrected, tools executed, four independent tests passed, {len(dispatches)} requests settled.', flush=True)

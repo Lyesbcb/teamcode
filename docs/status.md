@@ -308,3 +308,22 @@ Evidence:
 - Packaged server, module/query conventions, Python syntax and diff whitespace checks passed. No schema, CLI binary implementation or dependency change is required.
 
 Both directions now have a complete real coding-task case with reasoning disabled and the destination forced from the first turn. This does not close full-default reasoning, arbitrary tool grammars, live mid-conversation fallback, real quota/reset-boundary acceptance or the other V1 gates. Cross-platform CI and Docker publication for this slice await its push.
+
+
+## Real coding tasks across a mid-conversation fallback (2026-10-19)
+
+The preceding custom-tool bridge commit `b5cf352` completed [CI 39231303645](https://github.com/nathanfallet/teamcode/actions/runs/39231303645) successfully: JVM, Helm, native macOS/Linux/Windows and multi-architecture Docker publication.
+
+The opt-in coding fixture now supports `--coding-fallback`. Both agents start on their native provider with the other provider configured second. A loopback HTTP fixture recognizes a matching call/result in the real agent's history and disables native-provider accounts through the disposable server's management API before forwarding the original request bytes. The route version and targets must remain unchanged. Provider responses are streamed unchanged; the fixture does not manufacture inference output. Its private configuration, account settings, listener and processes are cleaned up on exit.
+
+Evidence:
+
+- **Claude Code 2.1.302:** one native `claude-haiku-4-5-20251001` request, followed by **nine Codex `gpt-6-luna` requests** after the tool boundary. Actual Read/Edit/Bash execution corrected the source, left the test file unchanged and passed four independent tests. The final agent result succeeded.
+- **Codex 0.163.0:** one native `gpt-6-luna` request, followed by **eleven Claude `claude-haiku-4-5-20251001` requests**. Its namespaced/code-mode tool conversation continued through the switch, corrected the source and completed the turn. Four independent tests passed and the test file was unchanged.
+- All **22 client inference responses were HTTP 200** with the expected target, correlated by response request ID to dispatch and successful terminal usage. There were no unknown-usage settlements, translation failures or hidden nonzero unmatched attempts. The evidence verifier was rerun against both completed metadata logs after its final extraction.
+- **Four provider-free fixture tests pass:** matching tool-history detection; authenticated HTTP forwarding and exact body preservation; one-time capacity removal and restoration on failure; and rejection of incorrect targets, 429s, missing correlations, failed streams and charged unmatched attempts. These tests now run in JVM CI before Gradle. Real subscription tests remain opt-in and excluded from CI.
+- Each run imported six verified accounts in access-only mode, did not refresh provider credentials, preserved the source configuration hash and removed its own disposable resources. No provider tokens, prompts or raw agent output were logged. Only fixture/server metadata is reported.
+
+An early Claude run failed within an eight-turn budget after tool errors; a later task completed but failed the old count-only request assertion. The final fixture allows twelve Claude turns within the existing 180-second deadline and correlates individual response IDs instead of assuming every provider attempt equals one client request. Any unmatched attempt must have settled with zero charge; any client error still fails acceptance. The final successful runs required ten and twelve requests respectively. No production Kotlin code, schema, dependency or native launcher changed in this slice; its existing 114-test JVM baseline is additionally covered by the preceding green CI.
+
+This validates controlled mid-conversation fallback with reasoning disabled. It does not simulate actual quota exhaustion, reset timing, signed/encrypted reasoning transfer or every client default. Those gates, fairness/reconciliation, the remaining team features, distribution and operational acceptance stay in scope. CI publication for this fixture/documentation slice awaits its push.

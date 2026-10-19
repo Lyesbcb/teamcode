@@ -33,9 +33,12 @@ parser.add_argument('--translation-direction', choices=('both','messages','respo
 parser.add_argument('--launcher', action='store_true', help='Use teamcode run to manage the agent proxy')
 parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
 parser.add_argument('--coding-task', choices=('claude', 'codex', 'both'), help='Run real agents through forced cross-provider routes on an isolated coding task')
+parser.add_argument('--coding-fallback', action='store_true', help='With --coding-task, remove native capacity at a tool-result boundary to exercise configured fallback')
 parser.add_argument('--claude', type=Path, help='Actual Claude executable, avoiding terminal integration shims')
 parser.add_argument('--codex', type=Path, help='Actual Codex executable, avoiding terminal integration shims')
 args = parser.parse_args()
+if args.coding_fallback and not args.coding_task:
+    parser.error('--coding-fallback requires --coding-task')
 binary, jar = str(Path(args.binary).resolve()), str(Path(args.jar).resolve())
 name = 'teamcode-acceptance-' + secrets.token_hex(6)
 process = None
