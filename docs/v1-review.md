@@ -18,8 +18,8 @@ This is a review of the working foundation, not a declaration that V1 release ac
 
 - **Full agent portability:** a completed two-turn function call is not a coding-task acceptance result. Exercise real Claude Code and Codex tools and reasoning in both directions. Opaque signed/encrypted reasoning and custom provider tools remain explicit limitations. Native passthrough retains their original fields; crossing protocols does not currently preserve every such feature.
 - **Session behavior:** shared SQL affinity and model-specific failover are implemented and integration-tested; finish real-agent quota/reset-boundary acceptance without changing an active tool conversation incompatibly.
-- **Capacity control:** finish active-limit/model-alias quota handling and removed model caps, real Codex Windows hook acceptance, subagent fan-out, real-load forecast replay stability, fair interactive scheduling and reconciliation. Percentages from different plans are not interchangeable team credits.
+- **Capacity control:** finish remaining provider-specific quota shapes and Claude model-cap retirement, real Codex Windows hook acceptance, subagent fan-out, real-load forecast replay stability, fair interactive scheduling and reconciliation. Percentages from different plans are not interchangeable team credits.
 - **Team administration:** finish groups, devices and scoped service credentials with revocation/audit acceptance.
-- **Distribution and operations:** add the first open-source model adapter, versioned native distribution, update/rollback, pre-login service support, clean-machine reboot/logon and database restore/performance evidence.
+- **Distribution and operations:** add versioned native distribution, update/rollback, pre-login service support, clean-machine reboot/logon and database restore/performance evidence.
 
-Centralized MCP and skill administration remains V2. None of these remaining gates is removed merely because the foundation or a platform CI run is green.
+Open-source model providers and centralized MCP and skill administration remain V2. None of these remaining gates is removed merely because the foundation or a platform CI run is green.

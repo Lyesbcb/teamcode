@@ -13,7 +13,19 @@ data class AccountQuota(val accountId: String, val window: String, val utilizati
 /** Unknown reset times cannot keep an account blocked indefinitely after observations stop. */
 fun AccountQuota.isCurrent(now: Long): Boolean = observedAtMillis in 0..now &&
     (resetsAtMillis?.let { it > now } ?: (now - observedAtMillis <= MAX_QUOTA_OBSERVATION_AGE_MILLIS))
-fun AccountQuota.appliesTo(model: String): Boolean = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
+fun AccountQuota.appliesTo(model: String, meteredLimit: String? = null): Boolean {
+    if (!window.startsWith("model:")) return true
+    val family = window.removePrefix("model:").substringBefore(':').lowercase()
+    return if (meteredLimit != null) family == meteredLimit.lowercase() else model.lowercase().contains(family)
+}
+/** A response only reports changes; an authoritative usage probe can also retire model windows. */
+data class QuotaUpdate(
+    val windows: List<AccountQuota>,
+    val observedAtMillis: Long,
+    val replaceModelWindows: Boolean = false,
+    val modelLimit: ModelLimitObservation? = null,
+)
+data class ModelLimitObservation(val model: String, val limit: String)
 data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {
     suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget?
@@ -27,5 +39,8 @@ interface AdmissionStore {
     suspend fun configurePool(actor: Principal, budget: PoolBudget): PoolBudget
     suspend fun quotas(actor: Principal): List<AccountQuota>
     suspend fun observe(accountId: String, observations: List<AccountQuota>)
+    suspend fun observe(accountId: String, update: QuotaUpdate) = observe(accountId, update.windows)
+    /** Internal upstream rejection classification, using the same durable model scope as admission. */
+    suspend fun isQuotaExhausted(accountId: String, model: String): Boolean = false
     suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean = false)
 }

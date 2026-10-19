@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS quota_snapshots (account_id VARCHAR(36) PRIMARY KEY, model_windows_observed_at BIGINT NOT NULL, CONSTRAINT fk_quota_snapshots_account_id__id FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE ON UPDATE RESTRICT);

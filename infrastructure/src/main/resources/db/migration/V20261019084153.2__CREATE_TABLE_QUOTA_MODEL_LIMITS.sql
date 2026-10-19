@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS quota_model_limits (account_id VARCHAR(36), model_name VARCHAR(128), limit_slug VARCHAR(64) NOT NULL, observed_at BIGINT NOT NULL, CONSTRAINT pk_quota_model_limits PRIMARY KEY (account_id, model_name), CONSTRAINT fk_quota_model_limits_account_id__id FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE ON UPDATE RESTRICT);

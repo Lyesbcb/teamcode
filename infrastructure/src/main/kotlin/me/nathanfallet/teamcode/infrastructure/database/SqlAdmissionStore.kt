@@ -1,128 +1,156 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
-import java.sql.Connection
-import java.sql.ResultSet
 import java.util.UUID
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.routing.*
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 
 /** Admission is serialized per team; both member and physical account slots are reserved atomically. */
 class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     private val affinities = SqlSessionAffinity()
-    override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = database.transaction { c ->
-        actor.requireReady(); requireCurrent(c, actor)
-        affinities.target(c, actor, affinity, c.nowMillis())
+    override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = database.query {
+        actor.requireReady(); requireCurrent(this, actor)
+        affinities.target(this, actor, affinity, nowMillis())
     }
-    override suspend fun statistics(): AdmissionStatistics = database.transaction { c ->
-        val active = c.rows("SELECT COUNT(*) FROM reservations WHERE team_id = 'default' AND state = 'ACTIVE' AND expires_at > ?", c.nowMillis()) { it.getInt(1) }.single()
-        val completed = c.rows("SELECT completed FROM gateway_totals WHERE team_id = 'default'") { it.getLong(1) }.single()
+    override suspend fun statistics(): AdmissionStatistics = database.query {
+        val now = nowMillis()
+        val active = Reservations.selectAll().where { (Reservations.teamId eq "default") and (Reservations.state eq "ACTIVE") and (Reservations.expiresAt greater now) }.count().toInt()
+        val completed = GatewayTotals.select(GatewayTotals.completed).where { GatewayTotals.teamId eq "default" }.single()[GatewayTotals.completed]
         AdmissionStatistics(active, completed)
     }
-    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation = database.transaction { c ->
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation = database.query {
         actor.requireReady()
         require(units in 1..100_000_000 && excludedAccountIds.size <= 64)
-        c.lockTeam(actor.teamId)
-        val now = c.nowMillis()
-        requireCurrent(c, actor)
-        val policy = readMemberPolicy(c, actor.member.id)
-        val current = readMemberCapacity(c, policy, now, actor.teamId)
+        lockTeam(actor.teamId)
+        val now = nowMillis()
+        requireCurrent(this, actor)
+        val policy = readMemberPolicy(this, actor.member.id)
+        val current = readMemberCapacity(this, policy, now, actor.teamId)
         val scope = affinity?.sessionKey.orEmpty()
-        val directiveTable = if (scope.isEmpty()) "directives" else "session_directives"
-        val directive = c.rows("SELECT scope_key, max_concurrent, min_interval FROM $directiveTable WHERE member_id = ? AND scope_key = ? AND expires_at > ?", actor.member.id, scope, now) { Triple(it.getString(1), it.getInt(2), it.getLong(3)) }.singleOrNull()
+        val table = if (scope.isEmpty()) Directives else SessionDirectives
+        val directive = table.selectAll().where { (table.memberId eq actor.member.id) and (table.scopeKey eq scope) and (table.expiresAt greater now) }.singleOrNull()
         if (current.activeRequests >= policy.maxConcurrent) throw TeamFailure("member_concurrency", 429, "Your concurrent request limit has been reached.")
-        if (directive != null && directive.third > 0) {
-            val sessionScope = directive.first.takeIf { it.isNotEmpty() }
-            val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ? AND units > 0 AND (? IS NULL OR session_key = ?)", actor.member.id, now / DAY, sessionScope, sessionScope) { it.getLong(1) }.single()
-            if (now - last < directive.third) throw TeamFailure("pacing_delay", 429, "Quota burn is high. Wait briefly before the next request.")
-            val active = if (sessionScope == null) current.activeRequests else c.rows("SELECT COUNT(*) FROM reservations WHERE member_id = ? AND session_key = ? AND state = 'ACTIVE' AND expires_at > ?", actor.member.id, sessionScope, now) { it.getInt(1) }.single()
-            if (active >= directive.second) throw TeamFailure("pacing_concurrency", 429, "This session's paced concurrent request limit has been reached.")
+        if (directive != null && directive[table.minInterval] > 0) {
+            val session = directive[table.scopeKey].takeIf { it.isNotEmpty() }
+            val sessionFilter = session?.let { Reservations.sessionKey eq it } ?: Op.TRUE
+            val latest = Reservations.createdAt.max()
+            val last = Reservations.select(latest).where {
+                (Reservations.memberId eq actor.member.id) and (Reservations.dayNumber eq now / DAY) and (Reservations.units greater 0) and sessionFilter
+            }.single()[latest] ?: 0L
+            if (now - last < directive[table.minInterval]) throw TeamFailure("pacing_delay", 429, "Quota burn is high. Wait briefly before the next request.")
+            val active = if (session == null) current.activeRequests else Reservations.selectAll().where {
+                (Reservations.memberId eq actor.member.id) and sessionFilter and (Reservations.state eq "ACTIVE") and (Reservations.expiresAt greater now)
+            }.count().toInt()
+            if (active >= directive[table.maxConcurrent]) throw TeamFailure("pacing_concurrency", 429, "This session's paced concurrent request limit has been reached.")
         }
         if (units > current.dailyAllowanceUnits - current.chargedAndReservedUnits) throw TeamFailure("member_allowance", 429, "Your daily allowance has insufficient remaining units for this request.")
-        val poolSpent = c.rows("SELECT COALESCE(SUM(units), 0) FROM reservations WHERE team_id = ? AND pool_id = ? AND day_number = ?", actor.teamId, policy.poolId.orEmpty(), now / DAY) { it.getLong(1) }.single()
-        if (units > current.poolDailyUnits - poolSpent) throw TeamFailure("pool_allowance", 429, "This pool's daily team budget has been reserved or consumed.")
-        val candidates = c.rows("SELECT * FROM accounts WHERE team_id = ? AND disabled = FALSE AND state IN ('READY', 'ACCESS_ONLY') AND cooldown_until <= ? AND pool_id <=> ? AND provider = ?", actor.teamId, now, policy.poolId, provider, map = ::accountRecord)
-        val usage = c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ? AND q.observed_at <= ? AND (q.resets_at > ? OR (q.resets_at IS NULL AND q.observed_at >= ?))", actor.teamId, now, now, now - MAX_QUOTA_OBSERVATION_AGE_MILLIS, map = ::quota)
-        val active = c.rows("SELECT account_id, COUNT(*) AS n FROM reservations WHERE team_id = ? AND state = 'ACTIVE' AND expires_at > ? GROUP BY account_id", actor.teamId, now) { it.getString(1) to it.getInt(2) }.toMap()
+        val spent = poolSpent(actor.teamId, policy.poolId.orEmpty(), now / DAY)
+        if (units > current.poolDailyUnits - spent) throw TeamFailure("pool_allowance", 429, "This pool's daily team budget has been reserved or consumed.")
+        val candidates = Accounts.selectAll().where {
+            (Accounts.teamId eq actor.teamId) and (Accounts.disabled eq false) and (Accounts.state inList listOf("READY", "ACCESS_ONLY")) and
+                (Accounts.cooldownUntil lessEq now) and (Accounts.poolId eq policy.poolId) and (Accounts.provider eq provider)
+        }.map(::accountRecord)
+        val usage = (QuotaWindows innerJoin Accounts).select(QuotaWindows.columns).where {
+            (Accounts.teamId eq actor.teamId) and (QuotaWindows.observedAt lessEq now) and
+                ((QuotaWindows.resetsAt greater now) or (QuotaWindows.resetsAt.isNull() and (QuotaWindows.observedAt greaterEq now - MAX_QUOTA_OBSERVATION_AGE_MILLIS)))
+        }.map(::quotaRecord)
+        val modelLimits = readQuotaModelLimits(actor.teamId)
+        val count = Reservations.id.count()
+        val active = Reservations.select(Reservations.accountId, count).where {
+            (Reservations.teamId eq actor.teamId) and (Reservations.state eq "ACTIVE") and (Reservations.expiresAt greater now)
+        }.groupBy(Reservations.accountId).associate { it[Reservations.accountId] to it[count].toInt() }
         val eligible = candidates.filter { account ->
-            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model) && it.utilization >= .95 }
+            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model, modelLimits[account.id]?.get(model.lowercase())) && it.utilization >= .95 }
         }
-        val pins = affinity?.let { affinities.accounts(c, actor, it, provider, model, now) }.orEmpty()
-        val loads = if (affinity != null) affinities.loads(c, actor.teamId, now) else emptyMap()
+        val pins = affinity?.let { affinities.accounts(this, actor, it, provider, model, now) }.orEmpty()
+        val loads = if (affinity != null) affinities.loads(this, actor.teamId, now) else emptyMap()
         val chosen = SelectAccountUseCase().select(eligible.map { account ->
             AccountPlacement(account, active[account.id] ?: 0, loads[account.id] ?: 0,
-                usage.filter { it.accountId == account.id && it.appliesTo(model) }.maxOfOrNull { it.utilization } ?: 0.0)
+                usage.filter { it.accountId == account.id && it.appliesTo(model, modelLimits[account.id]?.get(model.lowercase())) }.maxOfOrNull { it.utilization } ?: 0.0)
         }, pins) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
-        affinity?.let { affinities.record(c, actor, it, RouteTarget(provider, model), chosen.id, now) }
+        affinity?.let { affinities.record(this, actor, it, RouteTarget(provider, model), chosen.id, now) }
         val id = UUID.randomUUID().toString()
-        c.execute("INSERT INTO reservations (id, team_id, member_id, account_id, day_number, units, state, expires_at, created_at, pool_id, session_key) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)", id, actor.teamId, actor.member.id, chosen.id, now / DAY, units, now + 15 * 60_000, now, policy.poolId.orEmpty(), affinity?.sessionKey)
+        Reservations.insert {
+            it[Reservations.id] = id; it[teamId] = actor.teamId; it[memberId] = actor.member.id; it[accountId] = chosen.id
+            it[dayNumber] = now / DAY; it[Reservations.units] = units; it[state] = "ACTIVE"; it[expiresAt] = now + 15 * 60_000
+            it[createdAt] = now; it[poolId] = policy.poolId.orEmpty(); it[sessionKey] = affinity?.sessionKey
+        }
         Reservation(id, chosen, units)
     }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {
         require(actualUnits == null || actualUnits in 0..100_000_000)
-        database.transaction { c ->
-            c.lockTeam(reservation.account.identity.teamId)
-            // Exactly-once settlement. An orphan keeps its reserved units until reconciled.
-            val changed = c.execute("UPDATE reservations SET state = ?, units = ? WHERE id = ? AND state = 'ACTIVE'", if (actualUnits == null) "UNCERTAIN" else "SETTLED", actualUnits ?: reservation.units, reservation.id)
-            if (changed == 1 && completed) c.execute("UPDATE gateway_totals SET completed = completed + 1 WHERE team_id = ?", reservation.account.identity.teamId)
+        database.query {
+            lockTeam(reservation.account.identity.teamId)
+            val changed = Reservations.update({ (Reservations.id eq reservation.id) and (Reservations.state eq "ACTIVE") }) {
+                it[state] = if (actualUnits == null) "UNCERTAIN" else "SETTLED"; it[units] = actualUnits ?: reservation.units
+            }
+            if (changed == 1 && completed) GatewayTotals.update({ GatewayTotals.teamId eq reservation.account.identity.teamId }) { it[GatewayTotals.completed] = GatewayTotals.completed + 1 }
         }
     }
-    override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = database.transaction { c ->
-        actor.requireReady()
-        requireCurrent(c, actor)
+    override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = database.query {
+        actor.requireReady(); requireCurrent(this, actor)
         if (memberId != actor.member.id) actor.requireAdmin()
-        ensureMember(c, actor.teamId, memberId)
-        readMemberCapacity(c, readMemberPolicy(c, memberId), c.nowMillis(), actor.teamId)
+        ensureMember(actor.teamId, memberId)
+        readMemberCapacity(this, readMemberPolicy(this, memberId), nowMillis(), actor.teamId)
     }
-    override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = database.transaction { c ->
+    override suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy = database.query {
         actor.requireAdmin()
         if (policy.dailyUnits !in 0..100_000_000_000 || policy.weight !in 0..1000 || policy.maxConcurrent !in 1..32 || policy.poolId?.let { !Regex("[a-zA-Z0-9_-]{1,36}").matches(it) } == true) throw TeamFailure("invalid_policy", 400, "Invalid daily allowance, concurrency limit or pool identifier.")
-        c.lockTeam(actor.teamId); requireCurrent(c, actor); ensureMember(c, actor.teamId, policy.memberId)
-        c.execute("INSERT INTO member_policies (member_id, daily_units, max_concurrent, pool_id, weight) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE daily_units = ?, max_concurrent = ?, pool_id = ?, weight = ?", policy.memberId, policy.dailyUnits, policy.maxConcurrent, policy.poolId, policy.weight, policy.dailyUnits, policy.maxConcurrent, policy.poolId, policy.weight)
-        c.audit(actor.teamId, actor.member.id, "policy.updated", policy.memberId)
+        lockTeam(actor.teamId); requireCurrent(this, actor); ensureMember(actor.teamId, policy.memberId)
+        MemberPolicies.upsert {
+            it[memberId] = policy.memberId; it[dailyUnits] = policy.dailyUnits; it[maxConcurrent] = policy.maxConcurrent; it[poolId] = policy.poolId; it[weight] = policy.weight
+        }
+        audit(actor.teamId, actor.member.id, "policy.updated", policy.memberId)
         policy
     }
-    override suspend fun poolBudgets(actor: Principal): List<PoolBudget> = database.transaction { c ->
-        actor.requireAdmin(); requireCurrent(c, actor)
-        c.rows("SELECT pool_id, daily_units FROM pool_budgets WHERE team_id = ? ORDER BY pool_id", actor.teamId) { PoolBudget(it.getString(1), it.getLong(2)) }
+    override suspend fun poolBudgets(actor: Principal): List<PoolBudget> = database.query {
+        actor.requireAdmin(); requireCurrent(this, actor)
+        PoolBudgets.selectAll().where { PoolBudgets.teamId eq actor.teamId }.orderBy(PoolBudgets.poolId).map { PoolBudget(it[PoolBudgets.poolId], it[PoolBudgets.dailyUnits]) }
     }
-    override suspend fun configurePool(actor: Principal, budget: PoolBudget): PoolBudget = database.transaction { c ->
+    override suspend fun configurePool(actor: Principal, budget: PoolBudget): PoolBudget = database.query {
         actor.requireAdmin()
         if (budget.dailyUnits !in 1..100_000_000_000 || !Regex("[a-zA-Z0-9_-]{0,36}").matches(budget.poolId)) throw TeamFailure("invalid_pool_budget", 400, "Invalid pool budget or identifier.")
-        c.lockTeam(actor.teamId); requireCurrent(c, actor)
-        c.execute("INSERT INTO pool_budgets (team_id, pool_id, daily_units) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE daily_units = ?", actor.teamId, budget.poolId, budget.dailyUnits, budget.dailyUnits)
-        c.audit(actor.teamId, actor.member.id, "pool_budget.updated", actor.teamId)
+        lockTeam(actor.teamId); requireCurrent(this, actor)
+        PoolBudgets.upsert { it[teamId] = actor.teamId; it[poolId] = budget.poolId; it[dailyUnits] = budget.dailyUnits }
+        audit(actor.teamId, actor.member.id, "pool_budget.updated", actor.teamId)
         budget
     }
-    override suspend fun quotas(actor: Principal): List<AccountQuota> = database.transaction { c ->
-        actor.requireAdmin(); requireCurrent(c, actor)
-        c.rows("SELECT q.* FROM quota_windows q JOIN accounts a ON a.id = q.account_id WHERE a.team_id = ?", actor.teamId, map = ::quota)
+    override suspend fun quotas(actor: Principal): List<AccountQuota> = database.query {
+        actor.requireAdmin(); requireCurrent(this, actor)
+        (QuotaWindows innerJoin Accounts).select(QuotaWindows.columns).where { Accounts.teamId eq actor.teamId }.map(::quotaRecord)
     }
-    override suspend fun observe(accountId: String, observations: List<AccountQuota>) {
-        database.transaction { c ->
-            val now = c.nowMillis()
-            observations.filter { it.accountId == accountId && it.window.length <= 80 && it.utilization.isFinite() && it.utilization in 0.0..1.0 && it.observedAtMillis in 0..now && (it.resetsAtMillis?.let { reset -> reset > it.observedAtMillis } != false) }.forEach { q ->
-                c.execute("INSERT INTO quota_windows (account_id, window_name, utilization, observed_at, resets_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE utilization = IF(observed_at <= ?, ?, utilization), resets_at = IF(observed_at <= ?, ?, resets_at), observed_at = GREATEST(observed_at, ?)", q.accountId, q.window, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis)
-                // One sample per minute/window bounds history growth independently of inference throughput.
-                c.execute("INSERT INTO quota_history (account_id, window_name, utilization, observed_at, resets_at, sample_minute) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE utilization = IF(observed_at <= ?, ?, utilization), resets_at = IF(observed_at <= ?, ?, resets_at), observed_at = GREATEST(observed_at, ?)", q.accountId, q.window, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis / 60_000, q.observedAtMillis, q.utilization, q.observedAtMillis, q.resetsAtMillis, q.observedAtMillis)
+    override suspend fun observe(accountId: String, observations: List<AccountQuota>) = observe(accountId, QuotaUpdate(observations, System.currentTimeMillis()))
+    override suspend fun observe(accountId: String, update: QuotaUpdate) = SqlQuotaObservations(database).observe(accountId, update)
+    override suspend fun isQuotaExhausted(accountId: String, model: String): Boolean = database.query {
+        val team = Accounts.select(Accounts.teamId).where { Accounts.id eq accountId }.singleOrNull()?.get(Accounts.teamId) ?: return@query false
+        lockTeam(team)
+        val now = nowMillis()
+        val limit = readQuotaModelLimits(team)[accountId]?.get(model.lowercase())
+        QuotaWindows.selectAll().where { QuotaWindows.accountId eq accountId }.map(::quotaRecord)
+            .any { it.isCurrent(now) && it.appliesTo(model, limit) && it.utilization >= .95 }
+    }
+    override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) {
+        database.query {
+            Accounts.update({ Accounts.id eq accountId }) {
+                it[cooldownUntil] = Case().When(Accounts.cooldownUntil less untilMillis, longLiteral(untilMillis)).Else(Accounts.cooldownUntil)
+                if (reconnect) it[state] = "RECONNECT_REQUIRED"
             }
         }
     }
-    override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) {
-        database.transaction { c ->
-            c.execute("UPDATE accounts SET cooldown_until = GREATEST(cooldown_until, ?), state = CASE WHEN ? THEN 'RECONNECT_REQUIRED' ELSE state END WHERE id = ?", untilMillis, reconnect, accountId)
-        }
-    }
     suspend fun maintain() {
-        database.transaction { c ->
-            c.execute("DELETE FROM conversation_affinities WHERE expires_at <= ? LIMIT 1000", c.nowMillis())
-            c.execute("DELETE FROM quota_history WHERE observed_at < ? LIMIT 1000", c.nowMillis() - 7 * DAY)
-            c.execute("DELETE FROM reservations WHERE day_number < ? LIMIT 1000", c.nowMillis() / DAY - 90)
+        database.query {
+            val now = nowMillis()
+            ConversationAffinities.deleteWhere(limit = 1000) { expiresAt lessEq now }
+            QuotaHistory.deleteWhere(limit = 1000) { observedAt less now - 7 * DAY }
+            Reservations.deleteWhere(limit = 1000) { dayNumber less now / DAY - 90 }
         }
     }
-    private fun ensureMember(c: Connection, team: String, member: String) {
-        if (c.rows("SELECT id FROM members WHERE team_id = ? AND id = ?", team, member) { it.getString(1) }.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")
+    private fun ensureMember(team: String, member: String) {
+        if (Members.select(Members.id).where { (Members.teamId eq team) and (Members.id eq member) }.empty()) throw TeamFailure("not_found", 404, "Member not found.")
     }
-    private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.nullableLong("resets_at"))
     companion object { private const val DAY = 86_400_000L }
 }
+internal fun quotaRecord(row: ResultRow) = AccountQuota(row[QuotaWindows.accountId], row[QuotaWindows.windowName], row[QuotaWindows.utilization], row[QuotaWindows.observedAt], row[QuotaWindows.resetsAt])

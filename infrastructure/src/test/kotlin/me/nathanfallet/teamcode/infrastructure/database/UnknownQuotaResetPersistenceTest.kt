@@ -1,5 +1,8 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import kotlinx.coroutines.runBlocking
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.capacity.*
@@ -31,14 +34,14 @@ class UnknownQuotaResetPersistenceTest {
                 store.handover("default", account.id)
                 val first = SqlAdmissionStore(a)
                 val second = SqlAdmissionStore(b)
-                val baseline = first.reserve(admin, 1, "claude-opus")
-                second.settle(baseline, 0)
-                val now = a.transaction { it.nowMillis() }
+                val now = a.query { nowMillis() }
                 val known = AccountQuota(account.id, "five_hour", .99, now - 5_000, now + 3_600_000)
-                first.observe(account.id, listOf(known))
-                assertEquals(known, second.quotas(admin).single())
-                assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
+                // Seed the old schema directly; current stores require the latest migrations.
+                a.query {
+                    val c = this; LegacyQuotaWindowsV9.insert { it[accountId] = known.accountId; it[windowName] = known.window; it[utilization] = known.utilization; it[observedAt] = known.observedAtMillis; it[resetsAt] = known.resetsAtMillis!! } }
+                assertEquals(known.utilization, a.query { LegacyQuotaWindowsV9.selectAll().single()[LegacyQuotaWindowsV9.utilization] })
                 a.migrate()
+                assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
                 assertEquals(known, second.quotas(admin).single(), "Nullable migration changed a known observation")
 
                 val zero = known.copy(utilization = 0.0, observedAtMillis = now, resetsAtMillis = null)
@@ -47,7 +50,8 @@ class UnknownQuotaResetPersistenceTest {
                 assertEquals(zero, first.quotas(admin).single(), "Delayed known-reset sample replaced a newer unknown-reset observation")
                 val admitted = first.reserve(admin, 1, "claude-opus")
                 second.settle(admitted, 0)
-                assertTrue(a.transaction { c -> c.rows("SELECT resets_at FROM quota_history WHERE account_id = ? ORDER BY observed_at DESC LIMIT 1", account.id) { it.nullableLong("resets_at") }.single() == null })
+                assertTrue(a.query {
+                    val c = this; QuotaHistory.select(QuotaHistory.resetsAt).where { QuotaHistory.accountId eq account.id }.orderBy(QuotaHistory.observedAt to SortOrder.DESC).limit(1).single()[QuotaHistory.resetsAt] == null })
 
                 val scoped = AccountQuota(account.id, "model:opus", 1.0, now, null)
                 first.observe(account.id, listOf(scoped))
@@ -56,13 +60,15 @@ class UnknownQuotaResetPersistenceTest {
                 first.settle(sonnet, 0)
 
                 // Simulate observation age in this isolated database; never sleep through a real window.
-                a.transaction { c -> c.execute("UPDATE quota_windows SET observed_at = ? WHERE account_id = ? AND window_name = 'model:opus'", now - MAX_QUOTA_OBSERVATION_AGE_MILLIS - 1, account.id) }
+                a.query {
+                    val c = this; QuotaWindows.update({ (QuotaWindows.accountId eq account.id) and (QuotaWindows.windowName eq "model:opus") }) { it[observedAt] = now - MAX_QUOTA_OBSERVATION_AGE_MILLIS - 1 } }
                 val staleProbe = second.reserve(admin, 1, "claude-opus")
                 first.settle(staleProbe, 0)
                 assertNull(first.quotas(admin).single { it.window == "model:opus" }.resetsAtMillis)
 
                 // Known future reset protection is retained even when its observation is old.
-                a.transaction { c -> c.execute("UPDATE quota_windows SET resets_at = ? WHERE account_id = ? AND window_name = 'model:opus'", now + 3_600_000, account.id) }
+                a.query {
+                    val c = this; QuotaWindows.update({ (QuotaWindows.accountId eq account.id) and (QuotaWindows.windowName eq "model:opus") }) { it[resetsAt] = now + 3_600_000 } }
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
                 val before = second.quotas(admin)
                 first.observe(account.id, listOf(scoped.copy(utilization = 0.0, observedAtMillis = now + 3_600_000)))
@@ -70,4 +76,14 @@ class UnknownQuotaResetPersistenceTest {
             } }
         }
     }
+}
+
+/** The published pre-nullable schema, only used to seed an upgrade acceptance database. */
+private object LegacyQuotaWindowsV9 : Table("quota_windows") {
+    val accountId = varchar("account_id", 36)
+    val windowName = varchar("window_name", 80)
+    val utilization = double("utilization")
+    val observedAt = long("observed_at")
+    val resetsAt = long("resets_at")
+    override val primaryKey = PrimaryKey(accountId, windowName)
 }

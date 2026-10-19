@@ -164,17 +164,35 @@ class PoolGatewayTest {
             val model = Json.parseToJsonElement((req.body as TextContent).text).jsonObject["model"]!!.jsonPrimitive.content
             seen += model
             if (model == "gpt-6-astra") respond("limited", HttpStatusCode.TooManyRequests, headersOf(
-                "x-codex-gpt-6-astra-limit-name" to listOf("gpt-6-astra"),
-                "x-codex-gpt-6-astra-secondary-used-percent" to listOf("100"),
-                "x-codex-gpt-6-astra-secondary-window-minutes" to listOf("10080"),
-                "x-codex-gpt-6-astra-secondary-reset-at" to listOf((System.currentTimeMillis() / 1000 + 86400).toString()),
+                "x-codex-base_model_inference-limit-name" to listOf("A display label"),
+                "x-codex-active-limit" to listOf("base_model_inference"),
+                "x-codex-base_model_inference-secondary-used-percent" to listOf("100"),
+                "x-codex-base_model_inference-secondary-window-minutes" to listOf("10080"),
+                "x-codex-base_model_inference-secondary-reset-at" to listOf((System.currentTimeMillis() / 1000 + 86400).toString()),
             )) else respond("data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
         }) { install(HttpTimeout) }.use { http ->
             val gateway = PoolGateway(store, credentials, listOf(CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("codex", "gpt-6-astra"), RouteTarget("codex", "gpt-6-sol")))
             gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect {} }
             assertEquals(listOf("gpt-6-astra", "gpt-6-sol"), seen)
             assertFalse(store.cooled, "A model-scoped rejection must not cool the entire account")
+            assertEquals("codex-0", store.observations.first().first)
+            assertEquals(ModelLimitObservation("gpt-6-astra", "base_model_inference"), store.observations.first().second.modelLimit,
+                "The mapping must use the resolved target model, not the incoming Claude model")
             assertEquals<List<Long?>>(listOf(0L, 6L), store.charges)
+        }
+    }
+    @Test fun persistedExhaustionPreventsAccountCooldownWhenRejectionHeadersOmitUsage() = runBlocking {
+        val store = FakeAdmission(account, knownExhaustedModels = setOf("gpt-6-astra"))
+        var calls = 0
+        HttpClient(MockEngine {
+            calls++
+            if (calls == 1) respond("limited", HttpStatusCode.TooManyRequests)
+            else respond("data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("codex", "gpt-6-astra"), RouteTarget("codex", "gpt-6-sol")))
+            gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect {} }
+            assertEquals(2, calls)
+            assertFalse(store.cooled)
         }
     }
     @Test fun forbiddenResponseUsesTemporaryCooldownWithoutRevokingCredentials() = runBlocking {
@@ -305,11 +323,12 @@ class PoolGatewayTest {
         assertNull(missing.settledUnits)
     }
 }
-private class FakeAdmission(private val account: AccountRecord, private val accountsPerProvider: Int = 1) : AdmissionStore {
+private class FakeAdmission(private val account: AccountRecord, private val accountsPerProvider: Int = 1, private val knownExhaustedModels: Set<String> = emptySet()) : AdmissionStore {
     val affinities = mutableMapOf<RequestAffinity, RouteTarget>()
     override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = affinities[affinity]
     override suspend fun statistics() = AdmissionStatistics(0, 0)
     val charges = mutableListOf<Long?>()
+    val observations = mutableListOf<Pair<String, QuotaUpdate>>()
     var settled: Long? = null
     var didSettle = false
     var cooled = false
@@ -329,6 +348,8 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     override suspend fun configurePool(actor: Principal, budget: PoolBudget) = budget
     override suspend fun quotas(actor: Principal) = emptyList<AccountQuota>()
     override suspend fun observe(accountId: String, observations: List<AccountQuota>) = Unit
+    override suspend fun observe(accountId: String, update: QuotaUpdate) { observations += accountId to update }
+    override suspend fun isQuotaExhausted(accountId: String, model: String) = model in knownExhaustedModels
     override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) { cooled = true; this.reconnect = reconnect }
 }
 

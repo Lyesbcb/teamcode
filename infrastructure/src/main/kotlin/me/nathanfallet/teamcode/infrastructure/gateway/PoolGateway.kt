@@ -120,8 +120,9 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                     knownCharge = null
                     transport.send(reservation.account, token, body, request.headers) { response ->
                         val now = System.currentTimeMillis()
-                        val observations = transport.quotas(reservation.account.id, response.headers, now)
-                        admission.observe(reservation.account.id, observations)
+                        val observation = transport.quotaUpdate(reservation.account.id, model, response.headers, now)
+                        val observations = observation.windows
+                        admission.observe(reservation.account.id, observation)
                         val status = response.status.value
                         val encoding = response.headers["content-encoding"]?.takeIf { it in setOf("gzip", "br", "deflate", "zstd", "identity") } ?: "none"
                         System.out.println("TeamCode inference upstream request=${reservation.id} status=$status encoding=$encoding")
@@ -132,10 +133,11 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                                 return@send
                             }
                             val retry = response.headers["retry-after"]?.toLongOrNull()?.coerceIn(1, 3600) ?: 60
-                            val spent = observations.filter { it.utilization >= 1.0 && it.appliesTo(model) }
+                            val spent = observations.filter { it.utilization >= 1.0 && it.appliesTo(model, observation.modelLimit?.limit) }
                             // A durable model limit is already enforced in SQL. Do not park the
                             // entire subscription: another configured model may still be available.
-                            if ((status == 429 && spent.isEmpty()) || status >= 500 || status == 401 || status == 403) admission.coolDown(reservation.account.id, now + retry * 1000, reconnect = status == 401)
+                            val exhausted = status == 429 && (spent.isNotEmpty() || admission.isQuotaExhausted(reservation.account.id, model))
+                            if ((status == 429 && !exhausted) || status >= 500 || status == 401 || status == 403) admission.coolDown(reservation.account.id, now + retry * 1000, reconnect = status == 401)
                             if (status in setOf(401, 403, 429)) throw SafeRetry(TeamFailure("pool_unavailable", 429, "Configured subscriptions are unavailable or rate-limited. Retry shortly."))
                             val publicStatus = if (status in setOf(400, 413, 429)) status else 502
                             val publicError = if (status == 429) "The selected subscription is rate-limited. Retry after the indicated delay." else "The provider rejected this request. Check the model and account status."

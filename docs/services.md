@@ -48,3 +48,17 @@ Platform references: [Apple LaunchAgents](https://developer.apple.com/library/ar
 Windows references: [Task Scheduler logon triggers](https://learn.microsoft.com/en-us/windows/win32/taskschd/logon-trigger-example--xml-), [CreateProcess Unicode environments](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw), [system-preferred random generator](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom).
 
 The built-in Windows PowerShell service query uses system module paths explicitly, avoiding incompatible PowerShell 7 modules inherited through the caller. See Microsoft's [PSModulePath behavior for intermediate processes](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath).
+
+## Planned versioned updates (not implemented)
+
+Native release artifacts will be published through GitHub Releases after the required platform checks. A signed manifest will bind each platform artifact to its version and digest; the updater must verify it before executing downloaded code. The release signing key must be separate from the self-hosted server and verified against a trust root shipped with the CLI. Release signing, key rotation and verification require acceptance tests.
+
+Planned commands are `teamcode update --check`, `teamcode update`, `teamcode update --version VERSION` and `teamcode update --rollback`. These commands are design targets, not available commands. Automatic checks may notify users; unattended installation is opt-in and waits until the local proxy is idle. A failed check never prevents normal agent launch.
+
+A stable launcher will select an installed version from private, versioned application-data directories, separate from configuration and credentials. On Windows this avoids replacing a running executable. Installation must validate the complete new version before atomically switching the selected version, keep the previous working version and serialize competing updater processes. The URL, session token and provider enrollment configuration remain unchanged.
+
+For a managed local proxy, update stages the binary first, drains accepted streams using the existing cooperative lifecycle, waits for the old process to exit, switches versions and starts the replacement. It must not kill unrelated processes, terminate a running agent, force an update through a busy proxy or delete files still used by a process. Failed startup restores the previous selection and service registration. Acceptance must cover interrupted downloads, invalid signatures, offline operation, Unicode paths, file locks, drain timeouts and recovery on all supported OSes.
+
+The server will expose version/capability information so the CLI can explain incompatible features and avoid installing a version that cannot talk to its configured server. Existing `/api/v1` compatibility remains a release requirement; capability negotiation is still pending implementation.
+
+Server upgrades use Helm rolling deployments with readiness and stream draining. CI publication alone does not restart Kubernetes pods. The chart keeps `latest` as its default, with immutable image tags available for explicit upgrades and rollback. Prefer additive database migrations that remain compatible with the preceding server release; document any exception before release. Application rollback must never automatically undo a database migration destructively. Restore testing and mixed-version rollout acceptance are still required.

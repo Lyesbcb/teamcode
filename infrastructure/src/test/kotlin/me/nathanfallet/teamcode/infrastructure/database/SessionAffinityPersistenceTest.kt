@@ -1,5 +1,8 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.domain.gateway.WireProtocol
 import me.nathanfallet.teamcode.domain.accounts.*
@@ -47,7 +50,7 @@ class SessionAffinityPersistenceTest {
                 assertEquals(other.id, place(admissionB, hint('d')).account.id)
                 assertEquals(first.id, place(SqlAdmissionStore(b), parent).account.id)
 
-                val now = a.transaction { it.nowMillis() }
+                val now = a.query { nowMillis() }
                 admissionA.observe(first.id, listOf(AccountQuota(first.id, "model:sonnet", 1.0, now, now + 3_600_000)))
                 assertEquals(other.id, place(admissionB, hint(model = "claude-sonnet-test")).account.id)
                 assertEquals(first.id, place(admissionA, parent).account.id, "A Sonnet diversion must not move the Opus pin")
@@ -57,7 +60,7 @@ class SessionAffinityPersistenceTest {
                 assertEquals(other.id, excluded.account.id); admissionB.settle(excluded, 0)
                 admissionA.coolDown(other.id, now + 60_000)
                 assertEquals(first.id, place(admissionA, parent).account.id)
-                a.transaction { it.execute("UPDATE accounts SET cooldown_until = 0 WHERE id = ?", other.id) }
+                a.query { Accounts.update({ Accounts.id eq other.id }) { it[cooldownUntil] = 0 } }
 
                 store.configure("default", other.id, other.displayName, false, 5)
                 assertEquals(other.id, place(admissionB, parent).account.id, "An administrator's higher priority preempts affinity")
@@ -89,33 +92,30 @@ class SessionAffinityPersistenceTest {
                 assertEquals(privateAccount.id, place(admissionB, parent).account.id, "Moving a member into a protected pool invalidates old account eligibility")
                 admissionA.configure(actor, MemberPolicy(actor.member.id, 0, 4))
 
-                a.transaction { it.execute("UPDATE conversation_affinities SET expires_at = 0, last_seen_at = 0 WHERE team_id = 'default'") }
+                a.query { ConversationAffinities.update({ ConversationAffinities.teamId eq "default" }) { it[expiresAt] = 0; it[lastSeenAt] = 0 } }
                 assertNull(admissionA.preferredTarget(actor, parent))
                 admissionB.maintain()
-                assertEquals(0, a.transaction { it.rows("SELECT COUNT(*) FROM conversation_affinities") { row -> row.getInt(1) }.single() })
+                assertEquals(0, a.query { ConversationAffinities.selectAll().count().toInt() })
                 place(admissionA, parent)
                 // A client minting fresh identifiers cannot grow persistent hints without bound.
                 // Fill this member's real default limit, then verify admission continues unpinned.
-                a.transaction { c ->
+                a.query {
+                    val c = this
                     val current = c.nowMillis()
-                    c.prepareStatement("INSERT INTO conversation_affinities (team_id, member_id, session_key, conversation_key, requested_model, route_key, provider, resolved_model, account_id, last_seen_at, expires_at) VALUES ('default', ?, ?, ?, ?, ?, 'anthropic', ?, ?, ?, ?)").use { statement ->
-                        for (index in 1 until SqlSessionAffinity.MAX_MEMBER_HINTS) {
-                            statement.setString(1, actor.member.id); statement.setString(2, parent.sessionKey)
-                            statement.setString(3, index.toString(16).padStart(64, '0'))
-                            statement.setString(4, parent.requestedModel); statement.setString(5, parent.routeKey)
-                            statement.setString(6, parent.requestedModel); statement.setString(7, first.id)
-                            statement.setLong(8, current); statement.setLong(9, current + 3_600_000)
-                            statement.addBatch()
-                        }
-                        statement.executeBatch()
+                    ConversationAffinities.batchInsert(1 until SqlSessionAffinity.MAX_MEMBER_HINTS, shouldReturnGeneratedValues = false) { index ->
+                        this[ConversationAffinities.teamId] = "default"; this[ConversationAffinities.memberId] = actor.member.id
+                        this[ConversationAffinities.sessionKey] = parent.sessionKey; this[ConversationAffinities.conversationKey] = index.toString(16).padStart(64, '0')
+                        this[ConversationAffinities.requestedModel] = parent.requestedModel; this[ConversationAffinities.routeKey] = parent.routeKey
+                        this[ConversationAffinities.provider] = "anthropic"; this[ConversationAffinities.resolvedModel] = parent.requestedModel
+                        this[ConversationAffinities.accountId] = first.id; this[ConversationAffinities.lastSeenAt] = current; this[ConversationAffinities.expiresAt] = current + 3_600_000
                     }
                 }
                 place(admissionB, hint('d'))
                 assertNull(admissionA.preferredTarget(actor, hint('d')))
                 place(admissionB, parent)
                 assertNotNull(admissionA.preferredTarget(actor, parent), "Existing affinity still renews at the storage limit")
-                assertEquals(SqlSessionAffinity.MAX_MEMBER_HINTS, a.transaction {
-                    it.rows("SELECT COUNT(*) FROM conversation_affinities WHERE member_id = ?", actor.member.id) { row -> row.getInt(1) }.single()
+                assertEquals(SqlSessionAffinity.MAX_MEMBER_HINTS, a.query {
+                    ConversationAffinities.selectAll().where { ConversationAffinities.memberId eq actor.member.id }.count().toInt()
                 })
                 team.logout(actor)
                 assertEquals("authentication_required", assertFailsWith<TeamFailure> { admissionB.preferredTarget(actor, parent) }.code)

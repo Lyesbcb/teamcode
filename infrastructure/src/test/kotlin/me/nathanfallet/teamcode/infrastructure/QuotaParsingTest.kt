@@ -63,4 +63,41 @@ class QuotaParsingTest {
         }
         assertTrue(CodexTransport.parseUsage("account", json("""{"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":18000,"reset_at":1}}}"""), 2000).isEmpty())
     }
+    @Test fun codexCanonicalLimitIsSharedByHeadersAndUsageAndNeverTakenFromTheDisplayLabel() {
+        val headers = headersOf(
+            "x-codex-base_model_inference-primary-used-percent" to listOf("100"),
+            "x-codex-base_model_inference-primary-window-minutes" to listOf("10080"),
+            "x-codex-base_model_inference-limit-name" to listOf("GPT Reserve"),
+            "x-codex-active-limit" to listOf(" BASE_MODEL_INFERENCE "),
+        )
+        val payload = json("""{"additional_rate_limits":[{"metered_feature":"codex_base_model_inference","limit_name":"GPT Reserve","rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800}}}]}""")
+        val snapshot = CodexTransport.usageSnapshot("account", payload, 1000)
+        assertTrue(snapshot.replaceModelWindows)
+        assertEquals(CodexTransport.headerQuotas("account", headers, 1000), snapshot.windows)
+        assertEquals("model:base_model_inference:seven_day", snapshot.windows.single().window)
+        val active = CodexTransport.activeLimit("GPT-Reserve", headers)!!
+        assertEquals("gpt-reserve", active.model)
+        assertEquals("base_model_inference", active.limit)
+        assertNull(CodexTransport.activeLimit("gpt-reserve", headersOf("x-codex-active-limit", "x".repeat(65))))
+        assertNull(CodexTransport.activeLimit("bad\nmodel", headers))
+        assertNull(CodexTransport.activeLimit("gpt-reserve", headersOf()))
+        val objectForm = json("""{"additional_rate_limits":{"codex_base_model_inference":{"primary_window":{"used_percent":100,"limit_window_seconds":604800}}}}""")
+        assertEquals(snapshot, CodexTransport.usageSnapshot("account", objectForm, 1000))
+    }
+
+    @Test fun onlyExplicitCompleteAdditionalLimitsCanRetireModelCaps() {
+        for (value in listOf("{}", "[]")) {
+            assertTrue(CodexTransport.usageSnapshot("account", json("""{"additional_rate_limits":$value}"""), 1000).replaceModelWindows)
+        }
+        for (payload in listOf("{}", """{"additional_rate_limits":null}""", """{"additional_rate_limits":"bad"}""",
+            """{"additional_rate_limits":[null]}""", """{"additional_rate_limits":[{"metered_feature":"codex_cap"}]}""",
+            """{"additional_rate_limits":[{"metered_feature":"codex_cap","rate_limit":{"primary_window":{"limit_window_seconds":604800}}}]}""")) {
+            assertFalse(CodexTransport.usageSnapshot("account", json(payload), 1000).replaceModelWindows, payload)
+        }
+        val expired = json("""{"additional_rate_limits":[{"metered_feature":"codex_cap","rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1}}}]}""")
+        val snapshot = CodexTransport.usageSnapshot("account", expired, 2000)
+        assertTrue(snapshot.replaceModelWindows)
+        assertTrue(snapshot.windows.isEmpty())
+    }
+
 }

@@ -3,7 +3,7 @@ package me.nathanfallet.teamcode.domain.capacity
 import me.nathanfallet.teamcode.domain.accounts.AccountRecord
 import me.nathanfallet.teamcode.domain.routing.RouteTarget
 
-data class AccountPacing(val account: AccountRecord, val windows: List<WindowPacing>)
+data class AccountPacing(val account: AccountRecord, val windows: List<WindowPacing>, val modelLimits: Map<String, String> = emptyMap())
 
 /** Capacity is specific to the target actually serving work, never a sum of unrelated plans. */
 class RoutePacingUseCase(private val pacing: PacingUseCase = PacingUseCase()) {
@@ -16,12 +16,12 @@ class RoutePacingUseCase(private val pacing: PacingUseCase = PacingUseCase()) {
             // Match placement priority. Idle low-priority capacity does not promise headroom
             // while requests still go to a pressured higher-priority account.
             val available = candidates.filter { account -> account.windows.none {
-                target.model != null && it.quota.appliesTo(target.model) && it.quota.utilization >= .95 && it.quota.isCurrent(now)
+                target.model != null && it.quota.appliesTo(target.model, account.modelLimits[target.model.lowercase()]) && it.quota.utilization >= .95 && it.quota.isCurrent(now)
             } }
             val selectable = available.ifEmpty { candidates }
             val priority = selectable.maxOfOrNull { it.account.priority }
             val windows = selectable.filter { it.account.priority == priority }.map { account ->
-                account.windows.filter { target.model != null && it.quota.appliesTo(target.model) }
+                account.windows.filter { target.model != null && it.quota.appliesTo(target.model, account.modelLimits[target.model.lowercase()]) }
             }
             pacing.advise(windows, minOf(maximum, maxOf(1, windows.size * 2)))
         }

@@ -9,7 +9,7 @@ This is the target sequence; see [V1 progress](progress.md) for the current over
 | J2 | Reliable pool, refresh serialization, all quota windows, bounded failover and session affinity | Exhaustion, concurrent refresh, early/late stream errors and disconnects reproduced | 1–2 weeks |
 | J3 | Members/groups/devices, durable reservations, fair scheduling, protected pools, audit | Heavy member cannot starve a protected colleague; restart/revocation cannot reset allowance | 1–2 weeks |
 | J4 | Forecasting and predictive pacing, directives and local hooks, forecast UI | Replayed load slows/recovers without oscillation; delivery distinguished from enforcement | 1–2 weeks |
-| J5 | Catalog, Responses/Codex, explicit translation and one OSS target | Real multi-tool code task for every advertised route; unsupported capabilities rejected | 2–4 weeks |
+| J5 | Catalog, Responses/Codex and explicit translation | Real multi-tool code task for every advertised route; unsupported capabilities rejected | 2–4 weeks |
 | J6 | Native releases, user/system service installers, updates, recovery and operations | Clean installs on target OSes, boot/logon reconnection, restoration and rollback demonstrated | 1–2 weeks |
 
 First PR/commit sequence: document architecture; wire seven modules and enforce graph; deterministic streaming upstream and native proxy; team/device identity; real provider enrollment; provider reliability; team product; controller; multi-model compatibility. Keep slices runnable and push tested milestones.
@@ -28,6 +28,10 @@ Tests use synthetic fixtures and local fake providers. Real-provider acceptance 
 - Multi-model tool loops and result correctness, not just text responses.
 - Dashboard authorization/CSRF, audit, revocation and route explanations.
 - Service install/uninstall idempotence, boot/logon behavior, locked keychain/offline recovery and draining updates.
+
+## V2: open-source model providers
+
+The first open-source model provider is deferred to V2. V1 supports pooled Claude Max and Codex subscriptions, including explicitly supported routes between them. Keep the provider and protocol interfaces extensible; implementing or accepting an OSS backend is not a V1 release gate.
 
 ## V2: centrally managed MCP servers and skills
 

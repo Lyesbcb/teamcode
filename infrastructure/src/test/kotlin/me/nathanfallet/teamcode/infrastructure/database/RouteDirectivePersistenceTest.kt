@@ -1,5 +1,8 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -39,8 +42,8 @@ class RouteDirectivePersistenceTest {
                 val controllerA = SqlDirectiveService(a)
                 val controllerB = SqlDirectiveService(b)
                 suspend fun observations(account: AccountRecord, values: List<Double>, extra: Boolean = false, age: Long = 0) {
-                    a.transaction { it.execute("DELETE FROM quota_history WHERE account_id = ?", account.id) }
-                    val now = a.transaction { it.nowMillis() }
+                    a.query { QuotaHistory.deleteWhere { accountId eq account.id } }
+                    val now = a.query { nowMillis() }
                     val windows = if (extra) listOf("five_hour", "seven_day", "model:fable:seven_day") else listOf("five_hour", "seven_day")
                     admission.observe(account.id, windows.flatMap { window -> values.mapIndexed { index, value ->
                         AccountQuota(account.id, window, if (window.startsWith("model:")) .99 else value, now - age - 120_000 + index * 60_000, now + 3_600_000)
@@ -52,9 +55,10 @@ class RouteDirectivePersistenceTest {
                     var body = Json.parseToJsonElement("""{"messages":[{"role":"user","content":"synthetic"}],"input":"synthetic"}""").jsonObject
                     if (effort != null) body = kotlinx.serialization.json.JsonObject(body + ((if (protocol == WireProtocol.MESSAGES) "output_config" else "reasoning") to kotlinx.serialization.json.buildJsonObject { put("effort", kotlinx.serialization.json.JsonPrimitive(effort)) }))
                     val hint = SessionAffinityKey.from(mapOf("session-id" to session), body, protocol, requested, targets)!!
-                    a.transaction { c ->
+                    a.query {
+                    val c = this
                         c.lockTeam("default")
-                        if (!retain) c.execute("DELETE FROM conversation_affinities WHERE member_id = ?", actor.member.id)
+                        if (!retain) ConversationAffinities.deleteWhere { memberId eq actor.member.id }
                         SqlSessionAffinity().record(c, actor, hint, RouteTarget(account.identity.provider, resolved), account.id, c.nowMillis())
                     }
                     return hint
@@ -73,10 +77,10 @@ class RouteDirectivePersistenceTest {
                 assertEquals(Pace.SLOW_DOWN, slow.advice.pace, "Idle Codex cannot hide active Claude burn")
                 observations(claude, listOf(.1, .1, .1))
                 assertEquals(slow.id, pace().id, "Recovery does not immediately bounce back to acceleration")
-                val started = a.transaction { it.rows("SELECT recovery_started_at FROM directives WHERE scope_key = '' AND member_id = ?", actor.member.id) { row -> row.getLong(1) }.single() }
+                val started = a.query { Directives.select(Directives.recoveryStartedAt).where { (Directives.scopeKey eq "") and (Directives.memberId eq actor.member.id) }.single()[Directives.recoveryStartedAt]!! }
                 assertTrue(started > 0)
                 assertEquals(slow.id, pace(controllerA).id, "Another replica resumes the same pending recovery")
-                a.transaction { it.execute("UPDATE directives SET recovery_started_at = recovery_started_at - 120001 WHERE member_id = ?", actor.member.id) }
+                a.query { Directives.update({ Directives.memberId eq actor.member.id }) { it[recoveryStartedAt] = Directives.recoveryStartedAt - 120001 } }
                 assertEquals(Pace.CAN_INCREASE, pace().advice.pace)
 
                 observations(claude, listOf(.99, .99, .99))
@@ -105,7 +109,16 @@ class RouteDirectivePersistenceTest {
                 assertEquals(Pace.UNKNOWN, pace().advice.pace, "Deleted fallback routes cannot inherit a provider pin")
                 context(codex, "gpt-6-astra")
                 assertEquals(Pace.CAN_INCREASE, pace().advice.pace, "Native Responses activity retains its original protocol")
-                a.transaction { it.execute("UPDATE conversation_affinities SET last_seen_at = 0") }
+                // Admission and guidance share provider-observed model aliases across replicas.
+                val meteredAt = a.query { nowMillis() }
+                val modelCap = AccountQuota(codex.id, "model:premium:seven_day", 1.0, meteredAt - 1, meteredAt + 3_600_000)
+                admission.observe(codex.id, QuotaUpdate(listOf(modelCap), meteredAt - 1, modelLimit = ModelLimitObservation("gpt-6-astra", "premium")))
+                assertEquals(Pace.PAUSE, pace().advice.pace, "A canonical limit alias must constrain the active model's forecast")
+                SqlAdmissionStore(b).observe(codex.id, QuotaUpdate(emptyList(), meteredAt, replaceModelWindows = true))
+                pace() // Start conservative recovery; retired history must not recreate the cap.
+                a.query { Directives.update({ Directives.memberId eq actor.member.id }) { it[recoveryStartedAt] = Directives.recoveryStartedAt - 120001 } }
+                assertEquals(Pace.CAN_INCREASE, pace(controllerA).advice.pace, "Retired model-cap history must not continue pausing guidance")
+                a.query { ConversationAffinities.update { it[lastSeenAt] = 0 } }
                 assertEquals(Pace.UNKNOWN, pace().advice.pace, "Inactive hints do not advertise headroom")
                 context(codex, "gpt-6-astra")
                 admission.configurePool(actor, PoolBudget("", 1))
@@ -123,13 +136,13 @@ class RouteDirectivePersistenceTest {
                 observations(claude, listOf(.1, .2, .3))
                 observations(codex, listOf(.1, .1, .1))
                 // The previous .99 observation is a different synthetic scenario; clear its admission snapshot too.
-                a.transaction { it.execute("DELETE FROM quota_windows WHERE account_id = ?", claude.id) }
+                a.query { QuotaWindows.deleteWhere { accountId eq claude.id } }
                 observations(claude, listOf(.1, .2, .3))
                 val slowHint = context(claude, session = "slow-session")
                 val fastHint = context(codex, "gpt-6-astra", session = "fast-session", retain = true)
                 assertEquals(Pace.SLOW_DOWN, pace().advice.pace)
-                assertEquals(1, a.transaction { it.rows("SELECT COUNT(*) FROM directives WHERE member_id = ?", actor.member.id) { row -> row.getInt(1) }.single() }, "Legacy readers still see one member directive during rolling upgrades")
-                assertEquals(2, a.transaction { it.rows("SELECT COUNT(*) FROM session_directives WHERE member_id = ? AND scope_key IN (?, ?)", actor.member.id, slowHint.sessionKey, fastHint.sessionKey) { row -> row.getInt(1) }.single() })
+                assertEquals(1, a.query { Directives.selectAll().where { Directives.memberId eq actor.member.id }.count().toInt() }, "Legacy readers still see one member directive during rolling upgrades")
+                assertEquals(2, a.query { SessionDirectives.selectAll().where { (SessionDirectives.memberId eq actor.member.id) and (SessionDirectives.scopeKey inList listOf(slowHint.sessionKey, fastHint.sessionKey)) }.count().toInt() })
                 assertEquals(Pace.SLOW_DOWN, controllerA.current(actor, "slow-session")!!.advice.pace)
                 assertEquals(Pace.CAN_INCREASE, controllerB.current(actor, "fast-session")!!.advice.pace)
                 assertNull(controllerA.current(actor, "absent-session"))
@@ -161,7 +174,7 @@ class RouteDirectivePersistenceTest {
                 assertNull(controllerA.claim(actor, "slow-session", stage), "Acknowledged versions are suppressed across replicas")
                 assertNotNull(controllerB.claim(actor, "slow-session", "RECEIVED_BY_CLI"), "Watching does not consume the hook delivery stage")
                 val lost = controllerA.claim(actor, "fast-session", stage)!!
-                a.transaction { it.execute("UPDATE directive_deliveries SET claimed_until = 0 WHERE claim_id = ?", lost.claimId) }
+                a.query { DirectiveDeliveries.update({ DirectiveDeliveries.claimId eq lost.claimId }) { it[claimedUntil] = 0 } }
                 val retry = controllerB.claim(actor, "fast-session", stage)!!
                 assertNotEquals(lost.claimId, retry.claimId)
                 assertEquals("claim_expired", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> {
@@ -170,7 +183,7 @@ class RouteDirectivePersistenceTest {
                 controllerA.acknowledge(actor, retry.directive.id, stage, "fast-session", retry.claimId)
                 assertNull(controllerB.claim(actor, "fast-session", stage))
                 assertEquals("invalid_session", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> { controllerA.claim(actor, "bad session", stage) }.code)
-                a.transaction { it.execute("UPDATE conversation_affinities SET last_seen_at = 0") }
+                a.query { ConversationAffinities.update { it[lastSeenAt] = 0 } }
                 assertNull(controllerB.current(actor, "fast-session"), "An inactive session cannot receive old acceleration")
                 team.logout(actor)
                 assertEquals("authentication_required", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> { controllerB.current(actor, "slow-session") }.code)

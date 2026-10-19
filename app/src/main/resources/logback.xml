@@ -1,4 +1,6 @@
 <configuration>
+    <!-- Exposed failure diagnostics may expand bound credentials; application errors remain logged separately. -->
+    <logger name="Exposed" level="OFF"/>
   <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
     <target>System.err</target>
     <encoder><pattern>%d{HH:mm:ss} %-5level %logger{30} - %msg%n</pattern></encoder>

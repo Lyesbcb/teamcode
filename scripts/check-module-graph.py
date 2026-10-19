@@ -21,4 +21,12 @@ for module, dependencies in allowed.items():
         for imported in re.findall(r'^import me\.nathanfallet\.teamcode\.([a-z]+)', source.read_text(), re.M):
             transitive = dependencies | {'api'} if module == 'cli' else dependencies
             assert imported == module or imported in transitive, f'{source}: forbidden import {imported}'
-print('Production module boundaries verified.')
+# All application and fixture queries must use the typed Exposed DSL. Flyway's generated
+# migration resources are intentionally separate from executable Kotlin sources.
+raw_query = re.compile(r'"(?:SELECT\s|INSERT\s+INTO\s|UPDATE\s+\w+\s+SET\s|DELETE\s+FROM\s|CREATE\s+TABLE\s|ALTER\s+TABLE\s)', re.I)
+for source in root.glob('*/src/**/*.kt'):
+    content = source.read_text()
+    assert not raw_query.search(content), f'{source}: raw SQL is forbidden; use the Exposed DSL'
+    assert not re.search(r'\b(?:prepareStatement|prepareCall|createStatement)\s*\(', content), f'{source}: raw JDBC execution is forbidden'
+    assert not re.search(r'\.exec\s*\(', content), f'{source}: execute typed Exposed statements, not SQL strings'
+print('Production module boundaries and Exposed query conventions verified.')

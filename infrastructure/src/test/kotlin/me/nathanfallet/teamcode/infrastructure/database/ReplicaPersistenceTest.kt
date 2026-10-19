@@ -1,5 +1,8 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.domain.accounts.*
@@ -46,9 +49,10 @@ class ReplicaPersistenceTest {
                 val admissionB = SqlAdmissionStore(b)
                 admissionA.configure(admin.principal, MemberPolicy(admin.principal.member.id, 1000, 1))
                 // Definite provider rejection releases admission without making an internal retry wait.
-                a.transaction { c ->
+                a.query {
+                    val c = this
                     val now = c.nowMillis()
-                    c.execute("INSERT INTO directives (member_id, id, pace, max_concurrent, min_interval, message, created_at, expires_at) VALUES (?, ?, 'SLOW_DOWN', 1, 60000, 'Synthetic pacing test', ?, ?)", admin.principal.member.id, "retry-pacing", now, now + 120_000)
+                    Directives.insert { it[memberId] = admin.principal.member.id; it[id] = "retry-pacing"; it[pace] = "SLOW_DOWN"; it[maxConcurrent] = 1; it[minInterval] = 60000; it[message] = "Synthetic pacing test"; it[createdAt] = now; it[expiresAt] = now + 120_000 }
                 }
                 val rejected = admissionA.reserve(admin.principal, 100, "claude-test")
                 admissionA.settle(rejected, 0, false)
@@ -58,7 +62,7 @@ class ReplicaPersistenceTest {
                     admissionA.reserve(admin.principal, 100, "claude-test", excludedAccountIds = setOf(account.id))
                 }.code)
                 assertEquals(0, admissionB.capacity(admin.principal).chargedAndReservedUnits)
-                a.transaction { it.execute("DELETE FROM directives WHERE member_id = ?", admin.principal.member.id) }
+                a.query { Directives.deleteWhere { memberId eq admin.principal.member.id } }
                 val raced = coroutineScope { (0..7).map { n -> async {
                     runCatching { (if (n % 2 == 0) admissionA else admissionB).reserve(admin.principal, 100, "claude-test") }
                 } }.awaitAll() }
@@ -71,7 +75,7 @@ class ReplicaPersistenceTest {
                 assertEquals(AdmissionStatistics(0, 1), admissionA.statistics())
                 assertEquals(30, admissionB.capacity(admin.principal).chargedAndReservedUnits)
                 val abandoned = admissionA.reserve(admin.principal, 100, "claude-test")
-                a.transaction { it.execute("UPDATE reservations SET expires_at = 0 WHERE id = ?", abandoned.id) }
+                a.query { Reservations.update({ Reservations.id eq abandoned.id }) { it[expiresAt] = 0 } }
                 assertEquals(0, admissionB.statistics().active)
                 assertEquals(130, admissionB.capacity(admin.principal).chargedAndReservedUnits) // A dead pod cannot refund spend.
 
@@ -114,7 +118,7 @@ class ReplicaPersistenceTest {
                 account = store.find(verified.identity)!!
 
                 // Model exhaustion is visible on every replica without parking other models.
-                val now = a.transaction { it.nowMillis() }
+                val now = a.query { nowMillis() }
                 admissionA.observe(account.id, listOf(AccountQuota(account.id, "model:opus", 1.0, now, now + 3_600_000)))
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> {
                     admissionB.reserve(admin.principal, 100, "claude-opus-test")
@@ -122,7 +126,7 @@ class ReplicaPersistenceTest {
                 admissionA.settle(admissionB.reserve(admin.principal, 100, "claude-sonnet-test"), 0, false)
                 account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0002") as EnrollmentResult.Updated).account
                 // Simulate a process killed after committing refresh intent, before persisting the rotated token.
-                a.transaction { it.execute("UPDATE accounts SET refresh_pending = TRUE, refresh_started_at = 0 WHERE id = ?", account.id) }
+                a.query { Accounts.update({ Accounts.id eq account.id }) { it[refreshPending] = true; it[refreshStartedAt] = 0 } }
                 assertEquals("provider_reconnect", assertFailsWith<TeamFailure> { sourceB.fresh(account) }.code)
                 assertEquals(1, renewals.get())
                 assertEquals(AccountState.RECONNECT_REQUIRED, store.find(verified.identity)!!.state)
@@ -140,7 +144,7 @@ class ReplicaPersistenceTest {
                     ownerEntered.await()
                     assertFalse(workB.runDue("maintenance") { fail("Lease must be exclusive across connection pools") })
                     // Reclaim an expired lease and ensure the old owner cannot release the new lease.
-                    b.transaction { it.execute("UPDATE scheduled_work SET available_at = 0 WHERE name = 'maintenance'") }
+                    b.query { ScheduledWork.update({ ScheduledWork.name eq "maintenance" }) { it[availableAt] = 0 } }
                     val newEntered = CompletableDeferred<Unit>()
                     val newRelease = CompletableDeferred<Unit>()
                     val successor = async { workB.runDue("maintenance") { newEntered.complete(Unit); newRelease.await() } }
@@ -155,9 +159,9 @@ class ReplicaPersistenceTest {
                 assertFalse(account.id in workB.dueAccounts())
 
                 // Both API and dashboard call this same database budget; pod count does not multiply it.
-                a.transaction { it.execute("UPDATE login_budget SET attempts = 0, window_number = 0") }
+                a.query { LoginBudget.update { it[attempts] = 0; it[windowNumber] = 0 } }
                 // Avoid a legitimate fixed-window rollover while asserting exactly 120 concurrent admits.
-                val elapsed = a.transaction { it.nowMillis() % 60_000 }
+                val elapsed = a.query { nowMillis() % 60_000 }
                 if (elapsed > 50_000) delay(60_000 - elapsed + 50)
                 val budgets = listOf(SqlLoginBudget(a), SqlLoginBudget(b))
                 val allowed = coroutineScope { (0..139).map { n -> async { budgets[n % 2].admit() } }.awaitAll() }

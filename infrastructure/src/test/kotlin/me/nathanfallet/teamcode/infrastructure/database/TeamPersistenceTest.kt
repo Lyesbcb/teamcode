@@ -1,5 +1,8 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import me.nathanfallet.teamcode.infrastructure.database.tables.*
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import kotlinx.coroutines.*
 import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.accounts.*
@@ -59,8 +62,9 @@ class TeamPersistenceTest {
                 assertEquals(rotated.refreshToken, store.credentials("default", updated.id).refreshToken)
                 assertTrue(store.list("another-team").isEmpty())
                 assertFailsWith<TeamFailure> { store.credentials("another-team", updated.id) }
-                database.transaction { c ->
-                    assertTrue(c.rows("SELECT credential_envelope FROM accounts") { it.getString(1) }.all { it.startsWith("v1:") && !it.contains("synthetic") })
+                database.query {
+                    val c = this
+                    assertTrue(Accounts.select(Accounts.credentialEnvelope).map { it[Accounts.credentialEnvelope] }.all { it.startsWith("v1:") && !it.contains("synthetic") })
                 }
                 store.configure("default", updated.id, "Shared", false, 0)
                 val privateVerified = VerifiedProviderAccount(verified.identity.copy(accountId = "private-account"), "Protected")
@@ -129,10 +133,11 @@ class TeamPersistenceTest {
                 assertEquals(3, restarted.members(restarted.authenticate(admin.token)!!).size)
                 restarted.logout(admin.principal)
                 assertNull(service.authenticate(admin.token))
-                database.transaction { c ->
-                    val stored = c.rows("SELECT password_hash FROM members") { it.getString(1) }
+                database.query {
+                    val c = this
+                    val stored = Members.select(Members.passwordHash).map { it[Members.passwordHash] }
                     assertTrue(stored.all { it.startsWith("pbkdf2-sha256:") && !it.contains(temporary) })
-                    assertTrue(c.rows("SELECT token_hash FROM tokens") { it.getString(1) }.none { it == admin.token || it == member.token })
+                    assertTrue(Tokens.select(Tokens.tokenHash).map { it[Tokens.tokenHash] }.none { it == admin.token || it == member.token })
                 }
             }
         }

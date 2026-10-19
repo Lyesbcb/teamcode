@@ -1,0 +1,1 @@
+ALTER TABLE quota_windows ADD window_started_at BIGINT DEFAULT 0 NOT NULL;

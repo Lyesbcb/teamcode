@@ -1,6 +1,9 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
 import kotlinx.coroutines.*
+import me.nathanfallet.teamcode.infrastructure.database.tables.Accounts
+import org.jetbrains.exposed.v1.core.*
+import org.jetbrains.exposed.v1.jdbc.*
 import kotlinx.serialization.json.Json
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.team.TeamFailure
@@ -15,24 +18,23 @@ class SqlCredentialSource(
     override suspend fun fresh(account: AccountRecord, rejectedAccessToken: String?): ProviderCredentials {
         // Other replicas can briefly wait for the refresh owner. They never take over an uncertain refresh.
         repeat(400) {
-            val attempt = database.transaction { c ->
-                val row = c.rows("SELECT * FROM accounts WHERE id = ? AND team_id = ? FOR UPDATE", account.id, account.identity.teamId) {
-                    RefreshRow(accountRecord(it), it.getString("credential_envelope"), it.getBoolean("refresh_pending"), it.getLong("refresh_started_at"))
-                }.singleOrNull() ?: throw unavailable()
+            val attempt = database.query {
+                val row = Accounts.selectAll().where { (Accounts.id eq account.id) and (Accounts.teamId eq account.identity.teamId) }.forUpdate()
+                    .singleOrNull()?.let { RefreshRow(accountRecord(it), it[Accounts.credentialEnvelope], it[Accounts.refreshPending], it[Accounts.refreshStartedAt]) } ?: throw unavailable()
                 if (row.account.disabled || !row.account.state.canServe) throw unavailable()
-                val now = c.nowMillis()
+                val now = nowMillis()
                 if (row.pending) {
                     if (row.startedAt + 60_000 <= now) {
-                        c.execute("UPDATE accounts SET state = 'RECONNECT_REQUIRED' WHERE id = ?", account.id)
-                        return@transaction Attempt.Failed
+                        Accounts.update({ Accounts.id eq account.id }) { it[state] = "RECONNECT_REQUIRED" }
+                        return@query Attempt.Failed
                     }
-                    return@transaction Attempt.Wait
+                    return@query Attempt.Wait
                 }
                 val payload = Json.decodeFromString<CredentialPayload>(cipher.decrypt(row.envelope, "${account.identity.teamId}:${account.id}").decodeToString())
                 val credentials = ProviderCredentials(payload.accessToken, payload.refreshToken, payload.expiresAtMillis)
-                if (credentials.expiresAtMillis > now + 60_000 && credentials.accessToken != rejectedAccessToken) return@transaction Attempt.Ready(credentials)
+                if (credentials.expiresAtMillis > now + 60_000 && credentials.accessToken != rejectedAccessToken) return@query Attempt.Ready(credentials)
                 if (row.account.state == AccountState.ACCESS_ONLY) throw TeamFailure("access_token_expired", 503, "Access-only credentials expired. Import current credentials again; TeamCode will not refresh this account.")
-                c.execute("UPDATE accounts SET refresh_pending = TRUE, refresh_started_at = ? WHERE id = ?", now, account.id)
+                Accounts.update({ Accounts.id eq account.id }) { it[refreshPending] = true; it[refreshStartedAt] = now }
                 Attempt.Owner(row.account, credentials)
             }
             when (attempt) {
@@ -50,15 +52,17 @@ class SqlCredentialSource(
         try {
             val renewed = withTimeout(45_000) { renew(account, attempt.credentials) }
             val envelope = cipher.encrypt(Json.encodeToString(CredentialPayload(renewed.accessToken, renewed.refreshToken, renewed.expiresAtMillis)).toByteArray(), "${account.identity.teamId}:${account.id}")
-            val saved = database.transaction { c ->
-                c.execute("UPDATE accounts SET credential_envelope = ?, credential_version = credential_version + 1, refresh_pending = FALSE WHERE id = ? AND credential_version = ? AND refresh_pending = TRUE AND state = 'READY'", envelope, account.id, account.credentialVersion) == 1
+            val saved = database.query {
+                Accounts.update({ (Accounts.id eq account.id) and (Accounts.credentialVersion eq account.credentialVersion) and (Accounts.refreshPending eq true) and (Accounts.state eq "READY") }) {
+                    it[credentialEnvelope] = envelope; it[credentialVersion] = Accounts.credentialVersion + 1; it[refreshPending] = false
+                } == 1
             }
             if (!saved) throw reconnect()
             return renewed
         } catch (error: Exception) {
             // Keep the pending marker until a verified import supplies new credentials. Handover cannot clear it.
-            withContext(NonCancellable) { database.transaction { c ->
-                c.execute("UPDATE accounts SET state = 'RECONNECT_REQUIRED' WHERE id = ? AND credential_version = ? AND refresh_pending = TRUE", account.id, account.credentialVersion)
+            withContext(NonCancellable) { database.query {
+                Accounts.update({ (Accounts.id eq account.id) and (Accounts.credentialVersion eq account.credentialVersion) and (Accounts.refreshPending eq true) }) { it[state] = "RECONNECT_REQUIRED" }
             } }
             if (error is CancellationException) throw error
             throw reconnect()

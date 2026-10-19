@@ -106,4 +106,23 @@ class CodexProviderTest {
         assertEquals(3_000_000, quotas.single().resetsAtMillis)
     }
 
+    @Test fun usageProbeCarriesItsSnapshotAndOtherProvidersIgnoreCodexBindings() = runBlocking {
+        var receivedAt = 0L
+        HttpClient(MockEngine { request ->
+            receivedAt = System.currentTimeMillis()
+            assertEquals("https://chatgpt.com/backend-api/wham/usage", request.url.toString())
+            assertEquals("workspace-1", request.headers["ChatGPT-Account-Id"])
+            respond("""{"additional_rate_limits":[]}""", headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }) { install(HttpTimeout) }.use { http ->
+            val account = AccountRecord("id", AccountIdentity("team", "codex", "user-1", "workspace-1"), "Codex", 1, false, null, 0, AccountState.ACCESS_ONLY)
+            val update = CodexTransport(http).usageUpdate(account, credentials())
+            assertTrue(update.replaceModelWindows)
+            assertTrue(update.windows.isEmpty())
+            assertTrue(update.observedAtMillis <= receivedAt)
+            val stray = ClaudeTransport(http).quotaUpdate("id", "claude-opus", headersOf("x-codex-active-limit", "premium"), receivedAt)
+            assertNull(stray.modelLimit)
+            assertFalse(stray.replaceModelWindows)
+        }
+    }
+
 }

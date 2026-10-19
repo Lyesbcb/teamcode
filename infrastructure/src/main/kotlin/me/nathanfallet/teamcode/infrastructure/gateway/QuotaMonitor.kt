@@ -15,7 +15,7 @@ class QuotaMonitor(private val accounts: AccountStore, private val credentials: 
         for (id in work.dueAccounts()) {
             val account = accountsById[id] ?: continue
             try { work.runDue("quota/$id") {
-                admission.observe(id, transports.single { it.provider == account.identity.provider }.usage(account, credentials.fresh(account)))
+                admission.observe(id, transports.single { it.provider == account.identity.provider }.usageUpdate(account, credentials.fresh(account)))
             } }
             catch (_: TimeoutCancellationException) { failures++ }
             catch (error: CancellationException) { throw error }

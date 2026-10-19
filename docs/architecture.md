@@ -68,7 +68,9 @@ Metrics describe bounded operational outcomes; individual usage is protected man
 
 ### Transaction boundaries
 
-The first durable adapters use HikariCP and explicit prepared JDBC statements behind domain ports, with Flyway-owned MySQL migrations. This makes row locks, idempotency checks and affected-row checks visible without exporting database types to other modules. It is an implementation detail of infrastructure; Exposed can be introduced for query-heavy repositories without changing the domain or public client.
+Persistence uses the Exposed DSL behind domain ports, HikariCP for connection pooling and Flyway for MySQL migration execution. All queries, conditional updates and row locks must use typed Exposed expressions, including test fixtures; raw SQL execution is not permitted. Generate new migrations from Exposed table definitions and review their output without changing previously published migration checksums. Database types stay inside infrastructure. Application and fixture queries use this convention, including quota admission, credential refresh and delivery leases. The module-boundary check also rejects raw SQL/JDBC execution in Kotlin sources. Transactions use database time and read-committed isolation, with automatic transaction retries disabled so a failed operation is never silently replayed. SQL statement logging is disabled to protect bound credentials.
+
+Run `python3 scripts/generate-migrations.py` after changing the table definitions. The wrapper starts its own loopback-only MySQL 8.4 container with a temporary memory-backed data directory, invokes the Exposed Gradle migration generator and stops only that container. The generator replays the committed Flyway history and writes candidate DDL; review it before committing, especially renames, drops and MySQL type changes. It never targets the configured TeamCode server database. The schema source lives in `infrastructure/database/tables`; Exposed and migration-generation dependencies stay out of the native CLI.
 
 ## Implemented provider and protocol extension points
 

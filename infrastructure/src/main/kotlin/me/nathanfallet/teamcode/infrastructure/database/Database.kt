@@ -3,43 +3,43 @@ package me.nathanfallet.teamcode.infrastructure.database
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import java.sql.Connection
-import java.sql.PreparedStatement
-import java.sql.ResultSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.flywaydb.core.Flyway
+import org.jetbrains.exposed.v1.core.DatabaseConfig
+import org.jetbrains.exposed.v1.core.SqlLogger
+import org.jetbrains.exposed.v1.core.Transaction
+import org.jetbrains.exposed.v1.core.statements.StatementContext
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.Database as ExposedDatabase
 
-/** Explicit JDBC transactions keep row locks and affected-row checks visible at admission boundaries. */
+/** Exposed transactions over a bounded HikariCP pool; schema changes belong to Flyway. */
 class Database(url: String, username: String, password: String) : AutoCloseable {
     private val source = HikariDataSource(HikariConfig().apply {
         jdbcUrl = url; this.username = username; this.password = password
         addDataSourceProperty("connectTimeout", "5000")
         addDataSourceProperty("socketTimeout", "10000")
-        connectionInitSql = "SET SESSION innodb_lock_wait_timeout = 5"
+        addDataSourceProperty("sessionVariables", "innodb_lock_wait_timeout=5")
         maximumPoolSize = 8; connectionTimeout = 5_000; transactionIsolation = "TRANSACTION_READ_COMMITTED"
     })
-    fun migrate() { Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate() }
-    suspend fun <T> transaction(block: (Connection) -> T): T = withContext(Dispatchers.IO) {
-        source.connection.use { connection ->
-            connection.autoCommit = false
-            try { val result = block(connection); connection.commit(); result }
-            catch (error: Throwable) { connection.rollback(); throw error }
+    private val exposed = ExposedDatabase.connect(source, databaseConfig = DatabaseConfig {
+        defaultIsolationLevel = Connection.TRANSACTION_READ_COMMITTED
+        defaultMaxAttempts = 1
+        sqlLogger = object : SqlLogger {
+            override fun log(context: StatementContext, transaction: Transaction) = Unit
         }
+    })
+    suspend fun <T> query(block: JdbcTransaction.() -> T): T = withContext(Dispatchers.IO) {
+        transaction(exposed) { block() }
     }
+    fun migrate() { Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate() }
     suspend fun ready(): Boolean = withContext(Dispatchers.IO) {
         try { source.connection.use { it.isValid(2) } } catch (_: java.sql.SQLException) { false }
     }
-    override fun close() = source.close()
-}
-internal fun PreparedStatement.bind(values: Array<out Any?>) { values.forEachIndexed { index, value -> setObject(index + 1, value) } }
-internal fun ResultSet.nullableLong(column: String): Long? = getLong(column).let { if (wasNull()) null else it }
-internal fun Connection.execute(sql: String, vararg values: Any?): Int = prepareStatement(sql).use { it.bind(values); it.executeUpdate() }
-internal fun <T> Connection.rows(sql: String, vararg values: Any?, map: (ResultSet) -> T): List<T> = prepareStatement(sql).use {
-    it.bind(values); it.executeQuery().use { result -> buildList { while (result.next()) add(map(result)) } }
-}
-internal fun Connection.lockTeam(team: String) {
-    check(rows("SELECT id FROM teams WHERE id = ? FOR UPDATE", team) { it.getString(1) }.size == 1)
-}
-internal fun Connection.audit(team: String, actor: String, action: String, subject: String) {
-    execute("INSERT INTO audit_events (team_id, actor_id, action, subject_id, occurred_at) VALUES (?, ?, ?, ?, ?)", team, actor, action, subject, nowMillis())
+    override fun close() {
+        TransactionManager.closeAndUnregister(exposed)
+        source.close()
+    }
 }

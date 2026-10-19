@@ -65,4 +65,19 @@ class RoutePacingTest {
         assertEquals(Long.MAX_VALUE, tiny.reachesThresholdAtMillis)
         assertEquals(QuotaForecast.State.RESET_FIRST, tiny.state)
     }
+    @Test fun knownProviderLimitOverridesModelNameHeuristicsForAdmissionAndAdvice() {
+        val idle = account("codex", listOf(.1, .1, .1))
+        val cap = account("codex", listOf(1.0, 1.0, 1.0), model = "base_model_inference")
+        val mixed = idle.copy(windows = idle.windows + cap.windows,
+            modelLimits = mapOf("gpt-reserve" to "base_model_inference", "gpt-base_model_inference" to "premium"))
+        val quota = cap.windows.last().quota
+        assertTrue(quota.appliesTo("gpt-reserve", "base_model_inference"))
+        assertFalse(quota.appliesTo("gpt-base_model_inference", "premium"))
+        assertTrue(idle.windows.last().quota.appliesTo("gpt-reserve", "base_model_inference"))
+        val controller = RoutePacingUseCase()
+        assertEquals(Pace.PAUSE, controller.advise(setOf(RouteTarget("codex", "gpt-reserve")), listOf(mixed), 4, now).pace)
+        assertEquals(Pace.CAN_INCREASE, controller.advise(setOf(RouteTarget("codex", "gpt-base_model_inference")), listOf(mixed), 4, now).pace)
+        assertEquals(Pace.CAN_INCREASE, controller.advise(setOf(astra), listOf(mixed), 4, now).pace)
+    }
+
 }

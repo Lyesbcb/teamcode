@@ -238,3 +238,22 @@ Evidence:
 - Server packaging, native macOS linking and the production module graph check passed. No provider credentials or subscription calls were used.
 
 Deploy all application replicas and update quota API consumers before relying on nullable-reset protection; old readers did not understand it. Active-limit/model-family mappings, removed model caps, real-load forecast accuracy, subagent fan-out and the other full V1 gates remain open. Updated CI/Docker publication for this quota milestone is still pending.
+
+## Exposed persistence and canonical Codex quota scopes (2026-10-19)
+
+The previous unknown-reset milestone (`6b54733`) completed CI run `39219656827`, including every platform and Docker publication. The preceding Windows hook PATH fix also completed all jobs in run `39218729009`; this verifies the native bridge and launcher fixture, not a full real Codex session on Windows.
+
+This slice replaces handwritten JDBC queries throughout the application and test fixtures with Exposed 1.5.0, matching the standalone asonar/pkg conventions. The 23 typed tables retain the existing database shape. HikariCP still owns the bounded connection pool, Flyway still applies migration resources, and database-clock leases/read-committed transactions retain replica coordination. Exposed SQL logging is disabled and automatic transaction retries are disabled. The module-boundary check now rejects raw SQL strings and direct JDBC execution in Kotlin sources. Previously published migrations remain unchanged.
+
+Codex response headers now bind the resolved model to the serving account's canonical active-limit slug. Usage probes use `metered_feature` rather than display labels, and admission, forecasts and rejection classification share those bindings. A complete probe can retire model caps; partial/malformed data cannot. Snapshot timestamps start before the network request, and shared watermarks prevent delayed responses from restoring retired caps. Historical samples remain stored, with separate window-incarnation timestamps preventing a new cap from extrapolating across its prior retirement. Bindings are limited to 32 models per account and never applied to another subscription or to Claude accounts.
+
+Local verification passed:
+
+- **99 tests**, zero failures/errors/skips: API 2, client 4, domain 17, infrastructure 52, presentation 8 and CLI 16. The infrastructure suite includes real MySQL independent-pool admission races, refresh fencing, directive claims, alias isolation, stale snapshot ordering and cap retirement.
+- The packaged server passed the two-process replica smoke: concurrent startup/migration, one administrator bootstrap, shared members/sessions, cross-replica revocation, killed-pod recovery and database readiness/recovery.
+- Exposed generated exactly three additive migrations for quota snapshots, canonical model bindings and window-incarnation timestamps. Replaying all 13 migrations and generating again produced **zero migrations**, confirming no schema drift. Published V1–V10 resources remain unchanged.
+- Server packaging, module boundaries, the raw-query convention check and diff whitespace checks passed. No provider credentials or subscription calls were used.
+
+Cross-platform CI and Docker publication for this slice are pending its push; the previous green runs do not validate these changes.
+
+The first open-source model adapter is now explicitly V2 at the owner's request. Versioned CLI updates, signed release manifests, cooperative service updates and rollback are documented design targets in `services.md`, not implemented commands. The remaining V1 gates in `v1-review.md` are still required.
