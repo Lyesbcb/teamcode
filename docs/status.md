@@ -1,5 +1,15 @@
 # Implementation status
 
+## Two compiled versions in native installation acceptance
+
+The installation matrix now prepares two actual optimized executables per target from one source commit: a baseline `0.0.0-installation.gCOMMIT` and the requested snapshot/tag version. Baselines are compiled after preserving the release binary; cross-compiled baselines are staged only after execution on their actual OS/CPU. Both five-target bundles are assembled with the existing strict commit/version/header/hash checks and independently signed in the trusted signing job. Only the requested release bundle can reach GitHub release publication; baseline artifacts stay separate.
+
+The native preparation helper rejects equal version labels, equal executable hashes, mixed source commits and corrupt target assets. Runtime jobs install the baseline, observe its actual service version, update to the requested build, observe that version and roll back offline. A fresh signed cache of the requested version also proves background notification wiring in the actual baseline service without a release-network refresh. This replaces the previous same-build newline variant. PRs compile both candidates but never receive publisher credentials or execute the signing job.
+
+Local evidence (2026-10-19): both macOS ARM64 release builds completed sequentially from native source commit `9ec80ab`; the normal snapshot output was restored. The new public preparation helper and actual owned LaunchAgent smoke passed with publisher-signed metadata, different compiled versions and different executable bytes. Evidence: `/tmp/teamcode-two-version-pipeline-acceptance.log`. Acceptance includes authenticated cached notifications, compatibility/busy refusal, a quiet live agent, stable launcher/registration, version changes, offline and stopped-service rollback, interrupted-selection recovery and preserved source/authentication. Eleven release-script tests pass, including guards preventing a same-build or corrupt fixture from claiming a version transition; `actionlint`, Python compilation and whitespace checks pass.
+
+The preceding source run [39287174129](https://github.com/nathanfallet/teamcode/actions/runs/39287174129) has a terminal **successful Windows job**, validating the explicit lock-file ownership correction, its full native test executable and Windows transport/service/launcher acceptance. JVM, Linux x64 and Helm jobs also succeeded. The overall run, remaining architectures, first signed installation matrix and image publication are still unproven. The new two-version workflow requires its own five-target CI result; local macOS acceptance is not a substitute.
+
 ## Windows installation-lock creation correction
 
 Windows native execution exposed three failing lock cases in [job 118164484890](https://github.com/nathanfallet/teamcode/actions/runs/39283937898/job/118164484890): installation update/rollback under an activity lock, competing writers and native shared-reader/exclusive-updater locking. The other 26 native cases passed. The subsequent matrix source also fails its Windows native test step, so its signed bundle/image gates cannot be accepted.
