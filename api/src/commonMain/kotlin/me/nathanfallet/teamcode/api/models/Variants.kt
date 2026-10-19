@@ -19,11 +19,11 @@ class CreateVariantRequest(
     override fun toString() = "CreateVariantRequest(kind=$kind, target=$target, name=$name, binding=$binding, secret=[REDACTED])"
 }
 
-/** Replaces name, endpoint and configuration. A null `secret` keeps the stored one. */
+/** Replaces name and configuration. A null `secret` keeps the stored one unless `clearSecret`. The endpoint is immutable. */
 @Serializable
 class UpdateVariantRequest(
-    val expectedVersion: Int, val name: String, val endpoint: String? = null,
-    val config: Map<String, String> = emptyMap(), val secret: String? = null,
+    val expectedVersion: Int, val name: String, val config: Map<String, String> = emptyMap(),
+    val secret: String? = null, val clearSecret: Boolean = false,
 ) {
     override fun toString() = "UpdateVariantRequest(expectedVersion=$expectedVersion, name=$name, secret=[REDACTED])"
 }
@@ -40,7 +40,7 @@ data class VariantTargetView(val kind: String, val target: String)
 @Serializable
 data class VariantAssignmentView(
     val kind: String, val target: String, val variantId: String, val variantName: String,
-    val version: Int, val source: String, val hasMemberSecret: Boolean,
+    val version: Int, val source: String, val hasMemberSecret: Boolean, val assignedAt: Long,
 )
 
 @Serializable

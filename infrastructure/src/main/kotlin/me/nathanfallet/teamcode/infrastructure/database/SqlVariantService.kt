@@ -6,6 +6,7 @@ import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.variants.*
 import me.nathanfallet.teamcode.infrastructure.database.tables.*
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
+import me.nathanfallet.teamcode.infrastructure.secrets.CredentialDecryptionException
 import org.jetbrains.exposed.v1.core.*
 import org.jetbrains.exposed.v1.jdbc.*
 
@@ -45,14 +46,15 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
     override suspend fun update(actor: Principal, id: String, update: VariantUpdate): Variant = database.query {
         write(this, actor)
         val current = requireVariant(actor.teamId, id, lock = true)
-        VariantService.validate(current.kind, current.binding, update)
+        VariantService.validate(current, update)
         if (current.version != update.expectedVersion) throw TeamFailure("variant_conflict", 409, "This variant changed since you loaded it. Reload and try again.")
         if (current.kind == VariantKind.ENV && current.binding == VariantBinding.SHARED && !current.hasSharedSecret && update.sharedSecret == null)
             throw TeamFailure("invalid_variant", 400, "A shared environment variant needs a value.")
-        if (update.name != current.name && !Variants.select(Variants.id).where { (Variants.teamId eq actor.teamId) and slot(current.kind, current.target) and (Variants.name eq update.name) }.empty())
+        if (!Variants.select(Variants.id).where { (Variants.teamId eq actor.teamId) and slot(current.kind, current.target) and (Variants.name eq update.name) and (Variants.id neq id) }.empty())
             throw TeamFailure("variant_exists", 409, "A variant with this name already exists for this target.")
         Variants.update({ (Variants.id eq id) and (Variants.teamId eq actor.teamId) }) {
-            it[name] = update.name; it[endpoint] = update.endpoint; it[config] = Json.encodeToString(update.config)
+            it[name] = update.name; it[config] = Json.encodeToString(update.config)
+            if (update.clearSharedSecret) it[sharedSecret] = null
             update.sharedSecret?.let { secret -> it[sharedSecret] = seal(secret, actor.teamId, id) }
             it[version] = current.version + 1; it[updatedAt] = nowMillis()
         }
@@ -74,9 +76,11 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
         val variant = requireVariant(actor.teamId, variantId, lock = true)
         VariantService.validateMemberSecret(variant.binding, memberSecret)
         if (excluded(memberId, variant.slot)) throw TeamFailure("variant_excluded", 409, "This member is excluded from this target. Remove the exclusion first.")
-        upsertAssignment(actor.teamId, memberId, variant, AssignmentSource.DIRECT, memberSecret?.let { seal(it, actor.teamId, variant.id, memberId) })
+        val now = nowMillis()
+        VariantAssignments.deleteWhere { (VariantAssignments.memberId eq memberId) and (kind eq variant.kind.name) and (target eq variant.target) }
+        VariantAssignments.insert { it.assignment(actor.teamId, memberId, variant, AssignmentSource.DIRECT, memberSecret?.let { secret -> seal(secret, actor.teamId, variant.id, memberId) }, now) }
         audit(actor.teamId, actor.member.id, "variant.assigned", memberId)
-        VariantAssignment(memberId, variant.slot, variant.id, variant.name, variant.version, AssignmentSource.DIRECT, memberSecret != null)
+        VariantAssignment(memberId, variant.slot, variant.id, variant.name, variant.version, AssignmentSource.DIRECT, memberSecret != null, now)
     }
 
     override suspend fun unassign(actor: Principal, memberId: String, target: VariantTarget) = database.query {
@@ -91,13 +95,23 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
         write(this, actor)
         val variant = requireVariant(actor.teamId, variantId, lock = true)
         if (variant.binding != VariantBinding.SHARED) throw TeamFailure("invalid_variant", 400, "Only shared variants can be assigned in bulk; assign per-member variants individually.")
-        val members = Members.select(Members.id).where { (Members.teamId eq actor.teamId) and (Members.disabled eq false) }.forUpdate().map { it[Members.id] }
+        // Member state changes take the same team lock, so this read is stable until commit.
+        val members = Members.select(Members.id).where { (Members.teamId eq actor.teamId) and (Members.disabled eq false) }.map { it[Members.id] }
         val excluded = VariantExclusions.select(VariantExclusions.memberId).where { (VariantExclusions.teamId eq actor.teamId) and excludedSlot(variant) }.map { it[VariantExclusions.memberId] }.toSet()
         val direct = VariantAssignments.select(VariantAssignments.memberId).where {
             (VariantAssignments.teamId eq actor.teamId) and assignedSlot(variant) and (VariantAssignments.assignmentSource eq AssignmentSource.DIRECT.name)
         }.map { it[VariantAssignments.memberId] }.toSet()
         val eligible = members.filter { it !in excluded && it !in direct }
-        for (member in eligible) upsertAssignment(actor.teamId, member, variant, AssignmentSource.BULK, null)
+        if (eligible.isNotEmpty()) {
+            val now = nowMillis()
+            VariantAssignments.deleteWhere { (teamId eq actor.teamId) and (kind eq variant.kind.name) and (target eq variant.target) and (memberId inList eligible) }
+            VariantAssignments.batchInsert(eligible, shouldReturnGeneratedValues = false) { member -> assignment(actor.teamId, member, variant, AssignmentSource.BULK, null, now) }
+            // One event per affected member, so the journal can say who received the variant.
+            AuditEvents.batchInsert(eligible, shouldReturnGeneratedValues = false) { member ->
+                this[AuditEvents.teamId] = actor.teamId; this[AuditEvents.actorId] = actor.member.id; this[AuditEvents.action] = "variant.assigned"
+                this[AuditEvents.subjectId] = member; this[AuditEvents.occurredAt] = now
+            }
+        }
         audit(actor.teamId, actor.member.id, "variant.bulk_assigned", variant.id)
         BulkAssignment(eligible.size, members.count { it in direct && it !in excluded }, members.count { it in excluded })
     }
@@ -130,11 +144,11 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
         if (memberId != null && members.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")
         val ids = members.map { it.first }
         val assignments = if (ids.isEmpty()) emptyMap() else (VariantAssignments innerJoin Variants)
-            .select(VariantAssignments.memberId, VariantAssignments.kind, VariantAssignments.target, VariantAssignments.assignmentSource, VariantAssignments.memberSecret, Variants.id, Variants.name, Variants.version)
+            .select(VariantAssignments.memberId, VariantAssignments.kind, VariantAssignments.target, VariantAssignments.assignmentSource, VariantAssignments.memberSecret, VariantAssignments.assignedAt, Variants.id, Variants.name, Variants.version)
             .where { (VariantAssignments.teamId eq actor.teamId) and (VariantAssignments.memberId inList ids) }
             .map { row ->
                 VariantAssignment(row[VariantAssignments.memberId], VariantTarget(VariantKind.valueOf(row[VariantAssignments.kind]), row[VariantAssignments.target]),
-                    row[Variants.id], row[Variants.name], row[Variants.version], AssignmentSource.valueOf(row[VariantAssignments.assignmentSource]), row[VariantAssignments.memberSecret] != null)
+                    row[Variants.id], row[Variants.name], row[Variants.version], AssignmentSource.valueOf(row[VariantAssignments.assignmentSource]), row[VariantAssignments.memberSecret] != null, row[VariantAssignments.assignedAt])
             }.groupBy { it.memberId }
         val exclusions = if (ids.isEmpty()) emptyMap() else VariantExclusions.select(VariantExclusions.memberId, VariantExclusions.kind, VariantExclusions.target)
             .where { (VariantExclusions.teamId eq actor.teamId) and (VariantExclusions.memberId inList ids) }
@@ -150,8 +164,9 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
 
     /** Trusted resolution read: decrypts only this member's selected values. Authorization belongs to the caller. */
     override suspend fun state(teamId: String, memberId: String): MemberVariantState = database.query {
-        val member = Members.select(Members.disabled).where { (Members.id eq memberId) and (Members.teamId eq teamId) }.singleOrNull()
-        if (member == null || member[Members.disabled]) return@query MemberVariantState(false, emptyList(), emptySet())
+        // Same eligibility as authentication: a disabled member or one with a temporary password receives nothing.
+        val member = Members.select(Members.disabled, Members.mustChangePassword).where { (Members.id eq memberId) and (Members.teamId eq teamId) }.singleOrNull()
+        if (member == null || member[Members.disabled] || member[Members.mustChangePassword]) return@query MemberVariantState(false, emptyList(), emptySet())
         val exclusions = VariantExclusions.select(VariantExclusions.kind, VariantExclusions.target)
             .where { (VariantExclusions.teamId eq teamId) and (VariantExclusions.memberId eq memberId) }
             .map { VariantTarget(VariantKind.valueOf(it[VariantExclusions.kind]), it[VariantExclusions.target]) }.toSet()
@@ -161,9 +176,15 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
                 val target = VariantTarget(VariantKind.valueOf(row[VariantAssignments.kind]), row[VariantAssignments.target])
                 if (target in exclusions) return@mapNotNull null // Never decrypt a value the member cannot receive.
                 val variant = variant(row)
-                AssignmentCandidate(target, AssignmentSource.valueOf(row[VariantAssignments.assignmentSource]), variant,
-                    row[Variants.sharedSecret]?.let { open(it, teamId, variant.id) },
-                    row[VariantAssignments.memberSecret]?.let { open(it, teamId, variant.id, memberId) })
+                val source = AssignmentSource.valueOf(row[VariantAssignments.assignmentSource])
+                val assignedAt = row[VariantAssignments.assignedAt]
+                try {
+                    AssignmentCandidate(target, source, variant,
+                        row[Variants.sharedSecret]?.let { open(it, teamId, variant.id) },
+                        row[VariantAssignments.memberSecret]?.let { open(it, teamId, variant.id, memberId) }, assignedAt)
+                } catch (_: CredentialDecryptionException) {
+                    AssignmentCandidate(target, source, variant, null, null, assignedAt, unreadable = true)
+                }
             }
         MemberVariantState(true, candidates, exclusions)
     }
@@ -177,19 +198,16 @@ class SqlVariantService(private val database: Database, private val cipher: Cred
         return query.singleOrNull()?.let(::variant) ?: throw TeamFailure("not_found", 404, "Variant not found.")
     }
     private fun requireMember(team: String, id: String) {
-        Members.select(Members.id).where { (Members.id eq id) and (Members.teamId eq team) }.forUpdate().singleOrNull()
+        Members.select(Members.id).where { (Members.id eq id) and (Members.teamId eq team) }.singleOrNull()
             ?: throw TeamFailure("not_found", 404, "Member not found.")
     }
     private fun excluded(member: String, target: VariantTarget) = !VariantExclusions.select(VariantExclusions.memberId).where {
         (VariantExclusions.memberId eq member) and (VariantExclusions.kind eq target.kind.name) and (VariantExclusions.target eq target.name)
     }.empty()
-    private fun JdbcTransaction.upsertAssignment(team: String, member: String, variant: Variant, source: AssignmentSource, sealed: String?) {
-        val now = nowMillis()
-        VariantAssignments.deleteWhere { (memberId eq member) and (kind eq variant.kind.name) and (target eq variant.target) }
-        VariantAssignments.insert {
-            it[memberId] = member; it[kind] = variant.kind.name; it[target] = variant.target; it[teamId] = team
-            it[variantId] = variant.id; it[VariantAssignments.assignmentSource] = source.name; it[memberSecret] = sealed; it[assignedAt] = now
-        }
+    private fun org.jetbrains.exposed.v1.core.statements.UpdateBuilder<*>.assignment(team: String, member: String, variant: Variant, source: AssignmentSource, sealed: String?, now: Long) {
+        this[VariantAssignments.memberId] = member; this[VariantAssignments.kind] = variant.kind.name; this[VariantAssignments.target] = variant.target
+        this[VariantAssignments.teamId] = team; this[VariantAssignments.variantId] = variant.id; this[VariantAssignments.assignmentSource] = source.name
+        this[VariantAssignments.memberSecret] = sealed; this[VariantAssignments.assignedAt] = now
     }
     private fun slot(kind: VariantKind, target: String) = (Variants.kind eq kind.name) and (Variants.target eq target)
     private fun assignedSlot(variant: Variant) = (VariantAssignments.kind eq variant.kind.name) and (VariantAssignments.target eq variant.target)

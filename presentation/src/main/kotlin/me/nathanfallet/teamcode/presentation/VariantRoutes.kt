@@ -9,7 +9,7 @@ import me.nathanfallet.teamcode.domain.variants.*
 
 private fun Variant.view() = VariantView(id, kind.name, target, name, binding.name, version, endpoint, config, hasSharedSecret, createdAt, updatedAt)
 private fun VariantTarget.view() = VariantTargetView(kind.name, name)
-private fun VariantAssignment.view() = VariantAssignmentView(target.kind.name, target.name, variantId, variantName, version, source.name, hasMemberSecret)
+private fun VariantAssignment.view() = VariantAssignmentView(target.kind.name, target.name, variantId, variantName, version, source.name, hasMemberSecret, assignedAt)
 private fun MemberVariantAssignments.view() = MemberVariantAssignmentsView(memberId, username, disabled, assignments.map { it.view() }, exclusions.map { it.view() })
 private fun BulkAssignment.view() = BulkAssignmentResponse(assigned, keptDirect, excluded)
 
@@ -36,7 +36,7 @@ internal fun Route.variantRoutes(variants: VariantService, publicOrigin: String)
     }
     patch("/api/v1/variants/{id}") {
         val input = call.jsonBody<UpdateVariantRequest>()
-        call.respond(variants.update(call.principal, call.parameters["id"]!!, VariantUpdate(input.expectedVersion, input.name, input.endpoint, input.config, secret(input.secret))).view())
+        call.respond(variants.update(call.principal, call.parameters["id"]!!, VariantUpdate(input.expectedVersion, input.name, input.config, secret(input.secret), input.clearSecret)).view())
     }
     delete("/api/v1/variants/{id}") { variants.delete(call.principal, call.parameters["id"]!!); call.respond(HttpStatusCode.NoContent) }
     post("/api/v1/variants/{id}/bulk-assign") { call.respond(variants.bulkAssign(call.principal, call.parameters["id"]!!).view()) }

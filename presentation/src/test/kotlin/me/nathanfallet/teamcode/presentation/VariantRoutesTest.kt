@@ -32,7 +32,7 @@ class VariantRoutesTest {
             val variant = variants[variantId] ?: throw TeamFailure("not_found", 404, "Variant not found.")
             VariantService.validateMemberSecret(variant.binding, memberSecret)
             memberSecret?.let { secrets += it.reveal() }
-            return VariantAssignment(memberId, variant.slot, variant.id, variant.name, variant.version, AssignmentSource.DIRECT, memberSecret != null).also { assignments += it }
+            return VariantAssignment(memberId, variant.slot, variant.id, variant.name, variant.version, AssignmentSource.DIRECT, memberSecret != null, 1).also { assignments += it }
         }
         override suspend fun unassign(actor: Principal, memberId: String, target: VariantTarget) { write(actor); assignments.removeAll { it.memberId == memberId && it.target == target } }
         override suspend fun bulkAssign(actor: Principal, variantId: String): BulkAssignment { write(actor); return BulkAssignment(1, 0, 0) }

@@ -46,15 +46,18 @@ data class NewVariant(
     val endpoint: String? = null, val config: Map<String, String> = emptyMap(), val sharedSecret: SecretValue? = null,
 )
 
-/** Replaces the mutable fields. A null [sharedSecret] keeps the stored one; kind, target and binding are immutable. */
+/**
+ * Replaces the mutable fields. A null [sharedSecret] keeps the stored one unless [clearSharedSecret] removes it.
+ * Kind, target, binding and the MCP endpoint are immutable: stored credentials must never follow a new host.
+ */
 data class VariantUpdate(
-    val expectedVersion: Int, val name: String, val endpoint: String? = null,
-    val config: Map<String, String> = emptyMap(), val sharedSecret: SecretValue? = null,
+    val expectedVersion: Int, val name: String, val config: Map<String, String> = emptyMap(),
+    val sharedSecret: SecretValue? = null, val clearSharedSecret: Boolean = false,
 )
 
 data class VariantAssignment(
     val memberId: String, val target: VariantTarget, val variantId: String, val variantName: String,
-    val version: Int, val source: AssignmentSource, val hasMemberSecret: Boolean,
+    val version: Int, val source: AssignmentSource, val hasMemberSecret: Boolean, val assignedAt: Long,
 )
 
 /** Metadata view of one member's effective assignments, for administrators. No secret values. */
@@ -88,6 +91,14 @@ interface VariantService {
         private val envName = Regex("[A-Z_][A-Z0-9_]{0,127}")
         private val mcpName = Regex("[a-z0-9][a-z0-9._-]{0,63}")
         private val configKey = Regex("[A-Za-z0-9_.-]{1,64}")
+        /** Names that would let a variant take over the process, the dynamic loader or the agent's own connection. */
+        private val reservedEnvNames = setOf(
+            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "TMP", "TEMP", "IFS", "ENV", "BASH_ENV", "PROMPT_COMMAND",
+            "NODE_OPTIONS", "NODE_PATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP",
+            "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
+        )
+        private val reservedEnvPrefixes = listOf("LD_", "DYLD_", "TEAMCODE_", "ANTHROPIC_", "CLAUDE_", "OPENAI_", "CODEX_", "XDG_", "GIT_CONFIG_")
 
         fun validateTarget(target: VariantTarget) {
             val pattern = if (target.kind == VariantKind.ENV) envName else mcpName
@@ -95,6 +106,8 @@ interface VariantService {
                 if (target.kind == VariantKind.ENV) "Use an environment variable name of uppercase letters, digits and underscores."
                 else "Use an MCP server name of lowercase letters, digits, dots, dashes and underscores (at most 64)."
             )
+            if (target.kind == VariantKind.ENV && (target.name in reservedEnvNames || reservedEnvPrefixes.any { target.name.startsWith(it) }))
+                throw invalid("${target.name} is reserved for the runtime, its loader or TeamCode's own agent connection.")
         }
         fun validate(variant: NewVariant) {
             validateTarget(VariantTarget(variant.kind, variant.target))
@@ -106,10 +119,12 @@ interface VariantService {
                     throw invalid("A shared environment variant needs a value.")
             }
         }
-        fun validate(kind: VariantKind, binding: VariantBinding, update: VariantUpdate) {
-            validateFields(kind, update.name, update.endpoint, update.config, update.sharedSecret)
-            if (binding == VariantBinding.PER_MEMBER && update.sharedSecret != null)
+        fun validate(current: Variant, update: VariantUpdate) {
+            validateFields(current.kind, update.name, current.endpoint, update.config, update.sharedSecret)
+            if (current.binding == VariantBinding.PER_MEMBER && (update.sharedSecret != null || update.clearSharedSecret))
                 throw invalid("A per-member variant stores its values on each assignment, not on the variant.")
+            if (update.clearSharedSecret && update.sharedSecret != null) throw invalid("Either replace or clear the shared secret, not both.")
+            if (current.kind == VariantKind.ENV && update.clearSharedSecret) throw invalid("A shared environment variant needs a value.")
         }
         fun validateMemberSecret(binding: VariantBinding, secret: SecretValue?) {
             if (binding == VariantBinding.PER_MEMBER && secret == null) throw invalid("A per-member variant needs this member's value or credential.")

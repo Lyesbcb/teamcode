@@ -5,7 +5,6 @@ import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.domain.variants.*
 import me.nathanfallet.teamcode.infrastructure.database.tables.*
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
-import me.nathanfallet.teamcode.infrastructure.secrets.CredentialDecryptionException
 import org.jetbrains.exposed.v1.core.*
 import org.jetbrains.exposed.v1.jdbc.*
 import org.jetbrains.exposed.v1.migration.jdbc.MigrationUtils
@@ -28,12 +27,23 @@ class VariantPersistenceTest {
                 val initial = team.bootstrap()!!
                 team.changePassword(team.login("admin", initial, "Variants").principal, initial, "variant administrator password")
                 val admin = team.login("admin", "variant administrator password", "Variants").principal
-                val alice = team.createMember(admin, "alice", Role.MEMBER).member.id
-                val bob = team.createMember(admin, "bob", Role.MEMBER).member.id
-                val carol = team.createMember(admin, "carol", Role.MEMBER).member.id
                 val cipher = CredentialCipher(ByteArray(32) { 41 })
                 val first = SqlVariantService(a, cipher); val second = SqlVariantService(b, cipher)
                 val resolveA = ResolveEffectiveVariantsUseCase(first); val resolveB = ResolveEffectiveVariantsUseCase(second)
+                val pending = team.createMember(admin, "dave", Role.MEMBER)
+                val early = first.create(admin, NewVariant(env, "EARLY_TOKEN", "early", VariantBinding.SHARED, sharedSecret = SecretValue("synthetic-early")))
+                first.assign(admin, pending.member.id, early.id)
+                assertEquals(EffectiveVariants.none(pending.member.id), resolveA("default", pending.member.id), "A member with a temporary password receives nothing")
+                suspend fun member(name: String): String {
+                    val created = team.createMember(admin, name, Role.MEMBER)
+                    team.changePassword(team.login(name, created.temporaryPassword, "Variants").principal, created.temporaryPassword, "$name replacement password")
+                    return created.member.id
+                }
+                val dave = pending.member.id.also { team.changePassword(team.login("dave", pending.temporaryPassword, "Variants").principal, pending.temporaryPassword, "dave replacement password") }
+                assertEquals("synthetic-early", resolveA("default", dave).environment.single().value.reveal())
+                team.updateMember(admin, dave, Role.MEMBER, true)
+                second.delete(admin, early.id)
+                val alice = member("alice"); val bob = member("bob"); val carol = member("carol")
                 suspend fun envOf(member: String) = resolveB("default", member).environment.associate { it.name to it.value.reveal() }
                 suspend fun mcpOf(member: String) = resolveA("default", member).mcpServers.associateBy { it.name }
 
@@ -64,6 +74,7 @@ class VariantPersistenceTest {
                 first.exclude(admin, carol, VariantTarget(env, "NPM_TOKEN"))
                 failure("invalid_variant") { first.bulkAssign(admin, npmOwn.id) }
                 assertEquals(BulkAssignment(assigned = 2, keptDirect = 1, excluded = 1), second.bulkAssign(admin, npmShared.id))
+                failure("invalid_variant") { first.create(admin, NewVariant(env, "LD_PRELOAD", "x", VariantBinding.SHARED, sharedSecret = SecretValue("x"))) }
                 assertEquals("synthetic-npm-shared", envOf(alice)["NPM_TOKEN"])
                 assertEquals("synthetic-npm-shared", envOf(admin.member.id)["NPM_TOKEN"])
                 assertEquals("synthetic-npm-bob", envOf(bob)["NPM_TOKEN"])
@@ -83,6 +94,15 @@ class VariantPersistenceTest {
                 assertEquals("synthetic-github-rotated", envOf(alice)["GITHUB_TOKEN"])
                 assertEquals(2, resolveB("default", alice).environment.single { it.name == "GITHUB_TOKEN" }.version)
                 failure("variant_conflict") { second.update(admin, orgA.id, VariantUpdate(orgA.version, "org-a")) }
+                assertEquals("Org-A", second.update(admin, orgA.id, VariantUpdate(rotated.version, "Org-A")).name, "A case-only rename does not conflict with itself")
+                failure("variant_exists") { second.update(admin, orgA.id, VariantUpdate(rotated.version + 1, "ORG-B")) }
+                val beforeRotation = resolveA("default", bob).mcpServers.single().assignedAt
+                second.assign(admin, bob, personalMcp.id, SecretValue("synthetic-bob-delegated"))
+                assertTrue(resolveA("default", bob).mcpServers.single().assignedAt >= beforeRotation)
+                val cleared = first.update(admin, teamMcp.id, VariantUpdate(teamMcp.version, "team", mapOf("workspace" to "core"), clearSharedSecret = true))
+                assertFalse(cleared.hasSharedSecret)
+                assertEquals("https://mcp.example.test/team", cleared.endpoint)
+                failure("invalid_variant") { first.update(admin, orgB.id, VariantUpdate(orgB.version, "org-b", clearSharedSecret = true)) }
                 assertEquals("synthetic-github-rotated", envOf(alice)["GITHUB_TOKEN"], "A metadata update without a secret keeps the stored value")
                 second.assign(admin, alice, orgB.id)
                 assertEquals("synthetic-github-b", envOf(alice)["GITHUB_TOKEN"])
@@ -98,7 +118,7 @@ class VariantPersistenceTest {
 
                 // Administrator views carry metadata only.
                 val views = first.assignments(admin)
-                assertEquals(listOf("admin", "alice", "bob", "carol"), views.map { it.username })
+                assertEquals(listOf("admin", "alice", "bob", "carol", "dave"), views.map { it.username })
                 assertEquals(listOf(VariantTarget(env, "NPM_TOKEN")), views.single { it.memberId == carol }.exclusions)
                 assertEquals(AssignmentSource.BULK, views.single { it.memberId == admin.member.id }.assignments.single().source)
                 assertTrue(views.single { it.memberId == bob }.assignments.single { it.target.name == "NPM_TOKEN" }.hasMemberSecret)
@@ -114,10 +134,14 @@ class VariantPersistenceTest {
                     val audit = AuditEvents.selectAll().where { AuditEvents.action like "variant.%" }.map { listOf(it[AuditEvents.action], it[AuditEvents.subjectId]) }
                     assertTrue(audit.map { it[0] }.containsAll(listOf("variant.created", "variant.updated", "variant.deleted", "variant.assigned", "variant.unassigned", "variant.bulk_assigned", "variant.excluded", "variant.included")))
                     assertTrue(audit.flatten().none { it.contains("synthetic") || it.contains("example.test") })
+                    assertTrue(audit.any { it == listOf("variant.assigned", admin.member.id) }, "Bulk assignment journals each affected member")
                     val envelope = Variants.select(Variants.sharedSecret).where { Variants.id eq npmShared.id }.single()[Variants.sharedSecret]
                     Variants.update({ Variants.id eq orgB.id }) { it[sharedSecret] = envelope }
                 }
-                assertFailsWith<CredentialDecryptionException> { resolveA("default", bob) }
+                // One unreadable envelope withholds only its own slot.
+                val degraded = resolveA("default", bob)
+                assertEquals(listOf(VariantTarget(env, "GITHUB_TOKEN")), degraded.unavailable)
+                assertEquals(mapOf("NPM_TOKEN" to "synthetic-npm-bob"), degraded.environment.associate { it.name to it.value.reveal() })
 
                 // Only current interactive administrators manage variants.
                 failure("forbidden") { first.list(admin.copy(member = admin.member.copy(role = Role.MEMBER))) }

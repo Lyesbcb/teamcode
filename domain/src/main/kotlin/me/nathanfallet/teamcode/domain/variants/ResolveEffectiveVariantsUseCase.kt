@@ -1,25 +1,33 @@
 package me.nathanfallet.teamcode.domain.variants
 
 /** One environment variable the member's execution receives. */
-data class EffectiveEnvironmentVariable(val name: String, val variantId: String, val variantName: String, val version: Int, val value: SecretValue)
+data class EffectiveEnvironmentVariable(val name: String, val variantId: String, val variantName: String, val version: Int, val assignedAt: Long, val value: SecretValue)
 
 /** One MCP server the member may discover and call through the gateway. [credential] is null for a server without one. */
 data class EffectiveMcpServer(
-    val name: String, val variantId: String, val variantName: String, val version: Int,
+    val name: String, val variantId: String, val variantName: String, val version: Int, val assignedAt: Long,
     val endpoint: String, val config: Map<String, String>, val credential: SecretValue?,
 )
 
-data class EffectiveVariants(val memberId: String, val environment: List<EffectiveEnvironmentVariable>, val mcpServers: List<EffectiveMcpServer>) {
+/**
+ * [unavailable] lists assigned slots withheld because a stored value could not be decrypted or a delegated credential
+ * is missing; consumers report them without values. A change of value is visible through `version` (variant edits)
+ * or `assignedAt` (a new selection or a rotated member value).
+ */
+data class EffectiveVariants(
+    val memberId: String, val environment: List<EffectiveEnvironmentVariable>, val mcpServers: List<EffectiveMcpServer>,
+    val unavailable: List<VariantTarget> = emptyList(),
+) {
     companion object { fun none(memberId: String) = EffectiveVariants(memberId, emptyList(), emptyList()) }
 }
 
 /** A candidate selection for one slot, with its decrypted values. Adapters return every source they know about. */
 data class AssignmentCandidate(
     val target: VariantTarget, val source: AssignmentSource, val variant: Variant,
-    val sharedSecret: SecretValue?, val memberSecret: SecretValue?,
+    val sharedSecret: SecretValue?, val memberSecret: SecretValue?, val assignedAt: Long = 0, val unreadable: Boolean = false,
 )
 
-/** Current persisted state for one member. [eligible] is false for a disabled member or one outside the team. */
+/** Current persisted state for one member. [eligible] is false whenever authentication would refuse the member. */
 data class MemberVariantState(val eligible: Boolean, val candidates: List<AssignmentCandidate>, val exclusions: Set<VariantTarget>)
 
 /** Persistence port read on every resolution, so a change made on any replica is visible to the next call. */
@@ -50,16 +58,23 @@ class ResolveEffectiveVariantsUseCase(private val source: EffectiveVariantSource
         val state = source.state(teamId, memberId)
         if (!state.eligible) return EffectiveVariants.none(memberId)
         val selected = VariantResolution.select(state.candidates, state.exclusions)
-        val environment = selected.filter { it.target.kind == VariantKind.ENV }.mapNotNull { candidate ->
-            val value = candidate.valueFor() ?: return@mapNotNull null
-            EffectiveEnvironmentVariable(candidate.target.name, candidate.variant.id, candidate.variant.name, candidate.variant.version, value)
+        val unavailable = mutableListOf<VariantTarget>()
+        val environment = mutableListOf<EffectiveEnvironmentVariable>()
+        val servers = mutableListOf<EffectiveMcpServer>()
+        for (candidate in selected) {
+            val variant = candidate.variant
+            val value = candidate.valueFor()
+            when {
+                // One unreadable row withholds only its own slot; it never fails the member's other assignments.
+                candidate.unreadable -> unavailable += candidate.target
+                candidate.target.kind == VariantKind.ENV ->
+                    if (value == null) unavailable += candidate.target
+                    else environment += EffectiveEnvironmentVariable(candidate.target.name, variant.id, variant.name, variant.version, candidate.assignedAt, value)
+                variant.endpoint == null || (variant.binding == VariantBinding.PER_MEMBER && value == null) -> unavailable += candidate.target
+                else -> servers += EffectiveMcpServer(candidate.target.name, variant.id, variant.name, variant.version, candidate.assignedAt, variant.endpoint, variant.config, value)
+            }
         }
-        val servers = selected.filter { it.target.kind == VariantKind.MCP }.mapNotNull { candidate ->
-            val endpoint = candidate.variant.endpoint ?: return@mapNotNull null
-            if (candidate.variant.binding == VariantBinding.PER_MEMBER && candidate.memberSecret == null) return@mapNotNull null
-            EffectiveMcpServer(candidate.target.name, candidate.variant.id, candidate.variant.name, candidate.variant.version, endpoint, candidate.variant.config, candidate.valueFor())
-        }
-        return EffectiveVariants(memberId, environment, servers)
+        return EffectiveVariants(memberId, environment, servers, unavailable)
     }
     private fun AssignmentCandidate.valueFor() = if (variant.binding == VariantBinding.PER_MEMBER) memberSecret else sharedSecret
 }

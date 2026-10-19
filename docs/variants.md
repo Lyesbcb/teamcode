@@ -16,7 +16,9 @@ Each variant has a **binding**:
 - `SHARED`: one encrypted value on the variant (a team-wide environment value or a shared MCP credential).
 - `PER_MEMBER`: no value on the variant; each assignment carries the member's own encrypted value (an individual environment value or a delegated MCP credential).
 
-Several variants can exist for the same slot (`org-a` and `org-b` for `GITHUB_TOKEN`). Names are unique per slot. Kind, slot and binding are immutable after creation; create another variant to change them.
+Several variants can exist for the same slot (`org-a` and `org-b` for `GITHUB_TOKEN`). Names are unique per slot (case-insensitively, following the MySQL collation). Kind, slot, binding and the MCP endpoint are immutable after creation; create another variant to change them. An immutable endpoint means stored shared or delegated credentials can never be redirected to a new host by an edit. A shared MCP credential can be replaced or cleared (`clearSecret`); a shared environment value can only be replaced.
+
+Environment names that would take over the process, its dynamic loader, proxies/certificates or the agent's own TeamCode/provider connection are refused: for example `PATH`, `HOME`, `NODE_OPTIONS`, `HTTPS_PROXY` and the prefixes `LD_`, `DYLD_`, `TEAMCODE_`, `ANTHROPIC_`, `CLAUDE_`, `OPENAI_`, `CODEX_`, `XDG_`, `GIT_CONFIG_` (full list in `VariantService`).
 
 Every update increments `version`, and an update must send the version it read (`expectedVersion`), so two administrators cannot silently overwrite each other. Assignments point to the variant, not to a version: an update applies to every assignee on their next resolution.
 
@@ -28,25 +30,28 @@ A member has **at most one variant per slot**. The rules:
 2. **Direct assignment** selects a variant for one member and replaces any previous selection for that slot. A `PER_MEMBER` variant requires the member's value at assignment; a `SHARED` variant refuses one.
 3. **Bulk assignment** assigns a `SHARED` variant to every **currently enabled** member, writing ordinary rows marked `BULK`. It replaces earlier `BULK` selections for that slot, keeps `DIRECT` selections and skips excluded members. It is an action, not a standing rule: members created later receive nothing until assigned. `PER_MEMBER` variants cannot be assigned in bulk.
 4. **Exclusions** are per member and slot. Creating one removes the member's current selection for that slot; while it exists, direct assignment is refused (`409 variant_excluded`) and bulk assignment skips the member. Removing an exclusion grants nothing back.
-5. A **disabled** member resolves to nothing; re-enabling restores the stored assignments.
+5. A member that authentication would refuse (disabled, or still holding a temporary password) resolves to nothing; the stored assignments apply again once the member is eligible.
 6. Deleting a variant removes its assignments.
 
 ### Precedence, prepared for groups
 
-`AssignmentSource` orders sources: `DIRECT` (300) > `GROUP` (200, reserved) > `BULK` (100), and an exclusion beats every source. `VariantResolution.select` applies this order to a list of candidates, so group assignments can later add candidates from a separate table without changing the no-assignment rule or the exclusion rule. Nothing produces `GROUP` today, and this code does not depend on groups.
+`AssignmentSource` orders sources: `DIRECT` (300) > `GROUP` (200, reserved) > `BULK` (100), and an exclusion beats every source. `VariantResolution.select` applies this order to a list of candidates. Nothing produces `GROUP` today, and this code does not depend on groups.
+
+Direct and bulk selections are materialized in the same row (one per member and slot), so today at most one candidate exists per slot and "direct beats bulk" is enforced on write: bulk assignment skips direct rows, and a direct assignment replaces a bulk row. Removing a direct selection therefore leaves the slot empty; it does not fall back to an earlier bulk value. Group assignments are expected to be resolved from their own table (group → variant) and added as `GROUP` candidates at read time, which needs no change to `variant_assignments` and keeps the no-assignment and exclusion rules intact.
 
 ## Effective resolution
 
 `ResolveEffectiveVariantsUseCase(teamId, memberId)` returns the member's effective environment variables and MCP servers, with decrypted values. It reads MySQL on every call, so a change made on any replica is visible to the next resolution, with no cache to invalidate. This is the entry point the MCP gateway and cloud sessions will call when they create, resume or transfer a session.
 
-It is a trusted server-side port: it does not authenticate anyone. Callers must already act for an authenticated member (or an authorized session for them), and must neither log its result nor return it to another member. No HTTP route returns these values. A `PER_MEMBER` MCP assignment without a credential is not returned. A value that fails to decrypt (wrong key, or an envelope moved to another row) makes the resolution fail rather than return partial data.
+It is a trusted server-side port: it does not authenticate anyone. Callers must already act for an authenticated member (or an authorized session for them), and must neither log its result nor return it to another member. No HTTP route returns these values. An assigned slot that cannot be served (a value that fails to decrypt because of a wrong key or an envelope moved to another row, or a delegated MCP assignment without a credential) is withheld and listed in `unavailable`, by name only; the member's other slots are still returned. Each entry carries the variant `version` (bumped by variant edits) and the assignment's `assignedAt` (changed by a new selection or a rotated member value), so a consumer can detect either change.
 
 ## Secrets
 
 - Secret values (shared values, shared credentials, member values, delegated credentials) are stored as AES-256-GCM envelopes through the existing `CredentialCipher`, with the authenticated context `variant:<team>:<variant>[:<member>]`. An envelope copied to another row does not decrypt.
 - Secret values are write-only. API responses and the dashboard only say `hasSharedSecret` / `hasMemberSecret`. Request DTOs and `SecretValue` redact themselves in `toString`.
-- The audit journal records metadata only: `variant.created`, `variant.updated`, `variant.deleted` and `variant.bulk_assigned` (subject: the variant ID); `variant.assigned`, `variant.unassigned`, `variant.excluded` and `variant.included` (subject: the member ID). Values, endpoints and configuration never enter the journal.
-- Endpoints and configuration are **not** secret: administrators can read them. Put credentials in the secret field, never in the endpoint URL (URLs with user information are refused) or in configuration.
+- The audit journal records metadata only: `variant.created`, `variant.updated`, `variant.deleted` and `variant.bulk_assigned` (subject: the variant ID); `variant.assigned` (also written once per member affected by a bulk assignment), `variant.unassigned`, `variant.excluded` and `variant.included` (subject: the member ID). Values, endpoints and configuration never enter the journal. The journal has a single subject per event, so a member event does not name the slot or variant; the current assignment view does.
+- Endpoints and configuration are **not** secret: administrators can read them. Put credentials in the secret field, never in the endpoint URL (URLs with user information are refused; a query string is accepted and visible) or in configuration.
+- Endpoints are only syntactically checked (HTTPS, host, no user information or fragment). Refusing loopback, link-local and private destinations must happen in the MCP gateway at connection time, after DNS resolution; it is not done here.
 
 ## Administrator API
 
@@ -56,7 +61,7 @@ All endpoints require an interactive administrator. Service/CI keys are refused,
 | --- | --- |
 | `GET /api/v1/variants` | List variant metadata |
 | `POST /api/v1/variants` | Create (`kind`, `target`, `name`, `binding`, `endpoint`, `config`, `secret`) |
-| `PATCH /api/v1/variants/{id}` | Replace `name`, `endpoint`, `config`; `secret` replaces the shared value when present; requires `expectedVersion` |
+| `PATCH /api/v1/variants/{id}` | Replace `name` and `config`; `secret` replaces the shared value, `clearSecret` removes a shared MCP credential; requires `expectedVersion` |
 | `DELETE /api/v1/variants/{id}` | Delete a variant and its assignments |
 | `POST /api/v1/variants/{id}/bulk-assign` | Bulk-assign a shared variant; returns `assigned`, `keptDirect`, `excluded` |
 | `GET /api/v1/variant-assignments` | Effective assignments and exclusions of every member (metadata) |
@@ -75,7 +80,7 @@ Tables `variants`, `variant_assignments` (primary key member/kind/target, so at 
 ## Limits and open questions
 
 - **Granularity**: one variant fills one slot (one variable or one server). Grouping several variables into one assignable bundle is not supported; it could be added as a layer that expands into slots.
-- **Update semantics**: assignees always get the latest version; there is no pinning and no stored history of earlier values, so there is no rollback to a previous value other than updating it again. Running sessions are not notified; consumers compare `version` when they resolve again.
+- **Update semantics**: assignees always get the latest version; there is no pinning and no stored history of earlier values, so there is no rollback to a previous value other than updating it again. Running sessions are not notified; consumers compare `version` and `assignedAt` when they resolve again.
 - **Delegated credentials** are supplied by an administrator at assignment. A member-driven delegated flow (e.g. OAuth with the upstream MCP server, with explicit ownership and revocation by the member) is not implemented.
 - **Per-tool MCP restrictions** are not modelled; an MCP assignment grants the whole server until the gateway lands.
 - **Groups and defaults**: the precedence slot exists; group assignments, and whether a team default should exist at all, remain open. A default must never grant a member who has no assignment of any kind.
