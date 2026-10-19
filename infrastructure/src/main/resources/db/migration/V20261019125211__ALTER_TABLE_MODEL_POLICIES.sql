@@ -1,0 +1,1 @@
+ALTER TABLE model_policies ADD experimental_cross_provider_translation BOOLEAN DEFAULT FALSE NOT NULL;

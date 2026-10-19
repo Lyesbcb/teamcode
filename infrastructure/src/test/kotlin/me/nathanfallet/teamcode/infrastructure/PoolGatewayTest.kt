@@ -88,6 +88,44 @@ class PoolGatewayTest {
     private val actor = Principal(Member("member", "alice", Role.MEMBER, false, false), "token", "team")
     private val account = AccountRecord("account", AccountIdentity("team", "anthropic", "provider-id", "org-id"), "Max", 1, false, null, 0, AccountState.READY)
     private fun request() = GenerationRequest("""{"model":"claude-opus-test","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}""".toByteArray(), emptyMap(), actor)
+    @Test fun translationIsOffByDefaultInBothDirectionsWithoutReservationOrProviderTraffic() = runBlocking {
+        val policy = object : ModelPolicyStore {
+            override suspend fun get(teamId: String) = ModelPolicy()
+            override suspend fun save(actor: Principal, policy: ModelPolicy) = policy
+        }
+        HttpClient(MockEngine { fail("Disabled translation must not reach a provider") }) { install(HttpTimeout) }.use { http ->
+            for (protocol in WireProtocol.entries) {
+                val store = FakeAdmission(account)
+                val target = if (protocol == WireProtocol.MESSAGES) RouteTarget("codex", "gpt-test") else RouteTarget("anthropic", "claude-test")
+                val body = if (protocol == WireProtocol.MESSAGES) request() else GenerationRequest(
+                    """{"model":"gpt-test","input":"Hello","stream":true}""".toByteArray(), emptyMap(), actor, protocol)
+                val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http), CodexTransport(http)), policy, routes(target))
+                val error = assertFailsWith<TeamFailure> { gateway.forward(body) { _, _ -> fail("No response expected") } }
+                assertEquals("translation_disabled", error.code); assertEquals(422, error.status)
+                assertNull(store.selectedProvider); assertTrue(store.charges.isEmpty())
+            }
+        }
+    }
+    @Test fun disablingTranslationSkipsAnExistingCrossProviderAffinityAndRetainsNativeFallback() = runBlocking {
+        val store = FakeAdmission(account)
+        val policy = FakeModelPolicies()
+        val seen = mutableListOf<String>()
+        val responses = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+        HttpClient(MockEngine { req ->
+            seen += req.url.host
+            respond(if (req.url.host == "chatgpt.com") responses else FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http), CodexTransport(http)), policy,
+                routes(RouteTarget("codex", "gpt-test"), RouteTarget("anthropic")))
+            val tagged = request().copy(headers = mapOf("x-claude-code-session-id" to "flag-session"))
+            gateway.forward(tagged) { _, chunks -> chunks.collect {} }
+            assertEquals("codex", store.affinities.values.single().provider)
+            policy.translation = false
+            gateway.forward(tagged) { _, chunks -> chunks.collect {} }
+            assertEquals(listOf("chatgpt.com", "api.anthropic.com"), seen)
+            assertEquals("anthropic", store.affinities.values.single().provider)
+        }
+    }
     @Test fun streamsExactlyOnceAndSettlesAllUsageCategories() = runBlocking {
         val store = FakeAdmission(account)
         var calls = 0
@@ -419,7 +457,7 @@ class PoolGatewayTest {
             }
         }) { install(HttpTimeout) }.use { http ->
             val policy = object : ModelPolicyStore {
-                override suspend fun get(teamId: String) = ModelPolicy(allowedEfforts = listOf("none"))
+                override suspend fun get(teamId: String) = ModelPolicy(allowedEfforts = listOf("none"), experimentalCrossProviderTranslation = true)
                 override suspend fun save(actor: Principal, policy: ModelPolicy) = policy
             }
             val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), policy, routes(RouteTarget("anthropic", "claude-haiku-test")))
@@ -475,7 +513,7 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     override suspend fun coolDown(accountId: String, untilMillis: Long, reconnect: Boolean) { cooled = true; this.reconnect = reconnect }
 }
 
-private class FakeModelPolicies : ModelPolicyStore {
-    override suspend fun get(teamId: String) = ModelPolicy()
+private class FakeModelPolicies(var translation: Boolean = true) : ModelPolicyStore {
+    override suspend fun get(teamId: String) = ModelPolicy(experimentalCrossProviderTranslation = translation)
     override suspend fun save(actor: Principal, policy: ModelPolicy) = policy
 }

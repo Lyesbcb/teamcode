@@ -125,6 +125,7 @@ class AdmissionQueuePersistenceTest {
                 SqlRoutingStore(b).save(admin, RouteRule("changed", "claude-*", listOf(RouteTarget("codex", "gpt-test"))))
                 failure("route_changed") { first.reserveQueued(admin, routeTicket, guarded) }
                 second.release(admin, routeTicket)
+                verifyTranslationFlag(a, b, accounts, admin, first, second)
                 val revoked = first.enqueue(colleague, input)
                 team.logout(colleague)
                 failure("authentication_required") { second.reserveQueued(colleague, revoked, input) }
@@ -133,5 +134,25 @@ class AdmissionQueuePersistenceTest {
                 assertEquals(0, first.capacity(admin).chargedAndReservedUnits)
             } }
         }
+    }
+    private suspend fun verifyTranslationFlag(a: Database, b: Database, accounts: SqlAccountStore, admin: Principal, first: SqlAdmissionStore, second: SqlAdmissionStore) {
+    // A flag changed through another pool invalidates queued translation before spending.
+    val policiesA = SqlModelPolicyStore(a)
+    val policiesB = SqlModelPolicyStore(b)
+    assertFalse(policiesA.get("default").experimentalCrossProviderTranslation)
+    val codex = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "codex", "queue-codex", "org"), "Codex"), ProviderCredentials("synthetic-codex", "synthetic-refresh", Long.MAX_VALUE), null, "codex-enrollment") as EnrollmentResult.Created
+    accounts.handover("default", codex.account.id, accessOnly = true)
+    policiesB.save(admin, ModelPolicy(experimentalCrossProviderTranslation = true))
+    assertTrue(policiesA.get("default").experimentalCrossProviderTranslation)
+    val translated = AdmissionInput(100, "gpt-test", "codex", context = AdmissionContext(
+        "claude-test", WireProtocol.MESSAGES, listOf(RouteTarget("codex", "gpt-test")), null, null, true, null))
+    val pendingTranslation = first.enqueue(admin, translated)
+    policiesB.save(admin, ModelPolicy())
+    assertEquals("translation_disabled", assertFailsWith<TeamFailure> { first.reserveQueued(admin, pendingTranslation, translated) }.code)
+    second.release(admin, pendingTranslation)
+    assertEquals(0, first.capacity(admin).chargedAndReservedUnits)
+    policiesB.save(admin, ModelPolicy(experimentalCrossProviderTranslation = true))
+    first.settle(AwaitAdmissionUseCase(second).reserve(admin, translated), 0)
+    policiesB.save(admin, ModelPolicy())
     }
 }

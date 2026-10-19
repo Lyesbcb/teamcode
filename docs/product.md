@@ -2,7 +2,7 @@
 
 ## Product
 
-TeamCode provides a shared model gateway, web administration and a native local CLI. First provider path: Claude Code through a pool of Claude Max subscriptions. V1 also includes Codex and explicit Anthropic/OpenAI protocol translation. Tested open-source model backends, centrally managed MCP/skills and API-managed Kubernetes cloud agent sessions are planned for [V2](roadmap.md#v2-kubernetes-cloud-agent-sessions). Capacity should complete useful work fairly; unused quota is not permission to invent tasks or spend money.
+TeamCode provides a shared model gateway, web administration and a native local CLI. First provider path: Claude Code through a pool of Claude Max subscriptions. V1 also includes pooled Codex subscriptions. Anthropic/OpenAI cross-protocol translation is experimental, disabled by default behind the administrator setting `experimentalCrossProviderTranslation`, and is not a V1 release gate. Tested open-source model backends, centrally managed MCP/skills and API-managed Kubernetes cloud agent sessions are planned for [V2](roadmap.md#v2-kubernetes-cloud-agent-sessions). Capacity should complete useful work fairly; unused quota is not permission to invent tasks or spend money.
 
 A deployment initially serves one team with multiple groups and roles. SaaS billing, resale and a hosted multi-tenant service are outside the initial scope. Provider authentication rights and account-sharing terms remain independent of the open-source software license. TeamClaude describes its own scope as one person's accounts; publishing TeamCode does not grant permission to share subscriptions. Document supported authentication arrangements per provider without claiming unverified access is officially supported.
 

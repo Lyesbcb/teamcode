@@ -241,6 +241,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             # This portable profile explicitly disables reasoning. Opaque reasoning replay is tested separately.
             policy = json.loads(request('/api/v1/policy/models', token=token)[1])
             policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
+            policy['experimentalCrossProviderTranslation'] = True
             assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
             schema = {'type':'object', 'properties':{'a':{'type':'integer'}, 'b':{'type':'integer'}}, 'required':['a','b'], 'additionalProperties':False}
             for incoming, target in ((args.model, 'gpt-6-luna'), ('gpt-6-luna', args.model)):

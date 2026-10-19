@@ -20,6 +20,7 @@ class SqlModelPolicyStore(private val database: Database) : ModelPolicyStore {
                 it[deniedModels] = Json.encodeToString(policy.deniedModels)
                 it[allowedEfforts] = Json.encodeToString(policy.allowedEfforts)
                 it[maximumThinkingTokens] = policy.maximumThinkingTokens
+                it[experimentalCrossProviderTranslation] = policy.experimentalCrossProviderTranslation
             }
             audit(actor.teamId, actor.member.id, "model_policy.updated", actor.teamId)
             policy
@@ -27,4 +28,4 @@ class SqlModelPolicyStore(private val database: Database) : ModelPolicyStore {
     }
 }
 internal fun readModelPolicy(teamId: String): ModelPolicy = ModelPolicies.selectAll().where { ModelPolicies.teamId eq teamId }
-    .singleOrNull()?.let { ModelPolicy(Json.decodeFromString(it[ModelPolicies.allowedModels]), Json.decodeFromString(it[ModelPolicies.deniedModels]), Json.decodeFromString(it[ModelPolicies.allowedEfforts]), it[ModelPolicies.maximumThinkingTokens]) } ?: ModelPolicy()
+    .singleOrNull()?.let { ModelPolicy(Json.decodeFromString(it[ModelPolicies.allowedModels]), Json.decodeFromString(it[ModelPolicies.deniedModels]), Json.decodeFromString(it[ModelPolicies.allowedEfforts]), it[ModelPolicies.maximumThinkingTokens], it[ModelPolicies.experimentalCrossProviderTranslation]) } ?: ModelPolicy()

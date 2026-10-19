@@ -9,6 +9,7 @@ object ModelPolicies : Table("model_policies") {
     val deniedModels = text("denied_models")
     val allowedEfforts = text("allowed_efforts")
     val maximumThinkingTokens = long("maximum_thinking_tokens")
+    val experimentalCrossProviderTranslation = bool("experimental_cross_provider_translation").default(false)
     override val primaryKey = PrimaryKey(teamId)
 }
 object ModelRoutes : Table("model_routes") {

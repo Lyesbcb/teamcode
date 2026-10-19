@@ -60,6 +60,8 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                         if (protocol == null) false else {
                             val targets = ResolveRouteUseCase().resolve(routes, context.requested, protocol)
                             val permitted = try {
+                                val nativeProvider = if (protocol == WireProtocol.MESSAGES) "anthropic" else "codex"
+                                if (context.target.provider != nativeProvider) CheckModelPolicyUseCase().checkTranslation(modelPolicy)
                                 CheckModelPolicyUseCase().check(modelPolicy, context.requested, context.target.model!!, context.effort, context.thinkingTokens)
                                 true
                             } catch (_: TeamFailure) { false }

@@ -7,6 +7,7 @@ data class ModelPolicy(
     val deniedModels: List<String> = listOf("*fable*"),
     val allowedEfforts: List<String> = listOf("provider-default", "low", "medium", "high", "max", "xhigh", "budgeted"),
     val maximumThinkingTokens: Long = 32_768,
+    val experimentalCrossProviderTranslation: Boolean = false,
 )
 interface ModelPolicyStore {
     suspend fun get(teamId: String): ModelPolicy
@@ -32,6 +33,10 @@ class CheckModelPolicyUseCase {
         if (thinkingTokens != null && ("budgeted" !in policy.allowedEfforts || thinkingTokens < 0 || thinkingTokens > policy.maximumThinkingTokens)) {
             throw TeamFailure("thinking_budget_not_allowed", 403, "Explicit thinking budgets are disabled or exceed the configured thinking-token ceiling.")
         }
+    }
+    fun checkTranslation(policy: ModelPolicy) {
+        if (!policy.experimentalCrossProviderTranslation) throw TeamFailure("translation_disabled", 422,
+            "Cross-provider translation is experimental and disabled. Ask an administrator to enable it in model settings, or use the native provider.")
     }
     companion object { val EFFORTS = setOf("provider-default", "none", "minimal", "low", "medium", "high", "max", "xhigh", "budgeted") }
 }

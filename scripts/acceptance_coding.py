@@ -68,10 +68,11 @@ def run_agent(command, work, env):
 
 
 def run_coding_tasks(args, binary, root, env, request, token, log):
+    policy = json.loads(request('/api/v1/policy/models', token=token)[1])
+    policy['experimentalCrossProviderTranslation'] = True
     if args.coding_reasoning == 'portable':
-        policy = json.loads(request('/api/v1/policy/models', token=token)[1])
         policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
-        assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
+    assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
     target_codex = args.codex_model or 'gpt-6-luna'
     directions = ('claude', 'codex') if args.coding_task == 'both' else (args.coding_task,)
     for agent in directions:

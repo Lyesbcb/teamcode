@@ -62,19 +62,20 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
         for (target in targets) {
             val resolved = target.model ?: model
             val attemptedAccounts = attemptedTargets.getOrPut(target.provider to resolved) { mutableSetOf() }
-            CheckModelPolicyUseCase().check(policy, model, resolved, effort, thinkingBudget)
             val transport = transports.singleOrNull { it.provider == target.provider }
                 ?: throw TeamFailure("unsupported_provider", 400, "The configured route provider is unavailable.")
             val translated = transport.protocol != request.protocol
             var conversation: Conversation? = null
             val outgoing = try {
+                if (translated) CheckModelPolicyUseCase().checkTranslation(policy)
+                CheckModelPolicyUseCase().check(policy, model, resolved, effort, thinkingBudget)
                 if (translated) {
                     conversation = codecs.decode(body, request.protocol)
                     codecs.encode(conversation, transport.protocol, resolved)
                 }
                 else JsonObject(body + ("model" to JsonPrimitive(resolved)))
             } catch (error: TeamFailure) {
-                if (error.code != "translation_unsupported") throw error
+                if (error.code !in setOf("translation_unsupported", "translation_disabled")) throw error
                 translationFailure = error
                 continue // A native/compatible target can still preserve this request unchanged.
             }

@@ -9,7 +9,7 @@ This is the target sequence; see [V1 progress](progress.md) for the current over
 | J2 | Reliable pool, refresh serialization, all quota windows, bounded failover and session affinity | Exhaustion, concurrent refresh, early/late stream errors and disconnects reproduced | 1–2 weeks |
 | J3 | Members/groups/devices, durable reservations, fair scheduling, protected pools, audit | Heavy member cannot starve a protected colleague; restart/revocation cannot reset allowance | 1–2 weeks |
 | J4 | Forecasting and predictive pacing, directives and local hooks, forecast UI | Replayed load slows/recovers without oscillation; delivery distinguished from enforcement | 1–2 weeks |
-| J5 | Catalog, Responses/Codex and explicit translation | Real multi-tool code task for every advertised route; unsupported capabilities rejected | 2–4 weeks |
+| J5 | Catalog and native Responses/Codex support | Real multi-tool code tasks for advertised native routes; experimental translation is not a V1 gate | 2–4 weeks |
 | J6 | Native releases, user/system service installers, updates, recovery and operations | Clean installs on target OSes, boot/logon reconnection, restoration and rollback demonstrated | 1–2 weeks |
 
 First PR/commit sequence: document architecture; wire seven modules and enforce graph; deterministic streaming upstream and native proxy; team/device identity; real provider enrollment; provider reliability; team product; controller; multi-model compatibility. Keep slices runnable and push tested milestones.
@@ -25,13 +25,17 @@ Tests use synthetic fixtures and local fake providers. Real-provider acceptance 
 - Atomic quota admission, missing-usage reconciliation, fair interactive access and protected pool isolation.
 - Forecasts handle resets, outside spend, stale measurements and unknown capacity without accelerating blindly.
 - Directed advice is sparse, expiring and acknowledged honestly; no arbitrary process termination.
-- Multi-model tool loops and result correctness, not just text responses.
+- Native-provider model/account tool loops and result correctness, not just text responses. Cross-provider translation and its reasoning compatibility remain experimental outside V1 acceptance.
 - Dashboard authorization/CSRF, audit, revocation and route explanations.
 - Service install/uninstall idempotence, boot/logon behavior, locked keychain/offline recovery and draining updates.
 
+## Experimental: cross-provider translation
+
+At the owner's request on 2026-10-19, Claude/Codex protocol conversion is disabled by default behind the persistent administrator setting `experimentalCrossProviderTranslation`. Native subscription pools, same-provider model/account fallback and their acceptance remain V1. Full-default cross-provider reasoning, unsupported tool grammars and experimental translation acceptance must not delay V1. Administrators can opt in through model settings or the model-policy API; known compatibility limits still apply when enabled.
+
 ## V2: open-source model providers
 
-The first open-source model provider is deferred to V2. V1 supports pooled Claude Max and Codex subscriptions, including explicitly supported routes between them. Keep the provider and protocol interfaces extensible; implementing or accepting an OSS backend is not a V1 release gate.
+The first open-source model provider is deferred to V2. V1 supports pooled Claude Max and Codex subscriptions through their native protocols. Cross-provider translation is an optional experiment, not a V1 release gate. Keep the provider and protocol interfaces extensible; implementing or accepting an OSS backend is not a V1 release gate.
 
 ## V2: centrally managed MCP servers and skills
 
@@ -48,7 +52,8 @@ TeamCode will extend team administration to agent tools and reusable skills. Thi
 
 ### Skill catalog and synchronization
 
-- Administrators manage a versioned skill catalog in the dashboard, pin approved versions and assign skills to members or groups. Provide update, rollback and removal controls.
+- Administrators manage a versioned skill catalog in the dashboard, pin approved versions and assign skill access to members or groups. Provide update, rollback and removal controls. Skills use versioned artifacts and yes/no access assignments, not the environment/MCP variant mechanism.
+- Populate the catalog through GitHub synchronization or publication through the API from a CI pipeline; decide whether to support one or both sources when designing V2. Define explicit published versions and authenticated publishing permissions, keeping a reproducible approved version for installation and rollback.
 - The native CLI synchronizes assigned skills into an isolated, agent-compatible local installation before `teamcode run`. Preserve personal skills and report naming conflicts explicitly.
 - Track installation/version status separately from permission to use protected resources. Skills are instructions and files loaded by the agent, not server-executed MCP tools.
 - Do not treat downloaded skill files as an access-control mechanism: users can copy instructions they have received. Enforce access to protected tools, credentials and data at the MCP gateway or backing service.
@@ -88,3 +93,17 @@ Acceptance direction: create sessions by API and CLI using a selected custom too
 - Acceptance: exercise personal and administrator keys against session creation, ownership transfer, transcripts and quota/status reads; demonstrate denied cross-member access for personal keys, administrator orchestration, immediate revocation and consistent CLI/API JSON values. Endpoint names, scopes and response schemas remain to be discussed.
 
 The cloud-specific operations and automation surface above are V2. This does not defer the already planned V1 scoped service/CI credentials or existing account/status API capabilities; V2 extends those foundations.
+
+
+### Environment/MCP variants and per-user assignments
+
+Use one variant-assignment model for cloud environment variables and MCP servers/configuration. Administrators define named variants and assign the selected variant to each authorized user; a user without an assigned variant has neither the environment variable nor MCP access. Shared/global values are reusable variants, not an implicit grant to every user. Provide bulk assignment with explicit exclusions and per-user variant selection; define any later group/default precedence without changing the no-assignment rule.
+
+- **Environment variables:** variants contain the variable values required by an execution environment, using shared values or individual-user values. Support excluding selected users even when a shared variant is assigned in bulk. Keep secret values encrypted and out of transcripts/logs; expose only authorized values to that user's cloud execution. Define whether variants group variables or belong to individual variables before fixing the contract.
+- **MCP:** variants define a server's endpoint, configuration and credential binding, allowing shared team configuration or individual delegated credentials. Assignment controls both discovery and server-side tool invocation. Removing an assignment or disabling a user removes access; retaining an old local MCP configuration must not bypass the gateway.
+- Show effective assignments in the dashboard and expose them through the authorized API. Persist variant versions and assignments for consistent behavior across replicas. On cloud creation, resume or ownership transfer, resolve the effective user's assignments again; do not retain the former owner's environment secrets or MCP credentials. Define explicit refresh/revocation behavior for running sessions rather than silently restarting active work.
+- Acceptance: two users receive different variants of the same variable/MCP, a third without an assignment receives none, and a user explicitly excluded from bulk assignment stays excluded. Verify assignment changes, current-user authorization, MCP direct-call denial, resume and ownership transfer without former-owner resource access.
+
+Skills remain a separate versioned catalog with access assignments, described above. A user without skill access receives no provisioned copy. On session creation/resume/transfer, resolve the new effective user's authorized pinned catalog artifacts. Already delivered skill files cannot be made secret again; enforce protected tool/data access independently.
+
+Exact environment/MCP variant granularity, assignment UI/API and update semantics remain V2 design discussions. The GitHub-versus-CI-API skill publication choice is also open; no skill variants are planned at this stage.

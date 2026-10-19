@@ -1,6 +1,6 @@
-# Default-reasoning portability acceptance
+# Experimental default-reasoning portability acceptance
 
-Cross-provider coding tasks currently pass with the portable profile, which explicitly disables reasoning. Default-reasoning compatibility remains a V1 gate. Native same-protocol requests preserve provider-specific fields; translating a request is a separate capability.
+Cross-provider coding tasks currently pass with the portable profile, which explicitly disables reasoning. At the owner's request, cross-provider conversion is now experimental, disabled by default and excluded from V1 release acceptance. Its default-reasoning compatibility remains unfinished. Native same-protocol requests preserve provider-specific fields; translating a request is a separate capability.
 
 ## Reproducing the gate
 
@@ -18,11 +18,11 @@ python3 scripts/acceptance-provider.py \
   --codex-model gpt-6-luna
 ```
 
-Use `--claude`/`--codex` to select actual installed executables when terminal integrations insert shims. The fixture imports access-only credentials into its disposable encrypted database, never refreshes them, and removes its own database/processes on exit. Real-provider tests are opt-in and must never be part of ordinary CI. Selecting `default` must not silently fall back to the portable profile to obtain a passing result.
+Use `--claude`/`--codex` to select actual installed executables when terminal integrations insert shims. The fixture imports access-only credentials into its disposable encrypted database, never refreshes them, and removes its own database/processes on exit. Real-provider tests are opt-in and must never be part of ordinary CI. The coding fixture explicitly enables the experiment in its disposable server. Selecting `default` must not silently fall back to the portable profile to obtain a passing result.
 
 ## Observed failures on 2026-10-19
 
-The installed Claude Code 2.1.302 and Codex 0.163.0 were tested individually against forced cross-provider routes. Both coding tasks failed before a provider inference dispatch; neither changed the task source. These are failures of the release gate, not accepted portability cases.
+The installed Claude Code 2.1.302 and Codex 0.163.0 were tested individually against forced cross-provider routes. Both coding tasks failed before a provider inference dispatch; neither changed the task source. These are failures of experimental compatibility acceptance, not accepted portability cases.
 
 A separate loopback-only capture, without real provider traffic, observed these configuration fields:
 

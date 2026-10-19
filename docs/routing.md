@@ -15,6 +15,14 @@ Examples (verify exact model availability for your accounts):
 
 Omitting a target model retains the requested model. Custom aliases need a matching route and must also be permitted by the model policy. Both the requested model and the selected target model are checked; an alias cannot hide a forbidden model. Efforts are carried explicitly, without silently lowering or raising them. Incompatible effort values fail at the provider or compatibility check.
 
+## Experimental conversion setting
+
+Cross-provider translation is **experimental and disabled by default**. An administrator can enable **Experimental cross-provider translation** in **Dashboard → Models**, or set `experimentalCrossProviderTranslation: true` using `PUT /api/v1/policy/models` while retaining the other policy fields. `GET /api/v1/policy/models` exposes the effective value. Missing/older policy values default to false. The setting is stored in MySQL and shared across replicas; changes use the existing administrator authorization, CSRF protection and model-policy audit.
+
+While disabled, targets requiring protocol conversion are skipped, including a remembered affinity to an experimental target. Compatible native targets in the same configured route remain eligible, and native account/model fallback continues. A route containing only disabled targets fails before reservation/provider dispatch with HTTP 422 `translation_disabled`; native targets that exhaust eligible capacity still return their normal capacity error. A newly disabled experiment is rechecked before queued admission and is excluded from capacity guidance. Already dispatched work is allowed to finish; changing this setting does not replay or terminate committed streams. Upgrade every replica before relying on the setting, since older binaries do not enforce it.
+
+The following mapping examples apply to cross-provider targets only when the experiment is enabled. Full-default reasoning compatibility is unfinished and does not block V1 native-provider acceptance. The opt-in conversion/coding acceptance fixtures enable the flag only in their disposable test server.
+
 ## Admission and fallback
 
 Every attempt uses the member's assigned pool, weight, hard limits, concurrent limit and pacing directive. Fallback cannot escape a protected pool or a depleted member allowance. Account-specific quota windows use the resolved model.
@@ -66,7 +74,7 @@ python3 scripts/acceptance-provider.py \
 
 Verified with Claude Code 2.1.302 requesting `claude-haiku-4-5-20251001`, routed to the Codex subscription model `gpt-6-luna`: eight requests settled and all four independent tests passed. This uses the portable reasoning-disabled profile and isolated built-in tools; it is not full-default-client acceptance or proof of a mid-conversation provider switch.
 
-For the reverse direction, use `--coding-task codex --codex /path/to/actual/codex`. Codex 0.163.0 requesting `gpt-6-luna` completed the same coding task through the real Claude Max model `claude-haiku-4-5-20251001`: sixteen requests settled, the source was corrected, the test file was unchanged and all four independent tests passed. This exercises `additional_tools`, namespaced function/custom text tools, replayed history and verbosity. Reasoning was explicitly disabled and the destination was forced from the first turn. Full-default reasoning, other tool grammars and actual quota/reset-boundary fallback remain V1 acceptance work. Controlled mid-conversation acceptance is described below.
+For the reverse direction, use `--coding-task codex --codex /path/to/actual/codex`. Codex 0.163.0 requesting `gpt-6-luna` completed the same coding task through the real Claude Max model `claude-haiku-4-5-20251001`: sixteen requests settled, the source was corrected, the test file was unchanged and all four independent tests passed. This exercises `additional_tools`, namespaced function/custom text tools, replayed history and verbosity. Reasoning was explicitly disabled and the destination was forced from the first turn. Full-default reasoning, other tool grammars and actual cross-provider quota/reset-boundary fallback remain experimental acceptance work outside V1. Controlled mid-conversation acceptance is described below.
 
 
 ## Mid-conversation fallback acceptance
@@ -83,7 +91,7 @@ python3 scripts/acceptance-provider.py \
 
 Every client inference must return HTTP 200 from the expected provider/model. Response request IDs correlate to provider dispatches and usage settlements; extra attempts are allowed only when they settled with zero charge before a safe retry. The route must retain its original version and targets. The same source-change, unchanged-test and four independent test assertions apply. The fixture's HTTP forwarding, exact history preservation, authentication and cleanup have provider-free tests in CI.
 
-Removing account availability exercises a real conversation switch without intentionally exhausting a subscription. It is not proof of an actual provider quota reset, a signed/encrypted reasoning transfer or every client default. These remain separate acceptance gates.
+Removing account availability exercises a real conversation switch without intentionally exhausting a subscription. It is not proof of an actual provider quota reset, a signed/encrypted reasoning transfer or every client default. These remain separate experimental acceptance gates; native-provider quota/reset behavior remains V1.
 
 Verified on macOS ARM64 with reasoning disabled:
 

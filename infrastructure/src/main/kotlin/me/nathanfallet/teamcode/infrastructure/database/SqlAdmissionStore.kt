@@ -40,7 +40,10 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         context?.let {
             val modelPolicy = readModelPolicy(actor.teamId)
             CheckModelPolicyUseCase().check(modelPolicy, it.requestedModel, model, it.effort, it.thinkingTokens)
-            if (it.translated) CheckModelPolicyUseCase().check(modelPolicy, it.requestedModel, model, it.targetEffort, null)
+            if (it.translated) {
+                CheckModelPolicyUseCase().checkTranslation(modelPolicy)
+                CheckModelPolicyUseCase().check(modelPolicy, it.requestedModel, model, it.targetEffort, null)
+            }
             if (ResolveRouteUseCase().resolve(readRoutes(actor.teamId), it.requestedModel, it.protocol) != it.targets) {
                 throw TeamFailure("route_changed", 409, "The configured route changed while waiting. Submit the request again.")
             }
