@@ -2,11 +2,11 @@
 
 **Dashboard → Groups** lets an interactive team administrator create groups, set their daily credit and concurrency caps, archive/restore them, and assign members and group managers. The deployment still has one team; groups do not create tenants. There is no public registration or email dependency.
 
-Group roles are scoped assignments, independent of global `ADMIN`/`MEMBER` roles:
+Group roles are scoped assignments, independent of global [`OWNER`/`ADMIN`/`MEMBER` roles](team-roles.md):
 
 | Actor | Group access |
 | --- | --- |
-| Team administrator | All groups, full roster, budgets, archive/restore, assignments and group roles, admission pause/resume |
+| Owner or team administrator | All groups, full roster, budgets, archive/restore, assignments and group roles, admission pause/resume |
 | Group `MANAGER` | Own active groups, their full roster and aggregate usage, pause/resume admission for existing members |
 | Group `MEMBER` | Own active groups, aggregate usage and their own assignment |
 | Nonmember | No group visibility or control |

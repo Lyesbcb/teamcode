@@ -63,7 +63,7 @@ Track installed/running/authenticated/connected states separately. Retry network
 - Personal account: own usage, reservations, device management, CLI integration and refusal explanations.
 - Operations: audit history, versions, provider failures and dependency health.
 
-Proposed first UI: server-rendered FreeMarker with targeted client-side updates and SSE charts. Backend API remains usable independently. Roles: owner, admin, group manager, member and service identity. Team authentication uses administrator-created usernames and passwords, with no public registration, email infrastructure or mandatory external identity provider. First startup on an empty database creates `admin` and prints its temporary password once. It must be changed before other actions. Admin-created accounts follow the same temporary-password flow; password resets and role changes revoke sessions.
+Proposed first UI: server-rendered FreeMarker with targeted client-side updates and SSE charts. Backend API remains usable independently. Roles: owner, admin, group manager, member and service identity. [Owner/admin/member and scoped-manager authority](team-roles.md) is implemented; other planned dashboard/session work remains tracked separately. Team authentication uses administrator-created usernames and passwords, with no public registration, email infrastructure or mandatory external identity provider. First startup on an empty database creates `admin` and prints its temporary password once. It must be changed before other actions. Admin-created accounts follow the same temporary-password flow; password resets and role changes revoke sessions.
 
 ## Capacity and fairness
 

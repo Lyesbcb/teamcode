@@ -52,8 +52,13 @@ internal fun Route.dashboardRoutes(team: TeamService, publicOrigin: String) {
     get("/dashboard/members") {
         val actor = call.principal
         val members = team.members(actor)
-        val rows = members.joinToString("") { member -> """<tr><td>${escape(member.username)}<br><a href="/dashboard/members/${escape(member.id)}/devices">Devices and sessions</a> <a href="/dashboard/members/${escape(member.id)}/service-keys">Service keys</a><br><small>${if (member.passwordChangeRequired) "Password change required" else "Active password"}</small></td><td><form action="/dashboard/members/${escape(member.id)}/update" method="post">${csrf(actor)}<select name="role"><option ${if (member.role == Role.MEMBER) "selected" else ""}>MEMBER</option><option ${if (member.role == Role.ADMIN) "selected" else ""}>ADMIN</option></select><label><input type="checkbox" name="disabled" ${if (member.disabled) "checked" else ""}> Disabled</label><button>Save access</button></form></td><td><form action="/dashboard/members/${escape(member.id)}/reset" method="post">${csrf(actor)}<button>Reset password</button></form></td></tr>""" }
-        call.respondText(page("Team members", """<p>Create accounts directly. There is no public registration or email delivery.</p><table><thead><tr><th>Member</th><th>Access</th><th>Recovery</th></tr></thead><tbody>$rows</tbody></table><h2>Add a member</h2><form method="post">${csrf(actor)}<label>Username <input name="username" minlength="3" maxlength="64" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}"></label><label>Role <select name="role"><option>MEMBER</option><option>ADMIN</option></select></label><button>Create member</button></form>"""), ContentType.Text.Html)
+        val rows = members.joinToString("") { member ->
+            val protectedOwner = member.role == Role.OWNER && actor.member.role != Role.OWNER
+            val access = if (protectedOwner) "OWNER · only an owner can change this account" else """<form action="/dashboard/members/${escape(member.id)}/update" method="post">${csrf(actor)}${memberRoleSelect(actor, member.role)}<label><input type="checkbox" name="disabled" ${if (member.disabled) "checked" else ""}> Disabled</label><button>Save access</button></form>"""
+            val recovery = if (protectedOwner) "Owner recovery is restricted" else """<form action="/dashboard/members/${escape(member.id)}/reset" method="post">${csrf(actor)}<button>Reset password</button></form>"""
+            """<tr><td>${escape(member.username)}<br><a href="/dashboard/members/${escape(member.id)}/devices">Devices and sessions</a> <a href="/dashboard/members/${escape(member.id)}/service-keys">Service keys</a><br><small>${if (member.passwordChangeRequired) "Password change required" else "Active password"}</small></td><td>$access</td><td>$recovery</td></tr>"""
+        }
+        call.respondText(page("Team members", """<p>Create accounts directly. There is no public registration or email delivery. Owners control ownership and owner recovery. Keep another enabled owner with a changed password before relinquishing ownership; role changes sign the affected account out.</p><table><thead><tr><th>Member</th><th>Access</th><th>Recovery</th></tr></thead><tbody>$rows</tbody></table><h2>Add a member</h2><form method="post">${csrf(actor)}<label>Username <input name="username" minlength="3" maxlength="64" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}"></label>${memberRoleSelect(actor, Role.MEMBER)}<button>Create member</button></form>"""), ContentType.Text.Html)
     }
     post("/dashboard/members") {
         val input = call.form(origin)
@@ -71,3 +76,9 @@ internal fun Route.dashboardRoutes(team: TeamService, publicOrigin: String) {
     }
 }
 private fun temporaryPassword(created: NewMember) = page("Temporary password", """<p>Share this password with <strong>${escape(created.member.username)}</strong>. It is displayed only in this response. They must change it before using TeamCode.</p><code>${escape(created.temporaryPassword)}</code><p><a href="/dashboard/members">Return to team</a></p>""")
+
+/** Role controls reflect authority, while the transactional service remains the enforcement boundary. */
+private fun memberRoleSelect(actor: Principal, selected: Role): String {
+    val roles = listOf(Role.MEMBER, Role.ADMIN) + if (actor.member.role == Role.OWNER) listOf(Role.OWNER) else emptyList()
+    return "<label>Role <select name=\"role\">" + roles.joinToString("") { "<option ${if (it == selected) "selected" else ""}>${it.name}</option>" } + "</select></label>"
+}

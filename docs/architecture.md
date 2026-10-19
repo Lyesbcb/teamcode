@@ -120,3 +120,6 @@ See the [TeamClaude comparison](teamclaude-comparison.md) for behavioral differe
 
 
 `GroupService` / `GroupServiceImpl` provide scoped manager administration and cumulative group budgets through Exposed. Admission snapshots original group IDs and shares the existing team transaction; settlement has one reservation-unit source, with no duplicate group counter. Group roles are independent of global member roles. The presentation exposes typed resources/API DTOs and escaped CSRF-protected forms, while the client depends only on API contracts. See [groups and upgrade semantics](groups.md).
+
+
+Global `OWNER` authority is derived from `members.is_owner`, preserving the legacy base-role encoding during upgrades. `CheckMemberAccessUseCase` guards ownership/recovery, and `SqlTeamService` applies those rules under the team lock with current identity and credential revocation. Owners share the ordinary quota ledger. See [role and legacy-upgrade semantics](team-roles.md).

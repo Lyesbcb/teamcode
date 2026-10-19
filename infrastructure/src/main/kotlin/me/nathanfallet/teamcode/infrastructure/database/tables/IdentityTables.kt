@@ -14,12 +14,17 @@ object Members : Table("members") {
     val username = varchar("username", 64)
     val passwordHash = varchar("password_hash", 255)
     val role = varchar("role", 16)
+    // Keep the legacy base role readable by older binaries during a rolling upgrade.
+    val isOwner = bool("is_owner").default(false)
     val disabled = bool("disabled").default(false)
     val mustChangePassword = bool("must_change_password").default(true)
     val failedLogins = integer("failed_logins").default(0)
     val lockedUntil = long("locked_until").default(0)
     override val primaryKey = PrimaryKey(id)
-    init { uniqueIndex("member_username", teamId, username) }
+    init {
+        uniqueIndex("member_username", teamId, username)
+        index("team_owners", false, teamId, isOwner, disabled, mustChangePassword)
+    }
 }
 object Tokens : Table("tokens") {
     val id = varchar("id", 36)

@@ -13,7 +13,7 @@ internal fun Route.groupDashboardRoutes(groups: GroupService, team: TeamService,
         val rows = groups.list(actor).joinToString("") { group ->
             """<tr><td><a href="/dashboard/groups/${escape(group.group.id)}">${escape(group.group.name)}</a>${if (group.group.archived) " · archived" else ""}</td><td>${group.usage.chargedAndReservedUnits} / ${cap(group.group.dailyUnits)} daily credits</td><td>${group.usage.activeRequests} / ${cap(group.group.maxConcurrent.toLong())} active requests</td><td>${if (group.canManage) "Manager access" else "Member access"}</td></tr>"""
         }
-        val create = if (actor.member.role == Role.ADMIN) "<h2>Create a group</h2>" + groupPolicyForm(actor, "/dashboard/groups", null) else ""
+        val create = if (actor.member.role.isAdministrator) "<h2>Create a group</h2>" + groupPolicyForm(actor, "/dashboard/groups", null) else ""
         call.respondText(page("Groups", """<p>$GROUP_HELP</p><table><thead><tr><th>Group</th><th>Budget</th><th>Concurrency</th><th>Access</th></tr></thead><tbody>$rows</tbody></table>$create"""), ContentType.Text.Html)
     }
     post("/dashboard/groups") {
@@ -29,13 +29,13 @@ internal fun Route.groupDashboardRoutes(groups: GroupService, team: TeamService,
         val base = "/dashboard/groups/${escape(group.id)}"
         val rows = detail.members.joinToString("") { member ->
             val memberBase = "$base/members/${escape(member.memberId)}"
-            val edit = if (actor.member.role == Role.ADMIN && !group.archived) """<form method="post" action="$memberBase">${csrf(actor)}${groupRoleSelect(member.role)}<label><input type="checkbox" name="paused" ${if (member.paused) "checked" else ""}> Admission paused</label><button>Save assignment</button></form>""" else escape(member.role.name)
+            val edit = if (actor.member.role.isAdministrator && !group.archived) """<form method="post" action="$memberBase">${csrf(actor)}${groupRoleSelect(member.role)}<label><input type="checkbox" name="paused" ${if (member.paused) "checked" else ""}> Admission paused</label><button>Save assignment</button></form>""" else escape(member.role.name)
             val pause = if (summary.canManage) """<form method="post" action="$memberBase/pause">${csrf(actor)}<input type="hidden" name="paused" value="${!member.paused}"><button>${if (member.paused) "Resume" else "Pause"} admission</button></form>""" else ""
-            val remove = if (actor.member.role == Role.ADMIN) """<form method="post" action="$memberBase/remove">${csrf(actor)}<button>Remove assignment</button></form>""" else ""
+            val remove = if (actor.member.role.isAdministrator) """<form method="post" action="$memberBase/remove">${csrf(actor)}<button>Remove assignment</button></form>""" else ""
             """<tr><td>${escape(member.username)}${if (member.disabled) " · globally disabled" else ""}<br><small>${if (member.paused) "Admission paused" else "Admission enabled"}</small></td><td>$edit</td><td>$pause$remove</td></tr>"""
         }
-        val policy = if (actor.member.role == Role.ADMIN) "<h2>Group policy</h2>" + groupPolicyForm(actor, base, group) else ""
-        val assign = if (actor.member.role == Role.ADMIN && !group.archived) {
+        val policy = if (actor.member.role.isAdministrator) "<h2>Group policy</h2>" + groupPolicyForm(actor, base, group) else ""
+        val assign = if (actor.member.role.isAdministrator && !group.archived) {
             val options = team.members(actor).joinToString("") { "<option value='${escape(it.id)}'>${escape(it.username)}</option>" }
             """<h2>Assign a member</h2><form method="post" action="$base/members">${csrf(actor)}<label>Member <select name="memberId">$options</select></label>${groupRoleSelect(GroupRole.MEMBER)}<button>Assign member</button></form>"""
         } else ""

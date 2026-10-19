@@ -12,14 +12,14 @@ class GroupServiceImpl(private val database: Database) : GroupService {
         authorize(this, actor)
         val assigned = GroupMembers.select(GroupMembers.groupId).where { GroupMembers.memberId eq actor.member.id }
         val groups = TeamGroups.selectAll().where {
-            (TeamGroups.teamId eq actor.teamId) and (if (actor.member.role == Role.ADMIN) Op.TRUE else
+            (TeamGroups.teamId eq actor.teamId) and (if (actor.member.role.isAdministrator) Op.TRUE else
                 (TeamGroups.archived eq false) and (TeamGroups.id inSubQuery assigned))
         }.orderBy(TeamGroups.name to SortOrder.ASC, TeamGroups.id to SortOrder.ASC).limit(MAX_GROUPS).map(::groupRecord)
         val managers = GroupMembers.select(GroupMembers.groupId).where {
             (GroupMembers.memberId eq actor.member.id) and (GroupMembers.role eq GroupRole.MANAGER.name)
         }.limit(MAX_MEMBERSHIPS).map { it[GroupMembers.groupId] }.toSet()
         val usage = readGroupUsage(actor.teamId, groups.map { it.id }, nowMillis())
-        groups.map { GroupSummary(it, usage.getValue(it.id), actor.member.role == Role.ADMIN || it.id in managers) }
+        groups.map { GroupSummary(it, usage.getValue(it.id), actor.member.role.isAdministrator || it.id in managers) }
     }
 
     override suspend fun get(actor: Principal, groupId: String): GroupDetail = database.query {
@@ -94,7 +94,7 @@ class GroupServiceImpl(private val database: Database) : GroupService {
     private fun access(actor: Principal, groupId: String): Access {
         val group = TeamGroups.selectAll().where { (TeamGroups.id eq groupId) and (TeamGroups.teamId eq actor.teamId) }
             .singleOrNull()?.let(::groupRecord) ?: throw notFound()
-        if (actor.member.role == Role.ADMIN) return Access(group, true)
+        if (actor.member.role.isAdministrator) return Access(group, true)
         if (group.archived) throw notFound()
         val role = GroupMembers.select(GroupMembers.role).where { (GroupMembers.groupId eq groupId) and (GroupMembers.memberId eq actor.member.id) }
             .singleOrNull()?.get(GroupMembers.role) ?: throw notFound()

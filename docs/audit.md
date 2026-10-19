@@ -27,6 +27,7 @@ The API returns at most 50 events, newest identifier first. Response shape (even
 
 ## Current coverage
 
+- Ownership grants/removal and one-time legacy ownership migration (`member.owner_granted`, `member.owner_removed`, `member.owner_migrated`); [recovery and role rules](team-roles.md).
 - First administrator creation (`member.bootstrap`), successful login/logout, password replacement/reset, member creation and access changes.
 - Device registration/rename/revocation and explicit authentication-session revocation.
 - Service/CI credential creation and revocation, including self-revocation through logout.
@@ -39,7 +40,7 @@ Account writes and their audit event commit in the same team-locked transaction.
 
 Existing events remain readable after the additive index migration; historical unaudited operations are not reconstructed. Upgrade every replica before relying on complete attribution and account-write authorization fencing, because older binaries do not enforce this new path.
 
-This is an administrative/authentication journal, not the inference request ledger. Existing request/settlement metadata and directive receipts remain separate. Automatic refresh, every failed login and every automatic session expiry/rotation are not individually journaled here. Cascading session revocations are represented by their triggering password/member/device event. Additional global roles, agent-run administration, retention/export and operational audit coverage remain V1 acceptance work; this page does not claim a complete compliance archive.
+This is an administrative/authentication journal, not the inference request ledger. Existing request/settlement metadata and directive receipts remain separate. Automatic refresh, every failed login and every automatic session expiry/rotation are not individually journaled here. Cascading session revocations are represented by their triggering password/member/device event. Agent-run administration, retention/export and operational audit coverage remain V1 acceptance work; this page does not claim a complete compliance archive.
 
 ## Reference and verification
 

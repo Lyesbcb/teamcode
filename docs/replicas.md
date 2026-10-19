@@ -5,7 +5,7 @@ Application replicas share one MySQL database and one credential encryption key.
 | State | Durable coordination |
 | --- | --- |
 | First administrator | Team row lock and committed creation; only the creator receives the temporary password |
-| Sessions, revocation and team roles | Hashed session tokens and current member state read from MySQL |
+| Sessions, revocation and team roles | Hashed session tokens, effective ownership and current member state read from MySQL; ownership/recovery changes serialize under the team lock |
 | Global login budget | One shared database-clock fixed window, 120 attempts/minute across API/dashboard/replicas; per-member lockout also persists |
 | Admission, weighted budgets and concurrency | Team lock, fresh authorization, atomic reservation across member/group/account/pool constraints |
 | Groups and delegated managers | Shared scoped assignments, current authorization, cumulative caps and original reservation/group snapshots; no process cache |

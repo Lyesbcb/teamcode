@@ -96,12 +96,19 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         status, body = request(origins[0], '/api/v1/auth/login', {'username': 'admin', 'password': bootstrap[0]})
         assert status == 200
         temporary_token = json.loads(body)['accessToken']
+        assert json.loads(body)['member']['role'] == 'OWNER'
         assert request(origins[1], '/api/v1/auth/me', token=temporary_token)[0] == 200
         assert request(origins[1], '/api/v1/auth/password', {'currentPassword': bootstrap[0], 'newPassword': password}, temporary_token)[0] == 200
         assert request(origins[0], '/api/v1/auth/me', token=temporary_token)[0] == 401
         status, body = request(origins[0], '/api/v1/auth/login', {'username': 'admin', 'password': password})
         assert status == 200
         token = json.loads(body)['accessToken']
+        assert json.loads(body)['member']['role'] == 'OWNER'
+        owner_id = json.loads(body)['member']['id']
+        status, body = request(origins[1], '/api/v1/members/' + owner_id, {'role': 'ADMIN', 'disabled': False}, token, method='PATCH')
+        assert status == 409 and json.loads(body)['error']['type'] == 'last_owner'
+        status, body = request(origins[1], '/api/v1/members/' + owner_id + '/reset-password', {}, token)
+        assert status == 409 and json.loads(body)['error']['type'] == 'last_owner'
         status, body = request(origins[1], '/api/v1/forecasts', token=token)
         forecast = json.loads(body)
         assert status == 200 and forecast['account'] is None and forecast['windows'] == []

@@ -80,6 +80,7 @@ class DatabaseRestoreTest {
                     assertNull(team.bootstrap(), "Restoration must not generate another administrator password")
                     assertTrue(before == snapshot(restored, key, fixture), "Restored durable state differs from the quiesced snapshot")
                     val admin = assertNotNull(team.authenticate(fixture.admin.token))
+                    assertEquals(Role.OWNER, admin.member.role, "Restoration must preserve ownership without another bootstrap")
                     assertNull(team.authenticate(fixture.revokedToken), "A pre-backup revocation was lost")
                     assertNull(team.authenticate(fixture.revokedKey), "A revoked API key was resurrected")
                     val decrypted = SqlAccountStore(restored, CredentialCipher(key)).credentials("default", fixture.accountId)
