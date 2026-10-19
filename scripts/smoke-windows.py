@@ -309,6 +309,7 @@ try:
             token = process.env.TEAMCODE_LOCAL_TOKEN;
             stage = 'codex-guidance';
             for (const [offset, event] of [[8, 'UserPromptSubmit'], [6, 'PreToolUse']]) {
+              stage = 'codex-hook-definition-' + event;
               assert.strictEqual(args[end-offset], '-c');
               const definition = args[end-offset+1];
               assert(definition.startsWith('hooks.' + event + '='));
@@ -319,7 +320,11 @@ try:
               const output = require('child_process').spawnSync(hookCommand, {
                 shell:true, input:JSON.stringify({session_id:'windows-smoke',hook_event_name:event,tool_input:'private-tool-input'}), encoding:'utf8',timeout:6000
               });
-              assert.strictEqual(output.status, 0); assert.strictEqual(output.stderr, '');
+              stage = 'codex-hook-exit-' + output.status + '-signal-' + output.signal + '-error-' + (output.error?.code || 'none');
+              assert.strictEqual(output.status, 0);
+              stage = 'codex-hook-stderr-' + (output.stderr?.includes('CLIXML') ? 'clixml' : 'text');
+              assert.strictEqual(output.stderr, '');
+              stage = 'codex-hook-output-' + event;
               assert.deepStrictEqual(JSON.parse(output.stdout), {});
             }
             args = args.slice(0, end-8).concat(args.slice(end));
