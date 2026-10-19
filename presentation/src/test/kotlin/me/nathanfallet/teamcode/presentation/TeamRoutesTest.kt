@@ -10,6 +10,37 @@ import kotlin.test.*
 import me.nathanfallet.teamcode.domain.routing.*
 
 class TeamRoutesTest {
+    @Test fun sessionGuidanceUsesAuthenticatedMemberAndExplicitClaims() = testApplication {
+        var claimed = false
+        var acknowledged = false
+        val directives = object : me.nathanfallet.teamcode.domain.capacity.DirectiveService {
+            override suspend fun current(actor: Principal, sessionId: String?) = null
+            override suspend fun claim(actor: Principal, sessionId: String, stage: String): me.nathanfallet.teamcode.domain.capacity.DirectiveDelivery? {
+                assertEquals(Role.MEMBER, actor.member.role)
+                assertEquals("test-session", sessionId)
+                assertEquals("EMITTED_TO_HOOK", stage)
+                claimed = true
+                return me.nathanfallet.teamcode.domain.capacity.DirectiveDelivery(
+                    me.nathanfallet.teamcode.domain.capacity.AgentDirective("directive", actor.member.id,
+                        me.nathanfallet.teamcode.domain.capacity.PacingAdvice(me.nathanfallet.teamcode.domain.capacity.Pace.SLOW_DOWN, 1, 10000, "Slow optional work."), 1, Long.MAX_VALUE), "claim")
+            }
+            override suspend fun acknowledge(actor: Principal, id: String, stage: String, sessionId: String?, claimId: String?) {
+                assertEquals(listOf("directive", "EMITTED_TO_HOOK", "test-session", "claim"), listOf(id, stage, sessionId, claimId)); acknowledged = true
+            }
+        }
+        application { configureGateway(NoGateway(), team = FakeTeam(), directives = directives) }
+        val body = """{"sessionId":"test-session","stage":"EMITTED_TO_HOOK"}"""
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/api/v1/directives/claim") { contentType(ContentType.Application.Json); setBody(body) }.status)
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/api/v1/directives/claim") { header(HttpHeaders.Cookie, "teamcode_session=member"); contentType(ContentType.Application.Json); setBody(body) }.status)
+        val response = client.post("/api/v1/directives/claim") { bearerAuth("member"); contentType(ContentType.Application.Json); setBody(body) }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.bodyAsText().contains("Slow optional work."))
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/directives/receipt") {
+            bearerAuth("member"); contentType(ContentType.Application.Json)
+            setBody("""{"id":"directive","sessionId":"test-session","stage":"EMITTED_TO_HOOK","claimId":"claim"}""")
+        }.status)
+        assertTrue(claimed && acknowledged)
+    }
     @Test fun registrationIsAbsentAndTemporaryPasswordCannotReachInference() = testApplication {
         val team = FakeTeam()
         application { configureGateway(NoGateway(), team = team, publicOrigin = "http://localhost") }

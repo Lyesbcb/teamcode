@@ -95,6 +95,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         assert self.headers.get('Authorization') == 'Bearer ' + team_token
         assert self.headers.get('x-api-key') is None
+        if self.path == '/api/v1/directives/claim':
+            assert set(json.loads(body)) == {'sessionId', 'stage'}
+            data = b'{"directive":null}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         assert self.path in ('/v1/messages', '/v1/responses')
         assert json.loads(body)['model'] == 'fixture'
         calls.append(self.path)
@@ -277,6 +286,22 @@ try:
           if (name === 'claude') {
             assert(!process.env.ANTHROPIC_AUTH_TOKEN && !process.env.CLAUDE_CODE_OAUTH_TOKEN);
             url = process.env.ANTHROPIC_BASE_URL + '/v1/messages'; token = process.env.ANTHROPIC_API_KEY;
+            assert.strictEqual(args[0], '--plugin-dir');
+            const path = require('path'), plugin = args[1];
+            assert.strictEqual(JSON.parse(fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).name, 'teamcode-guidance');
+            const hooks = JSON.parse(fs.readFileSync(path.join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks;
+            const hook = hooks.PreToolUse[0].hooks[0];
+            assert(!JSON.stringify(hooks).includes(token));
+            assert.strictEqual(process.env.TEAMCODE_HOOK_TOKEN, token);
+            const payload = JSON.stringify({session_id:'windows-smoke', hook_event_name:'PreToolUse', tool_input:'private-tool-input'});
+            const guidance = await new Promise((resolve, reject) => {
+              const request = http.request(hook.url, {method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(payload),'Authorization':'Bearer '+token}}, response => {
+                assert.strictEqual(response.statusCode, 200); let text='';
+                response.on('data', chunk => text += chunk); response.on('end', () => resolve(text));
+              }); request.on('error', reject); request.end(payload);
+            });
+            assert.deepStrictEqual(JSON.parse(guidance), {});
+            args = args.slice(2);
           } else {
             let end = args.indexOf('--'); if (end < 0) end = args.length;
             assert.deepStrictEqual(args.slice(end-4, end-2), ['-c', 'model_provider="teamcode"']);

@@ -17,16 +17,18 @@ class Agents : SuspendingNoOpCliktCommand(name = "agents") {
     init { subcommands(Watch(), Hint()) }
 }
 private class Watch : SuspendingCliktCommand(name = "watch") {
+    private val session by option("--session")
     override fun help(context: Context) = "Print fresh guidance updates as JSON lines. This never launches or terminates tasks."
     override suspend fun run() {
         sdk(loadConfig()).use { client ->
             var previous: String? = null
             while (currentCoroutineContext().isActive) {
                 try {
-                    val value = client.directive().directive
-                    if (value != null && value.id != previous && value.expiresAtMillis > Clock.System.now().toEpochMilliseconds()) {
+                    val claim = session?.let { client.claimDirective(it, "RECEIVED_BY_CLI") }
+                    val value = if (session == null) client.directive().directive else claim?.directive
+                    if (value != null && (session == null || claim?.claimId != null) && value.id != previous && value.expiresAtMillis > Clock.System.now().toEpochMilliseconds()) {
                         echo(Serialization.json.encodeToString(value))
-                        client.acknowledgeDirective(value.id, "RECEIVED_BY_CLI")
+                        client.acknowledgeDirective(value.id, "RECEIVED_BY_CLI", session, claim?.claimId)
                         previous = value.id
                     }
                 } catch (error: CancellationException) { throw error }
@@ -37,6 +39,7 @@ private class Watch : SuspendingCliktCommand(name = "watch") {
     }
 }
 private class Hint : SuspendingCliktCommand(name = "hint") {
+    private val session by option("--session", help = "Client session identifier; only new guidance for this session is emitted.").required()
     private val format by option("--format").default("text")
     override fun help(context: Context) = "Emit current guidance for an agent hook. --format claude emits PreToolUse additional context."
     override suspend fun run() {
@@ -44,14 +47,16 @@ private class Hint : SuspendingCliktCommand(name = "hint") {
         // A guidance outage must not block an agent hook; server-side admission remains authoritative.
         try {
             sdk(loadConfig()).use { client ->
-                val value = client.directive().directive ?: return@use
+                val claim = client.claimDirective(session, "EMITTED_TO_HOOK")
+                if (claim.claimId == null) return@use
+                val value = claim.directive ?: return@use
                 if (value.expiresAtMillis <= Clock.System.now().toEpochMilliseconds()) return@use
                 when (format) {
                     "json" -> echo(Serialization.json.encodeToString(value))
                     "claude" -> echo(buildJsonObject { putJsonObject("hookSpecificOutput") { put("hookEventName", "PreToolUse"); put("additionalContext", "TeamCode capacity guidance: ${value.message}") } }.toString())
                     else -> echo(value.message)
                 }
-                client.acknowledgeDirective(value.id, "EMITTED_TO_HOOK")
+                client.acknowledgeDirective(value.id, "EMITTED_TO_HOOK", session, claim.claimId)
             }
         } catch (error: CancellationException) { throw error }
         catch (_: Exception) { /* No raw errors or secrets in model context. */ }

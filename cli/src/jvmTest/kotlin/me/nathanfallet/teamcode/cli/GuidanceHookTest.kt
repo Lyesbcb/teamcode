@@ -1,0 +1,66 @@
+package me.nathanfallet.teamcode.cli
+
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.http.*
+import io.ktor.http.content.TextContent
+import io.ktor.server.testing.testApplication
+import kotlinx.serialization.json.*
+import me.nathanfallet.teamcode.cli.proxy.localProxy
+import me.nathanfallet.teamcode.client.TeamCodeClient
+import kotlin.test.*
+
+class GuidanceHookTest {
+    private val localToken = "synthetic-guidance-local-capability-1234"
+    @Test fun sessionOnlyClaimAndReceiptNeverTransmitToolContent() = testApplication {
+        val calls = mutableListOf<Pair<String, JsonObject>>()
+        var emitted = false
+        val sdk = TeamCodeClient("https://team.example", { "server-secret" }) { configure -> HttpClient(MockEngine { request ->
+            assertEquals("Bearer server-secret", request.headers[HttpHeaders.Authorization])
+            val body = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+            calls += request.url.encodedPath to body
+            assertFalse(body.toString().contains("private-tool-input"))
+            val response = when (request.url.encodedPath) {
+                "/api/v1/directives/claim" -> if (emitted) """{"directive":null}""" else """{"claimId":"claim","directive":{"id":"directive","pace":"SLOW_DOWN","maxConcurrent":1,"minIntervalMillis":10000,"message":"Reduce optional parallel work.","createdAtMillis":1,"expiresAtMillis":9223372036854775807}}"""
+                "/api/v1/directives/receipt" -> { emitted = true; """{"success":true}""" }
+                else -> error("Unexpected management call")
+            }
+            respond(response, headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }) { configure(this) } }
+        application { localProxy(sdk, localToken) }
+        try {
+            suspend fun hook(event: String = "PreToolUse", content: String = "private-tool-input") = client.post("/_teamcode/hooks/claude") {
+                bearerAuth(localToken); contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("session_id", "test-session"); put("hook_event_name", event); put("tool_input", content); put("transcript_path", "private-tool-input") }.toString())
+            }
+            val first = hook().bodyAsText()
+            assertTrue(first.contains("Reduce optional parallel work."))
+            assertFalse(first.contains("permissionDecision"))
+            assertEquals(setOf("sessionId", "stage"), calls.first().second.keys)
+            assertEquals("claim", calls.last().second["claimId"]!!.jsonPrimitive.content)
+            assertEquals("{}", hook("UserPromptSubmit").bodyAsText())
+            val count = calls.size
+            assertEquals("{}", hook(content = "x".repeat(65_537)).bodyAsText())
+            assertEquals("{}", hook("Stop").bodyAsText())
+            assertEquals(count, calls.size)
+            assertEquals(HttpStatusCode.Unauthorized, client.post("/_teamcode/hooks/claude").status)
+            assertEquals(HttpStatusCode.Forbidden, client.post("/_teamcode/hooks/claude") { bearerAuth(localToken); header(HttpHeaders.Origin, "https://browser.example") }.status)
+        } finally { sdk.close() }
+    }
+    @Test fun unavailableGuidanceReturnsEmptyContextWithoutProviderDiagnostics() = testApplication {
+        val sdk = TeamCodeClient("https://team.example", { "token" }) { configure -> HttpClient(MockEngine {
+            respond("sensitive-upstream-diagnostic", HttpStatusCode.ServiceUnavailable)
+        }) { configure(this) } }
+        application { localProxy(sdk, localToken) }
+        try {
+            val response = client.post("/_teamcode/hooks/claude") {
+                bearerAuth(localToken); contentType(ContentType.Application.Json)
+                setBody("""{"session_id":"test","hook_event_name":"PreToolUse"}""")
+            }
+            assertEquals(HttpStatusCode.OK, response.status)
+            assertEquals("{}", response.bodyAsText())
+        } finally { sdk.close() }
+    }
+}

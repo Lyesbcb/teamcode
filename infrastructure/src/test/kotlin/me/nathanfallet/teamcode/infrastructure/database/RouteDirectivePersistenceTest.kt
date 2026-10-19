@@ -1,6 +1,6 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import me.nathanfallet.teamcode.domain.accounts.*
@@ -46,17 +46,18 @@ class RouteDirectivePersistenceTest {
                         AccountQuota(account.id, window, if (window.startsWith("model:")) .99 else value, now - age - 120_000 + index * 60_000, now + 3_600_000)
                     } })
                 }
-                suspend fun context(account: AccountRecord, requested: String = "claude-opus-test", resolved: String = requested, effort: String? = null) {
+                suspend fun context(account: AccountRecord, requested: String = "claude-opus-test", resolved: String = requested, effort: String? = null, session: String = "test-session", retain: Boolean = false): RequestAffinity {
                     val protocol = if (requested.startsWith("claude")) WireProtocol.MESSAGES else WireProtocol.RESPONSES
                     val targets = ResolveRouteUseCase().resolve(routing.list("default"), requested, protocol)
                     var body = Json.parseToJsonElement("""{"messages":[{"role":"user","content":"synthetic"}],"input":"synthetic"}""").jsonObject
                     if (effort != null) body = kotlinx.serialization.json.JsonObject(body + ((if (protocol == WireProtocol.MESSAGES) "output_config" else "reasoning") to kotlinx.serialization.json.buildJsonObject { put("effort", kotlinx.serialization.json.JsonPrimitive(effort)) }))
-                    val hint = SessionAffinityKey.from(mapOf("session-id" to "test-session"), body, protocol, requested, targets)!!
+                    val hint = SessionAffinityKey.from(mapOf("session-id" to session), body, protocol, requested, targets)!!
                     a.transaction { c ->
                         c.lockTeam("default")
-                        c.execute("DELETE FROM conversation_affinities WHERE member_id = ?", actor.member.id)
+                        if (!retain) c.execute("DELETE FROM conversation_affinities WHERE member_id = ?", actor.member.id)
                         SqlSessionAffinity().record(c, actor, hint, RouteTarget(account.identity.provider, resolved), account.id, c.nowMillis())
                     }
+                    return hint
                 }
                 suspend fun pace(controller: SqlDirectiveService = controllerB): AgentDirective {
                     controller.update()
@@ -72,7 +73,7 @@ class RouteDirectivePersistenceTest {
                 assertEquals(Pace.SLOW_DOWN, slow.advice.pace, "Idle Codex cannot hide active Claude burn")
                 observations(claude, listOf(.1, .1, .1))
                 assertEquals(slow.id, pace().id, "Recovery does not immediately bounce back to acceleration")
-                val started = a.transaction { it.rows("SELECT recovery_started_at FROM directives WHERE member_id = ?", actor.member.id) { row -> row.getLong(1) }.single() }
+                val started = a.transaction { it.rows("SELECT recovery_started_at FROM directives WHERE scope_key = '' AND member_id = ?", actor.member.id) { row -> row.getLong(1) }.single() }
                 assertTrue(started > 0)
                 assertEquals(slow.id, pace(controllerA).id, "Another replica resumes the same pending recovery")
                 a.transaction { it.execute("UPDATE directives SET recovery_started_at = recovery_started_at - 120001 WHERE member_id = ?", actor.member.id) }
@@ -117,6 +118,63 @@ class RouteDirectivePersistenceTest {
                 assertEquals(Pace.CAN_INCREASE, pace().advice.pace, "A changed budget invalidates the allowance pause")
                 admission.configure(actor, MemberPolicy(actor.member.id, weight = 0))
                 assertEquals(Pace.PAUSE, pace().advice.pace, "Zero weighted share cannot advertise acceleration")
+
+                admission.configure(actor, MemberPolicy(actor.member.id, maxConcurrent = 4))
+                observations(claude, listOf(.1, .2, .3))
+                observations(codex, listOf(.1, .1, .1))
+                // The previous .99 observation is a different synthetic scenario; clear its admission snapshot too.
+                a.transaction { it.execute("DELETE FROM quota_windows WHERE account_id = ?", claude.id) }
+                observations(claude, listOf(.1, .2, .3))
+                val slowHint = context(claude, session = "slow-session")
+                val fastHint = context(codex, "gpt-6-astra", session = "fast-session", retain = true)
+                assertEquals(Pace.SLOW_DOWN, pace().advice.pace)
+                assertEquals(1, a.transaction { it.rows("SELECT COUNT(*) FROM directives WHERE member_id = ?", actor.member.id) { row -> row.getInt(1) }.single() }, "Legacy readers still see one member directive during rolling upgrades")
+                assertEquals(2, a.transaction { it.rows("SELECT COUNT(*) FROM session_directives WHERE member_id = ? AND scope_key IN (?, ?)", actor.member.id, slowHint.sessionKey, fastHint.sessionKey) { row -> row.getInt(1) }.single() })
+                assertEquals(Pace.SLOW_DOWN, controllerA.current(actor, "slow-session")!!.advice.pace)
+                assertEquals(Pace.CAN_INCREASE, controllerB.current(actor, "fast-session")!!.advice.pace)
+                assertNull(controllerA.current(actor, "absent-session"))
+                val slowRequest = admission.reserve(actor, 100, "claude-opus-test", affinity = slowHint)
+                val freshSession = fastHint.copy(sessionKey = "e".repeat(64), conversationKey = "f".repeat(64))
+                val firstTurn = admission.reserve(actor, 100, "gpt-6-astra", "codex", affinity = freshSession)
+                admission.settle(firstTurn, 0)
+                val fastRequests = (1..2).map { admission.reserve(actor, 100, "gpt-6-astra", "codex", affinity = fastHint) }
+                assertEquals("pacing_delay", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> {
+                    admission.reserve(actor, 100, "claude-opus-test", affinity = slowHint)
+                }.code)
+                admission.configure(actor, MemberPolicy(actor.member.id, maxConcurrent = 3))
+                assertEquals("member_concurrency", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> {
+                    admission.reserve(actor, 100, "gpt-6-astra", "codex", affinity = fastHint)
+                }.code, "Per-session advice never bypasses the member's hard concurrency limit")
+                admission.configure(actor, MemberPolicy(actor.member.id, maxConcurrent = 4))
+                (fastRequests + slowRequest).forEach { admission.settle(it, 0) }
+
+                val colleague = team.createMember(actor, "guidance-colleague", me.nathanfallet.teamcode.domain.team.Role.MEMBER)
+                val firstLogin = team.login("guidance-colleague", colleague.temporaryPassword, "test")
+                team.changePassword(firstLogin.principal, colleague.temporaryPassword, "guidance colleague replacement")
+                val other = team.login("guidance-colleague", "guidance colleague replacement", "test").principal
+                assertNull(controllerB.current(other, "slow-session"), "Session identifiers never grant another member's guidance")
+                assertNull(controllerB.claim(other, "slow-session", "EMITTED_TO_HOOK"))
+                val stage = "EMITTED_TO_HOOK"
+                val competing = coroutineScope { listOf(controllerA, controllerB).map { controller -> async { controller.claim(actor, "slow-session", stage) } }.awaitAll() }
+                val delivered = competing.filterNotNull().single()
+                controllerB.acknowledge(actor, delivered.directive.id, stage, "slow-session", delivered.claimId)
+                assertNull(controllerA.claim(actor, "slow-session", stage), "Acknowledged versions are suppressed across replicas")
+                assertNotNull(controllerB.claim(actor, "slow-session", "RECEIVED_BY_CLI"), "Watching does not consume the hook delivery stage")
+                val lost = controllerA.claim(actor, "fast-session", stage)!!
+                a.transaction { it.execute("UPDATE directive_deliveries SET claimed_until = 0 WHERE claim_id = ?", lost.claimId) }
+                val retry = controllerB.claim(actor, "fast-session", stage)!!
+                assertNotEquals(lost.claimId, retry.claimId)
+                assertEquals("claim_expired", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> {
+                    controllerA.acknowledge(actor, lost.directive.id, stage, "fast-session", lost.claimId)
+                }.code)
+                controllerA.acknowledge(actor, retry.directive.id, stage, "fast-session", retry.claimId)
+                assertNull(controllerB.claim(actor, "fast-session", stage))
+                assertEquals("invalid_session", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> { controllerA.claim(actor, "bad session", stage) }.code)
+                a.transaction { it.execute("UPDATE conversation_affinities SET last_seen_at = 0") }
+                assertNull(controllerB.current(actor, "fast-session"), "An inactive session cannot receive old acceleration")
+                team.logout(actor)
+                assertEquals("authentication_required", assertFailsWith<me.nathanfallet.teamcode.domain.team.TeamFailure> { controllerB.current(actor, "slow-session") }.code)
+
             } }
         }
     }

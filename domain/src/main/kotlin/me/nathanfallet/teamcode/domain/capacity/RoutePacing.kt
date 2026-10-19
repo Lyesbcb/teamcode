@@ -25,8 +25,8 @@ class RoutePacingUseCase(private val pacing: PacingUseCase = PacingUseCase()) {
             }
             pacing.advise(windows, minOf(maximum, maxOf(1, windows.size * 2)))
         }
-        // The current delivery contract is member-wide. Never tell all of a member's
-        // sessions to accelerate because only one of their active targets has spare quota.
+        // One scope may use several targets. Never advise acceleration merely because
+        // one target is idle while another active target in the same scope is pressured.
         val selected = advice.maxBy { when (it.pace) {
             Pace.CAN_INCREASE -> 0; Pace.NORMAL -> 1; Pace.UNKNOWN -> 2; Pace.SLOW_DOWN -> 3; Pace.PAUSE -> 4
         } }

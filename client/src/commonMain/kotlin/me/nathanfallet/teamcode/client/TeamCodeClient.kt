@@ -60,8 +60,10 @@ class TeamCodeClient(
     suspend fun changePassword(current: String, replacement: String): SuccessResponse =
         request("/api/v1/auth/password", HttpMethod.Post, PasswordRequest(current, replacement))
     suspend fun logout(): SuccessResponse = request("/api/v1/auth/logout", HttpMethod.Post)
-    suspend fun directive(): DirectiveResponse = request("/api/v1/directives/current", HttpMethod.Get)
-    suspend fun acknowledgeDirective(id: String, stage: String): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage))
+    suspend fun directive(sessionId: String? = null): DirectiveResponse = if (sessionId == null)
+        request("/api/v1/directives/current", HttpMethod.Get) else request("/api/v1/directives/current", HttpMethod.Post, DirectiveScope(sessionId))
+    suspend fun claimDirective(sessionId: String, stage: String): DirectiveClaimResponse = request("/api/v1/directives/claim", HttpMethod.Post, DirectiveClaimRequest(sessionId, stage))
+    suspend fun acknowledgeDirective(id: String, stage: String, sessionId: String? = null, claimId: String? = null): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage, sessionId, claimId))
     suspend fun capacity(): CapacityView = request("/api/v1/capacity", HttpMethod.Get)
     suspend fun accounts(): List<AccountView> = request("/api/v1/accounts", HttpMethod.Get)
     suspend fun enrollAccount(input: EnrollAccountRequest): EnrollAccountResponse = request("/api/v1/accounts", HttpMethod.Post, input)

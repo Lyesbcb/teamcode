@@ -7,4 +7,10 @@ data class DirectiveView(val id: String, val pace: String, val maxConcurrent: In
 @Serializable
 data class DirectiveResponse(val directive: DirectiveView?)
 @Serializable
-data class DirectiveReceipt(val id: String, val stage: String)
+data class DirectiveReceipt(val id: String, val stage: String, val sessionId: String? = null, val claimId: String? = null)
+@Serializable
+data class DirectiveScope(val sessionId: String)
+@Serializable
+data class DirectiveClaimRequest(val sessionId: String, val stage: String)
+@Serializable
+data class DirectiveClaimResponse(val directive: DirectiveView?, val claimId: String? = null)

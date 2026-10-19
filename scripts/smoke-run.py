@@ -34,12 +34,29 @@ with tempfile.TemporaryDirectory(prefix='teamcode-run-smoke-') as directory:
 import json, os, pathlib, signal, sys, tomllib, urllib.request
 name = pathlib.Path(sys.argv[0]).name
 arguments = sys.argv[1:]
+plugin = None
 if name == 'claude':
     assert 'ANTHROPIC_AUTH_TOKEN' not in os.environ
     assert 'CLAUDE_CODE_OAUTH_TOKEN' not in os.environ
     origin = os.environ['ANTHROPIC_BASE_URL']
     token = os.environ['ANTHROPIC_API_KEY']
     route = '/v1/messages'
+    if os.environ.get('TEAMCODE_TEST_GUIDANCE', '1') == '1':
+        assert arguments[0] == '--plugin-dir'
+        plugin = pathlib.Path(arguments[1])
+        assert json.loads((plugin / '.claude-plugin/plugin.json').read_text())['name'] == 'teamcode-guidance'
+        hooks = json.loads((plugin / 'hooks/hooks.json').read_text())['hooks']
+        hook = hooks['PreToolUse'][0]['hooks'][0]
+        assert token not in json.dumps(hooks)
+        assert os.environ['TEAMCODE_HOOK_TOKEN'] == token
+        request = urllib.request.Request(hook['url'], json.dumps({'session_id':'native-smoke','hook_event_name':'PreToolUse','tool_input':'private-tool-input'}).encode(),
+            {'Content-Type':'application/json','Authorization':'Bearer '+token})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.load(response) == {}, 'A fixture without guidance should not inject context'
+        arguments = arguments[2:]
+    else:
+        assert 'TEAMCODE_HOOK_TOKEN' not in os.environ
+        assert not arguments or arguments[0] != '--plugin-dir'
 else:
     end = arguments.index('--') if '--' in arguments else len(arguments)
     assert arguments[end-4:end-2] == ['-c', 'model_provider="teamcode"']
@@ -57,7 +74,7 @@ req = urllib.request.Request(origin + route, json.dumps(payload).encode(),
                              {'Content-Type':'application/json','Authorization':'Bearer '+token})
 with urllib.request.urlopen(req, timeout=15) as response:
     assert response.status == 200 and b'message_stop' in response.read()
-pathlib.Path(os.environ['TEAMCODE_RUN_RECORD']).write_text(json.dumps({'args':arguments,'origin':origin,'cwd':os.getcwd()}))
+pathlib.Path(os.environ['TEAMCODE_RUN_RECORD']).write_text(json.dumps({'args':arguments,'origin':origin,'cwd':os.getcwd(),'plugin':str(plugin) if plugin else None}))
 print('CHILD_STDOUT_OK', flush=True)
 print('CHILD_STDERR_OK', file=sys.stderr, flush=True)
 if '--signal-test' in arguments:
@@ -87,17 +104,18 @@ sys.exit(37)
         original_config = config.read_bytes()
         supplied = ['--dangerously-skip-permissions', '--model', 'literal model with spaces',
                     '-p', 'literal $(touch should-not-exist); "quotes"\nand a newline']
-        def launch(name, arguments=supplied, expected=37):
+        def launch(name, arguments=supplied, expected=37, guidance=True):
             record = root / (name + ('-signal' if expected != 37 else '') + '.json')
-            result = subprocess.run([binary, 'run', name, '--', *arguments],
+            result = subprocess.run([binary, 'run', name, *([] if guidance else ['--no-guidance']), '--', *arguments],
                                     input='stdin reaches the child\n', text=True, capture_output=True,
-                                    env=dict(env, TEAMCODE_RUN_RECORD=str(record)), cwd=root, timeout=45)
+                                    env=dict(env, TEAMCODE_RUN_RECORD=str(record), TEAMCODE_TEST_GUIDANCE='1' if guidance and '--bare' not in arguments else '0'), cwd=root, timeout=45)
             assert result.returncode == expected, f'{name} launch failed with exit code {result.returncode}'
             assert result.stdout == 'CHILD_STDOUT_OK\n', 'Wrapper logs contaminated agent stdout'
             assert 'CHILD_STDERR_OK' in result.stderr
             assert token not in result.stdout + result.stderr
             recorded = json.loads(record.read_text())
             assert recorded['args'] == arguments, 'Agent arguments changed'
+            if recorded['plugin']: assert not Path(recorded['plugin']).exists(), 'Ephemeral plugin was not removed'
             assert Path(recorded['cwd']).resolve() == root.resolve(), 'Working directory changed'
             local_port = int(recorded['origin'].rsplit(':', 1)[1])
             with socket.socket() as probe:
@@ -108,6 +126,8 @@ sys.exit(37)
             ports = list(pool.map(launch, ['claude', 'codex']))
         assert len(set(ports)) == 2
         launch('claude', ['--signal-test'], 143)
+        launch('claude', guidance=False)
+        launch('claude', ['--bare', 'literal'])
         launch('codex', ['exec', '--ignore-user-config', '--json', 'Literal prompt'])
         launch('codex', ['exec', 'resume', '--last', '--', '-literal prompt'])
         assert config.read_bytes() == original_config

@@ -27,12 +27,17 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         requireCurrent(c, actor)
         val policy = readMemberPolicy(c, actor.member.id)
         val current = readMemberCapacity(c, policy, now, actor.teamId)
-        val directive = c.rows("SELECT max_concurrent, min_interval FROM directives WHERE member_id = ? AND expires_at > ? AND pace IN ('SLOW_DOWN', 'PAUSE')", actor.member.id, now) { it.getInt(1) to it.getLong(2) }.singleOrNull()
-        if (directive != null) {
-            val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ? AND units > 0", actor.member.id, now / DAY) { it.getLong(1) }.single()
-            if (now - last < directive.second) throw TeamFailure("pacing_delay", 429, "Quota burn is high. Wait briefly before the next request.")
+        val scope = affinity?.sessionKey.orEmpty()
+        val directiveTable = if (scope.isEmpty()) "directives" else "session_directives"
+        val directive = c.rows("SELECT scope_key, max_concurrent, min_interval FROM $directiveTable WHERE member_id = ? AND scope_key = ? AND expires_at > ?", actor.member.id, scope, now) { Triple(it.getString(1), it.getInt(2), it.getLong(3)) }.singleOrNull()
+        if (current.activeRequests >= policy.maxConcurrent) throw TeamFailure("member_concurrency", 429, "Your concurrent request limit has been reached.")
+        if (directive != null && directive.third > 0) {
+            val sessionScope = directive.first.takeIf { it.isNotEmpty() }
+            val last = c.rows("SELECT MAX(created_at) FROM reservations WHERE member_id = ? AND day_number = ? AND units > 0 AND (? IS NULL OR session_key = ?)", actor.member.id, now / DAY, sessionScope, sessionScope) { it.getLong(1) }.single()
+            if (now - last < directive.third) throw TeamFailure("pacing_delay", 429, "Quota burn is high. Wait briefly before the next request.")
+            val active = if (sessionScope == null) current.activeRequests else c.rows("SELECT COUNT(*) FROM reservations WHERE member_id = ? AND session_key = ? AND state = 'ACTIVE' AND expires_at > ?", actor.member.id, sessionScope, now) { it.getInt(1) }.single()
+            if (active >= directive.second) throw TeamFailure("pacing_concurrency", 429, "This session's paced concurrent request limit has been reached.")
         }
-        if (current.activeRequests >= minOf(policy.maxConcurrent, directive?.first ?: policy.maxConcurrent)) throw TeamFailure("member_concurrency", 429, "Your concurrent request limit has been reached.")
         if (units > current.dailyAllowanceUnits - current.chargedAndReservedUnits) throw TeamFailure("member_allowance", 429, "Your daily allowance has insufficient remaining units for this request.")
         val poolSpent = c.rows("SELECT COALESCE(SUM(units), 0) FROM reservations WHERE team_id = ? AND pool_id = ? AND day_number = ?", actor.teamId, policy.poolId.orEmpty(), now / DAY) { it.getLong(1) }.single()
         if (units > current.poolDailyUnits - poolSpent) throw TeamFailure("pool_allowance", 429, "This pool's daily team budget has been reserved or consumed.")
@@ -50,7 +55,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         }, pins) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
         affinity?.let { affinities.record(c, actor, it, RouteTarget(provider, model), chosen.id, now) }
         val id = UUID.randomUUID().toString()
-        c.execute("INSERT INTO reservations (id, team_id, member_id, account_id, day_number, units, state, expires_at, created_at, pool_id) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)", id, actor.teamId, actor.member.id, chosen.id, now / DAY, units, now + 15 * 60_000, now, policy.poolId.orEmpty())
+        c.execute("INSERT INTO reservations (id, team_id, member_id, account_id, day_number, units, state, expires_at, created_at, pool_id, session_key) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)", id, actor.teamId, actor.member.id, chosen.id, now / DAY, units, now + 15 * 60_000, now, policy.poolId.orEmpty(), affinity?.sessionKey)
         Reservation(id, chosen, units)
     }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {
@@ -116,10 +121,6 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     }
     private fun ensureMember(c: Connection, team: String, member: String) {
         if (c.rows("SELECT id FROM members WHERE team_id = ? AND id = ?", team, member) { it.getString(1) }.isEmpty()) throw TeamFailure("not_found", 404, "Member not found.")
-    }
-    private fun requireCurrent(c: Connection, actor: Principal) {
-        val row = c.rows("SELECT m.role FROM tokens t JOIN members m ON m.id = t.member_id WHERE t.id = ? AND m.id = ? AND m.team_id = ? AND m.disabled = FALSE AND m.must_change_password = FALSE AND t.expires_at > ?", actor.tokenId, actor.member.id, actor.teamId, c.nowMillis()) { it.getString(1) }.singleOrNull()
-        if (row == null || row != actor.member.role.name) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
     }
     private fun quota(r: ResultSet) = AccountQuota(r.getString("account_id"), r.getString("window_name"), r.getDouble("utilization"), r.getLong("observed_at"), r.getLong("resets_at"))
     companion object { private const val DAY = 86_400_000L }

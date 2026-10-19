@@ -2,7 +2,7 @@
 
 An open-source, self-hosted model gateway for teams: pooled provider accounts, fair access, predictive capacity management, a web dashboard, and a native Kotlin Multiplatform CLI.
 
-**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit model routes, a limited cross-provider function-tool profile and macOS/Linux user service installation are implemented; opaque reasoning compatibility, Windows and system services remain in progress. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
+**Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit model routes, a limited cross-provider function-tool profile and macOS/Linux user service installation are implemented; opaque reasoning compatibility, system services before login and versioned distribution remain in progress. Native Windows runtime and user service acceptance have passed. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
 
 ## Run the team server
 
@@ -105,7 +105,7 @@ The dashboard exposes member weights, per-member concurrency and optional hard d
 
 Default model policy permits `claude-*` and `gpt-*` (existing saved policies are not broadened) and denies `*fable*`. Administrators can set allowed/denied patterns and reasoning efforts in `/dashboard/models`. Requests are rejected before dispatch when a policy is violated. No effort is silently replaced.
 
-`teamcode agents watch` prints expiring guidance updates. `teamcode agents hint --format claude` emits Claude Code PreToolUse additional context; receipt records mean delivery by the CLI, not proof that the model complied. Server admission enforces concurrency and pacing independently. See [capacity behavior](docs/capacity.md).
+`teamcode run claude -- ...` automatically adds temporary HTTP hooks for scoped, deduplicated guidance without editing personal settings. Use `--no-guidance` before `--` to opt out. `teamcode agents watch --session SESSION_ID` prints scoped updates; `teamcode agents hint --session SESSION_ID --format claude` supports manual bridges. Receipts record bridge emission, not model compliance. Codex automatic context injection remains planned; its guidance is accessible through the same CLI/API. See [agent guidance](docs/agent-guidance.md) and [capacity behavior](docs/capacity.md).
 
 Real-provider acceptance is explicitly opt-in and never runs in CI:
 

@@ -11,10 +11,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.client.TeamCodeClient
 
-/** Fixed Messages/Responses routes only. No CONNECT or arbitrary destination. */
+/** Fixed inference and local guidance routes. No CONNECT or arbitrary destination. */
 fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBodyBytes: Int = 2 * 1024 * 1024, serviceId: String? = null, serverUrl: String? = null) {
     require(localToken.length >= 32) { "A local proxy token of at least 32 characters is required." }
     routing {
+        guidanceHook(client, localToken)
         if (serviceId != null) get("/_teamcode/service") {
             if (!equalToken(call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer "), localToken)) {
                 call.respond(HttpStatusCode.Unauthorized)
@@ -84,7 +85,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
     }
 }
 
-private fun equalToken(presented: String?, expected: String): Boolean {
+internal fun equalToken(presented: String?, expected: String): Boolean {
     if (presented == null) return false
     var difference = presented.length xor expected.length
     for (index in expected.indices) {
