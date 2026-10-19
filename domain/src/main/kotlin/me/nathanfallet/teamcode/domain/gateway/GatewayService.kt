@@ -13,4 +13,4 @@ interface GatewayService {
     suspend fun status(): GatewaySnapshot
 }
 
-data class GatewaySnapshot(val mode: String, val active: Int, val completed: Long)
+data class GatewaySnapshot(val mode: String, val active: Int, val completed: Long, val queued: Int = 0)

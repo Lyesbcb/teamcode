@@ -6,6 +6,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.http.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.gateway.*
@@ -21,6 +22,69 @@ import kotlinx.serialization.json.*
 import io.ktor.http.content.TextContent
 
 class PoolGatewayTest {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun temporaryAdmissionPressureWaitsAndKeepsWorkloadOutOfProviderHeaders() = runTest {
+        val store = FakeAdmission(account)
+        var polls = 0
+        var dispatched = 0
+        val queue = object : AdmissionQueueStore {
+            override suspend fun enqueue(actor: Principal, input: AdmissionInput): AdmissionTicket {
+                assertEquals(Workload.BACKGROUND, input.workload)
+                assertEquals("claude-opus-test", input.context?.requestedModel)
+                return AdmissionTicket("pending")
+            }
+            override suspend fun reserveQueued(actor: Principal, ticket: AdmissionTicket, input: AdmissionInput): Reservation {
+                if (++polls < 3) throw TeamFailure("member_concurrency", 429, "Temporarily occupied")
+                return store.reserve(actor, input.units, input.model, input.provider, input.excludedAccountIds, input.affinity)
+            }
+            override suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean) { assertTrue(blocked) }
+            override suspend fun release(actor: Principal, ticket: AdmissionTicket) = Unit
+        }
+        HttpClient(MockEngine(MockEngineConfig().apply {
+            dispatcher = UnconfinedTestDispatcher(testScheduler)
+            addHandler { req ->
+            dispatched++
+            assertEquals(3, polls)
+            assertNull(req.headers["x-teamcode-workload"])
+            respond(FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            }
+        })) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), FakeModelPolicies(), queued = AwaitAdmissionUseCase(queue))
+            gateway.forward(request().copy(headers = mapOf("x-teamcode-workload" to "background"))) { head, chunks ->
+                assertEquals(200, head.status); chunks.collect { }
+            }
+            assertEquals(1, dispatched)
+            assertEquals("invalid_workload", assertFailsWith<TeamFailure> {
+                gateway.forward(request().copy(headers = mapOf("x-teamcode-workload" to "urgent"))) { _, _ -> fail("No dispatch") }
+            }.code)
+        }
+    }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun boundedQueueTimeoutTriesConfiguredFallbackInsteadOfClaimingExhaustion() = runTest {
+        val store = FakeAdmission(account)
+        var released = 0
+        val queue = object : AdmissionQueueStore {
+            override suspend fun enqueue(actor: Principal, input: AdmissionInput) = AdmissionTicket(input.model)
+            override suspend fun reserveQueued(actor: Principal, ticket: AdmissionTicket, input: AdmissionInput): Reservation {
+                if (input.model == "claude-opus-test") throw TeamFailure("pool_busy", 429, "Busy")
+                return store.reserve(actor, input.units, input.model, input.provider, input.excludedAccountIds, input.affinity)
+            }
+            override suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean) { assertFalse(blocked) }
+            override suspend fun release(actor: Principal, ticket: AdmissionTicket) { released++ }
+        }
+        HttpClient(MockEngine(MockEngineConfig().apply {
+            dispatcher = UnconfinedTestDispatcher(testScheduler)
+            addHandler { req ->
+            assertEquals("claude-haiku-test", Json.parseToJsonElement((req.body as TextContent).text).jsonObject["model"]!!.jsonPrimitive.content)
+            respond(FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            }
+        })) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), FakeModelPolicies(),
+                routes(RouteTarget("anthropic"), RouteTarget("anthropic", "claude-haiku-test")), queued = AwaitAdmissionUseCase(queue))
+            gateway.forward(request()) { head, chunks -> assertEquals(200, head.status); chunks.collect { } }
+            assertEquals(1, released)
+        }
+    }
     private val actor = Principal(Member("member", "alice", Role.MEMBER, false, false), "token", "team")
     private val account = AccountRecord("account", AccountIdentity("team", "anthropic", "provider-id", "org-id"), "Max", 1, false, null, 0, AccountState.READY)
     private fun request() = GenerationRequest("""{"model":"claude-opus-test","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}""".toByteArray(), emptyMap(), actor)

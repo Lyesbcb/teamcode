@@ -7,7 +7,7 @@ import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.team.*
 
-private fun MemberCapacity.view() = CapacityView(policy.memberId, dailyAllowanceUnits, policy.maxConcurrent, policy.poolId, chargedAndReservedUnits, activeRequests, resetsAtMillis, policy.dailyUnits, policy.weight, poolTotalWeight, poolDailyUnits)
+private fun MemberCapacity.view() = CapacityView(policy.memberId, dailyAllowanceUnits, policy.maxConcurrent, policy.poolId, chargedAndReservedUnits, activeRequests, resetsAtMillis, policy.dailyUnits, policy.weight, poolTotalWeight, poolDailyUnits, queuedRequests)
 internal fun Route.capacityRoutes(admission: AdmissionStore, team: TeamService, origin: String) {
     get("/api/v1/capacity") { call.respond(admission.capacity(call.principal).view()) }
     get("/api/v1/members/{id}/capacity") { call.respond(admission.capacity(call.principal, call.parameters["id"]!!).view()) }
@@ -30,7 +30,7 @@ internal fun Route.capacityRoutes(admission: AdmissionStore, team: TeamService, 
             val current = admission.capacity(actor, member.id)
             val policy = current.policy
             val edit = if (actor.member.role == Role.ADMIN) """<form method="post" action="/dashboard/capacity/${escape(member.id)}">${csrf(actor)}<label>Weight (0 = no allocation) <input type="number" name="weight" value="${policy.weight}" min="0" max="1000" required></label><label>Optional daily cap (0 = none) <input type="number" name="daily" value="${policy.dailyUnits}" min="0" max="100000000000" required></label><label>Concurrent requests <input type="number" name="concurrent" value="${policy.maxConcurrent}" min="1" max="32" required></label><label>Pool (empty = shared) <input name="pool" value="${escape(policy.poolId.orEmpty())}" maxlength="36"></label><button>Save limits</button></form>""" else "${policy.dailyUnits} daily credits · ${policy.maxConcurrent} concurrent requests"
-            """<tr><td>${escape(member.username)}<br><small>${current.activeRequests} active requests<br>${current.chargedAndReservedUnits} / ${current.dailyAllowanceUnits} charged/reserved credits<br>Weight ${policy.weight} / ${current.poolTotalWeight}</small></td><td>$edit</td></tr>"""
+            """<tr><td>${escape(member.username)}<br><small>${current.activeRequests} active requests · ${current.queuedRequests} waiting<br>${current.chargedAndReservedUnits} / ${current.dailyAllowanceUnits} charged/reserved credits<br>Weight ${policy.weight} / ${current.poolTotalWeight}</small></td><td>$edit</td></tr>"""
         }
         .joinToString("")
         val quotas = if (actor.member.role == Role.ADMIN) admission.quotas(actor).joinToString("") { q -> "<li>${escape(q.accountId)} · ${escape(q.window)}: ${"%.1f".format(q.utilization * 100)}% · resets ${q.resetsAtMillis?.let(java.time.Instant::ofEpochMilli) ?: "unknown"}</li>" } else ""

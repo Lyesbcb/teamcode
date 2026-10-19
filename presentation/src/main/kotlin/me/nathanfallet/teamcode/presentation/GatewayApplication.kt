@@ -93,10 +93,12 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         }
         get<StatusResource> {
             val status = gateway.status()
-            call.respond(GatewayStatus(status.mode, status.active, status.completed))
+            call.respond(GatewayStatus(status.mode, status.active, status.completed, status.queued))
         }
         for (inbound in inboundProtocols) {
-        post(inbound.path) {
+        route(inbound.path) {
+        install(io.ktor.server.http.HttpRequestLifecycle) { cancelCallOnClose = true }
+        post {
             if (call.request.contentType().withoutParameters() != ContentType.Application.Json) throw InvalidRequest("A JSON request body is required.")
             val bytes = call.receiveChannel().readBounded(MAX_BODY_BYTES)
             val value = try { Serialization.json.parseToJsonElement(bytes.decodeToString()) as? JsonObject }
@@ -122,6 +124,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                 }
                 consumed.await()
             }
+        }
         }
         }
     }

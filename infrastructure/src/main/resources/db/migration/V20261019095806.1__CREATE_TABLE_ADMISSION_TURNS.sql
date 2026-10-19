@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS admission_turns (team_id VARCHAR(36), pool_id VARCHAR(36), provider VARCHAR(32), member_id VARCHAR(36), turn BIGINT NOT NULL, CONSTRAINT pk_admission_turns PRIMARY KEY (team_id, pool_id, provider, member_id), CONSTRAINT fk_admission_turns_team_id__id FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE ON UPDATE RESTRICT, CONSTRAINT fk_admission_turns_member_id__id FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE ON UPDATE RESTRICT);
+CREATE INDEX turn_scope ON admission_turns (team_id, pool_id, provider, turn);

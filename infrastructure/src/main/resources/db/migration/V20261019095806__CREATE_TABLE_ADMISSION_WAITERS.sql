@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS admission_waiters (id VARCHAR(36) PRIMARY KEY, team_id VARCHAR(36) NOT NULL, member_id VARCHAR(36) NOT NULL, pool_id VARCHAR(36) NOT NULL, provider VARCHAR(32) NOT NULL, workload VARCHAR(16) NOT NULL, created_at BIGINT NOT NULL, ready_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, CONSTRAINT fk_admission_waiters_team_id__id FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE ON UPDATE RESTRICT, CONSTRAINT fk_admission_waiters_member_id__id FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE ON UPDATE RESTRICT);
+CREATE INDEX waiter_team_expiry ON admission_waiters (team_id, expires_at);
+CREATE INDEX waiter_member_expiry ON admission_waiters (member_id, expires_at);
+CREATE INDEX waiter_scope ON admission_waiters (team_id, pool_id, provider, expires_at);

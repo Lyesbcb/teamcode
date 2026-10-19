@@ -54,7 +54,7 @@ fun main() {
     val directives = database?.let { SqlDirectiveService(it) }
     val transports = listOf(ClaudeTransport(providerHttp), CodexTransport(providerHttp))
     val credentialSource = database?.let { SqlCredentialSource(it, cipher!!) { account, token -> transports.single { it.provider == account.identity.provider }.refresh(token) } }
-    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!, routes) else FixtureGatewayService()
+    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!, routes, queued = me.nathanfallet.teamcode.domain.capacity.AwaitAdmissionUseCase(admission)) else FixtureGatewayService()
     val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     if (accountStore != null) {
         val work = SqlScheduledWork(database!!)

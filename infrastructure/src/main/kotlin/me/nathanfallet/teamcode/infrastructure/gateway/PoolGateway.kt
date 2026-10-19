@@ -17,14 +17,19 @@ import me.nathanfallet.teamcode.infrastructure.protocols.ConversationCodec
 import me.nathanfallet.teamcode.infrastructure.protocols.StreamTranslation
 
 /** Native passthrough by default; explicit routes translate only when the destination protocol changes. */
-class PoolGateway(private val admission: AdmissionStore, private val credentials: CredentialSource, private val transports: List<ProviderTransport>, private val modelPolicies: ModelPolicyStore, private val routes: RoutingStore? = null, private val codecs: ConversationCodec = ConversationCodec()) : GatewayService {
-    override suspend fun status(): GatewaySnapshot = admission.statistics().let { GatewaySnapshot("subscription-pool", it.active, it.completed) }
+class PoolGateway(private val admission: AdmissionStore, private val credentials: CredentialSource, private val transports: List<ProviderTransport>, private val modelPolicies: ModelPolicyStore, private val routes: RoutingStore? = null, private val codecs: ConversationCodec = ConversationCodec(), private val queued: AwaitAdmissionUseCase? = null) : GatewayService {
+    override suspend fun status(): GatewaySnapshot = admission.statistics().let { GatewaySnapshot("subscription-pool", it.active, it.completed, it.queued) }
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) = withTimeout(10 * 60_000L) {
         route(request, receive)
     }
     private suspend fun route(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
         val actor = request.principal ?: throw TeamFailure("authentication_required", 401, "Sign in to TeamCode.")
         actor.requireReady()
+        val workload = when (request.headers["x-teamcode-workload"]) {
+            null, "interactive" -> Workload.INTERACTIVE
+            "background" -> Workload.BACKGROUND
+            else -> throw TeamFailure("invalid_workload", 400, "Workload must be interactive or background.")
+        }
         val body = try { Json.parseToJsonElement(request.body.decodeToString()).jsonObject } catch (_: IllegalArgumentException) { throw TeamFailure("invalid_request", 400, "Invalid Messages request.") }
         val model = (body["model"] as? JsonPrimitive)?.contentOrNull ?: throw TeamFailure("invalid_model", 400, "A model is required.")
         if (!Regex("[a-zA-Z0-9_.-]{1,120}").matches(model)) throw TeamFailure("unsupported_model", 400, "Use an explicit model identifier or configured alias.")
@@ -52,6 +57,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
         val reauthenticatedAccounts = mutableSetOf<String>()
         var compatibleTargetFound = false
         var translationFailure: TeamFailure? = null
+        var waitingFailure: TeamFailure? = null
         // Exhaust eligible accounts for each preferred target before trying the next configured provider/model.
         for (target in targets) {
             val resolved = target.model ?: model
@@ -85,8 +91,19 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             val estimate = maxOf(request.body.size, outgoing.toString().toByteArray().size).toLong() + 16_384 + maximumOutput * 5
             while (true) {
                 if (attempts >= 64) throw TeamFailure("routing_attempt_limit", 503, "The request reached its bounded routing limit. Retry shortly; available capacity has not been ruled out.")
-                val reservation = try { admission.reserve(actor, estimate, resolved, transport.provider, attemptedAccounts, affinity) }
-                catch (error: TeamFailure) { if (error.code != "pool_unavailable") throw error; break }
+                val reservation = try {
+                    if (queued == null) admission.reserve(actor, estimate, resolved, transport.provider, attemptedAccounts, affinity)
+                    else {
+                        val targetEffort = (outgoing[if (transport.protocol == WireProtocol.MESSAGES) "output_config" else "reasoning"] as? JsonObject)?.get("effort") as? JsonPrimitive
+                        val disabled = (outgoing["thinking"] as? JsonObject)?.get("type") == JsonPrimitive("disabled")
+                        val context = AdmissionContext(model, request.protocol, configuredTargets, effort, thinkingBudget, translated, if (disabled) "none" else targetEffort?.contentOrNull)
+                        queued.reserve(actor, AdmissionInput(estimate, resolved, transport.provider, attemptedAccounts, affinity, workload, context))
+                    }
+                } catch (error: TeamFailure) {
+                    if (error.code in setOf("queue_timeout", "queue_full", "queue_expired")) waitingFailure = error
+                    else if (error.code != "pool_unavailable") throw error
+                    break
+                }
                 attemptedAccounts += reservation.account.id
                 attempts++
                 try {
@@ -96,6 +113,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             }
         }
         if (!compatibleTargetFound) translationFailure?.let { throw it }
+        waitingFailure?.let { throw it }
         throw TeamFailure("pool_unavailable", 429, "No eligible account remains in your pool across the configured route targets.")
     }
 

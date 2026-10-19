@@ -14,7 +14,10 @@ dependencies {
     implementation(libs.ktor.server.netty)
     implementation(libs.koin.core)
     implementation(libs.logback)
+    testImplementation(kotlin("test-junit5"))
+    testRuntimeOnly(libs.junit)
 }
+tasks.test { useJUnitPlatform() }
 ktor {
     docker {
         jreVersion.set(JavaVersion.VERSION_21)

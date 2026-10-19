@@ -72,6 +72,14 @@ Persistence uses the Exposed DSL behind domain ports, HikariCP for connection po
 
 Run `python3 scripts/generate-migrations.py` after changing the table definitions. The wrapper starts its own loopback-only MySQL 8.4 container with a temporary memory-backed data directory, invokes the Exposed Gradle migration generator and stops only that container. The generator replays the committed Flyway history and writes candidate DDL; review it before committing, especially renames, drops and MySQL type changes. It never targets the configured TeamCode server database. The schema source lives in `infrastructure/database/tables`; Exposed and migration-generation dependencies stay out of the native CLI.
 
+## Admission across replicas
+
+`AwaitAdmissionUseCase` owns the bounded cancellable wait; `AdmissionQueueStore` is its persistence port. `SqlAdmissionStore` implements it through Exposed tables `admission_waiters` and `admission_turns`. Queue selection, policy revalidation and reservation creation share the team-locked transaction. No database transaction or connection remains open between polling attempts. Pending bodies and live sockets remain request-local; all cross-replica scheduling metadata and leases live in MySQL. No Redis is required for this implementation.
+
+Ktor's route-scoped `HttpRequestLifecycle` enables `cancelCallOnClose` on inference endpoints in both the central server and local CLI proxy. This also cancels work waiting before response headers. Management and enrollment routes retain their existing lifecycle. Real TCP regressions cover the server and native CLI, because coroutine-only tests cannot establish socket-close propagation.
+
+Deploy every server replica on the queue-aware version before relying on fair admission: an older replica can bypass the new queue. Upgrade native clients as well for pre-response cancellation across both hops. Existing versioned update/service restart automation remains planned; it is not supplied by this schema migration. See [capacity](capacity.md) for bounds, scheduling semantics and limits.
+
 ## Implemented provider and protocol extension points
 
 Three independent contracts keep subscription hosting separate from client wire formats:

@@ -11,7 +11,7 @@ data class Capabilities(
 )
 
 @Serializable
-data class GatewayStatus(val mode: String, val activeRequests: Int, val completedRequests: Long)
+data class GatewayStatus(val mode: String, val activeRequests: Int, val completedRequests: Long, val queuedRequests: Int = 0)
 
 @Serializable
 data class ApiError(val error: ErrorDetail)

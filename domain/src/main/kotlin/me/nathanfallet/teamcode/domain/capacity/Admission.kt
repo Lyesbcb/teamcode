@@ -5,7 +5,7 @@ import me.nathanfallet.teamcode.domain.team.Principal
 import me.nathanfallet.teamcode.domain.routing.*
 
 data class MemberPolicy(val memberId: String, val dailyUnits: Long = 0, val maxConcurrent: Int = 2, val poolId: String? = null, val weight: Int = 1)
-data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits: Long, val activeRequests: Int, val resetsAtMillis: Long, val dailyAllowanceUnits: Long = policy.dailyUnits, val poolDailyUnits: Long = 1_000_000, val poolTotalWeight: Long = 1)
+data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits: Long, val activeRequests: Int, val resetsAtMillis: Long, val dailyAllowanceUnits: Long = policy.dailyUnits, val poolDailyUnits: Long = 1_000_000, val poolTotalWeight: Long = 1, val queuedRequests: Int = 0)
 data class PoolBudget(val poolId: String, val dailyUnits: Long)
 data class Reservation(val id: String, val account: AccountRecord, val units: Long)
 const val MAX_QUOTA_OBSERVATION_AGE_MILLIS = 300_000L
@@ -26,7 +26,7 @@ data class QuotaUpdate(
     val modelLimit: ModelLimitObservation? = null,
 )
 data class ModelLimitObservation(val model: String, val limit: String)
-data class AdmissionStatistics(val active: Int, val completed: Long)
+data class AdmissionStatistics(val active: Int, val completed: Long, val queued: Int = 0)
 interface AdmissionStore {
     suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget?
     suspend fun statistics(): AdmissionStatistics

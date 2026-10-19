@@ -3,14 +3,21 @@ package me.nathanfallet.teamcode.infrastructure.database
 import java.util.UUID
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.team.*
+import me.nathanfallet.teamcode.domain.policy.CheckModelPolicyUseCase
 import me.nathanfallet.teamcode.domain.routing.*
 import me.nathanfallet.teamcode.infrastructure.database.tables.*
 import org.jetbrains.exposed.v1.core.*
 import org.jetbrains.exposed.v1.jdbc.*
 
 /** Admission is serialized per team; both member and physical account slots are reserved atomically. */
-class SqlAdmissionStore(private val database: Database) : AdmissionStore {
+class SqlAdmissionStore(private val database: Database) : AdmissionStore, AdmissionQueueStore {
     private val affinities = SqlSessionAffinity()
+    private val queue = SqlAdmissionQueue(database)
+    override suspend fun enqueue(actor: Principal, input: AdmissionInput) = queue.enqueue(actor, input)
+    override suspend fun reserveQueued(actor: Principal, ticket: AdmissionTicket, input: AdmissionInput) =
+        reserveNow(actor, input.units, input.model, input.provider, input.excludedAccountIds, input.affinity, ticket, input.context)
+    override suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean) = queue.renew(actor, ticket, blocked)
+    override suspend fun release(actor: Principal, ticket: AdmissionTicket) = queue.release(actor, ticket)
     override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = database.query {
         actor.requireReady(); requireCurrent(this, actor)
         affinities.target(this, actor, affinity, nowMillis())
@@ -19,14 +26,25 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val now = nowMillis()
         val active = Reservations.selectAll().where { (Reservations.teamId eq "default") and (Reservations.state eq "ACTIVE") and (Reservations.expiresAt greater now) }.count().toInt()
         val completed = GatewayTotals.select(GatewayTotals.completed).where { GatewayTotals.teamId eq "default" }.single()[GatewayTotals.completed]
-        AdmissionStatistics(active, completed)
+        val queued = AdmissionWaiters.selectAll().where { (AdmissionWaiters.teamId eq "default") and (AdmissionWaiters.expiresAt greater now) }.count().toInt()
+        AdmissionStatistics(active, completed, queued)
     }
-    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation = database.query {
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation =
+        reserveNow(actor, units, model, provider, excludedAccountIds, affinity, null)
+    private suspend fun reserveNow(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?, ticket: AdmissionTicket?, context: AdmissionContext? = null): Reservation = database.query {
         actor.requireReady()
         require(units in 1..100_000_000 && excludedAccountIds.size <= 64)
         lockTeam(actor.teamId)
         val now = nowMillis()
         requireCurrent(this, actor)
+        context?.let {
+            val modelPolicy = readModelPolicy(actor.teamId)
+            CheckModelPolicyUseCase().check(modelPolicy, it.requestedModel, model, it.effort, it.thinkingTokens)
+            if (it.translated) CheckModelPolicyUseCase().check(modelPolicy, it.requestedModel, model, it.targetEffort, null)
+            if (ResolveRouteUseCase().resolve(readRoutes(actor.teamId), it.requestedModel, it.protocol) != it.targets) {
+                throw TeamFailure("route_changed", 409, "The configured route changed while waiting. Submit the request again.")
+            }
+        }
         val policy = readMemberPolicy(this, actor.member.id)
         val current = readMemberCapacity(this, policy, now, actor.teamId)
         val scope = affinity?.sessionKey.orEmpty()
@@ -62,15 +80,18 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val active = Reservations.select(Reservations.accountId, count).where {
             (Reservations.teamId eq actor.teamId) and (Reservations.state eq "ACTIVE") and (Reservations.expiresAt greater now)
         }.groupBy(Reservations.accountId).associate { it[Reservations.accountId] to it[count].toInt() }
-        val eligible = candidates.filter { account ->
-            account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model, modelLimits[account.id]?.get(model.lowercase())) && it.utilization >= .95 }
+        val available = candidates.filter { account ->
+            account.id !in excludedAccountIds && usage.none { it.accountId == account.id && it.appliesTo(model, modelLimits[account.id]?.get(model.lowercase())) && it.utilization >= .95 }
         }
+        val eligible = available.filter { (active[it.id] ?: 0) < 2 }
+        if (ticket != null && eligible.isEmpty() && available.isNotEmpty()) throw TeamFailure("pool_busy", 429, "Eligible accounts are currently serving other requests.")
         val pins = affinity?.let { affinities.accounts(this, actor, it, provider, model, now) }.orEmpty()
         val loads = if (affinity != null) affinities.loads(this, actor.teamId, now) else emptyMap()
         val chosen = SelectAccountUseCase().select(eligible.map { account ->
             AccountPlacement(account, active[account.id] ?: 0, loads[account.id] ?: 0,
                 usage.filter { it.accountId == account.id && it.appliesTo(model, modelLimits[account.id]?.get(model.lowercase())) }.maxOfOrNull { it.utilization } ?: 0.0)
         }, pins) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
+        ticket?.let { consumeQueueTurn(actor, it, policy, provider, now) }
         affinity?.let { affinities.record(this, actor, it, RouteTarget(provider, model), chosen.id, now) }
         val id = UUID.randomUUID().toString()
         Reservations.insert {
@@ -143,6 +164,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     suspend fun maintain() {
         database.query {
             val now = nowMillis()
+            AdmissionWaiters.deleteWhere(limit = 1000) { expiresAt lessEq now }
             ConversationAffinities.deleteWhere(limit = 1000) { expiresAt lessEq now }
             QuotaHistory.deleteWhere(limit = 1000) { observedAt less now - 7 * DAY }
             Reservations.deleteWhere(limit = 1000) { dayNumber less now / DAY - 90 }

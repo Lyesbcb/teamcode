@@ -91,7 +91,7 @@ private class Status : SuspendingCliktCommand(name = "status") {
     override suspend fun run() {
         sdk(loadConfig()).use { client ->
             val status = client.status()
-            echo("Mode: ${status.mode} | Active: ${status.activeRequests} | Completed: ${status.completedRequests}")
+            echo("Mode: ${status.mode} | Active: ${status.activeRequests} | Waiting: ${status.queuedRequests} | Completed: ${status.completedRequests}")
         }
     }
 }

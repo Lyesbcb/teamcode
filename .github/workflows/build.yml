@@ -21,7 +21,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: python3 scripts/check-module-graph.py
       - run: python3 -m unittest discover -s scripts -p 'test_acceptance_*.py'
-      - run: ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:buildFatJar
+      - run: ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:test :app:buildFatJar
       - run: python3 scripts/smoke-replicas.py --jar app/build/libs/app-all.jar
       - uses: actions/upload-artifact@v4
         with:
@@ -100,6 +100,7 @@ jobs:
       - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
       - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
       - run: python3 scripts/smoke-run.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-queued-cancel.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
       - run: python3 scripts/smoke-hook.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
       - name: Start Linux user service manager
         if: runner.os == 'Linux'
@@ -132,6 +133,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
       - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe --allow-machine-test-certificate
+      - run: python scripts/smoke-queued-cancel.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
       - run: python scripts/smoke-hook.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
       - uses: actions/upload-artifact@v4
         with:

@@ -27,7 +27,9 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             }
         }
         for (path in listOf("/v1/messages", "/v1/responses")) {
-        post(path) {
+        route(path) {
+        install(io.ktor.server.http.HttpRequestLifecycle) { cancelCallOnClose = true }
+        post {
             val auth = call.request.header(HttpHeaders.Authorization)
             val key = call.request.header("x-api-key")
             if (!equalToken(auth?.removePrefix("Bearer "), localToken) && !equalToken(key, localToken)) {
@@ -80,6 +82,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
                 }
                 consumed.await()
             }
+        }
         }
         }
     }
