@@ -227,6 +227,34 @@ class PoolGatewayTest {
             }
         }
     }
+    @Test fun successfulFallbackRemainsStableUntilTheConfiguredRouteChanges() = runBlocking {
+        val store = FakeAdmission(account)
+        val seen = mutableListOf<String>()
+        val responses = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"test\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+        HttpClient(MockEngine { req ->
+            seen += req.url.host
+            if (seen.size == 1) respond("exhausted", HttpStatusCode.TooManyRequests)
+            else respond(if (req.url.host == "chatgpt.com") responses else FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http), CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("anthropic"), RouteTarget("codex", "gpt-6-astra")))
+            val tagged = request().copy(headers = mapOf("x-claude-code-session-id" to "parent-session"))
+            gateway.forward(tagged) { _, chunks -> chunks.collect {} }
+            gateway.forward(tagged) { _, chunks -> chunks.collect {} }
+            assertEquals(listOf("api.anthropic.com", "chatgpt.com", "chatgpt.com"), seen)
+            // A later native-only option must not be stranded behind an incompatible saved target.
+            val nativeOnlyBody = Json.parseToJsonElement(tagged.body.decodeToString()).jsonObject
+            val nativeOnly = tagged.copy(body = JsonObject(nativeOnlyBody + ("future_field" to JsonPrimitive("preserve"))).toString().toByteArray())
+            gateway.forward(nativeOnly) { _, chunks -> chunks.collect {} }
+            assertEquals("api.anthropic.com", seen.last())
+            val incompatible = PoolGateway(store, credentials, listOf(CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("codex", "gpt-6-astra")))
+            val count = seen.size
+            assertEquals("translation_unsupported", assertFailsWith<TeamFailure> { incompatible.forward(nativeOnly) { _, _ -> fail() } }.code)
+            assertEquals(count, seen.size)
+            val reconfigured = PoolGateway(store, credentials, listOf(ClaudeTransport(http), CodexTransport(http)), FakeModelPolicies(), routes(RouteTarget("anthropic")))
+            reconfigured.forward(tagged) { _, chunks -> chunks.collect {} }
+            assertEquals("api.anthropic.com", seen.last())
+        }
+    }
     @Test fun boundedSearchIsNotMisreportedAsExhaustedCapacity() = runBlocking {
         val store = FakeAdmission(account, accountsPerProvider = 65)
         var calls = 0
@@ -278,6 +306,8 @@ class PoolGatewayTest {
     }
 }
 private class FakeAdmission(private val account: AccountRecord, private val accountsPerProvider: Int = 1) : AdmissionStore {
+    val affinities = mutableMapOf<RequestAffinity, RouteTarget>()
+    override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = affinities[affinity]
     override suspend fun statistics() = AdmissionStatistics(0, 0)
     val charges = mutableListOf<Long?>()
     var settled: Long? = null
@@ -285,10 +315,11 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     var cooled = false
     var reconnect = false
     var selectedProvider: String? = null
-    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>): Reservation {
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation {
         val id = (0 until accountsPerProvider).map { "$provider-$it" }.firstOrNull { it !in excludedAccountIds }
             ?: throw TeamFailure("pool_unavailable", 429, "No eligible account.")
         selectedProvider = provider
+        affinity?.let { affinities[it] = RouteTarget(provider, model) }
         return Reservation("request-$id", account.copy(id = id, identity = account.identity.copy(provider = provider)), units)
     }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) { didSettle = true; settled = actualUnits; charges += actualUnits }

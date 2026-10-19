@@ -33,3 +33,6 @@ Scheduled quota polling uses one database lease per account and persistent last-
 `ReplicaPersistenceTest` uses two independent Hikari pools against MySQL 8.4. It covers concurrent migrations/bootstrap, cross-replica session revocation, competing admissions, exactly-once completion/usage, abandoned reservations, single refresh ownership, interrupted-refresh recovery, import/refresh conflicts, worker lease reclamation, stale-owner fencing, persistent polling order and a shared login budget.
 
 `scripts/smoke-replicas.py --jar app/build/libs/app-all.jar` starts two actual server processes against its own isolated database. It checks concurrent startup, one bootstrap password, shared sessions and members, password revocation on the other replica, abrupt process termination/restart, readiness versus liveness during database outage, recovery and logout revocation. It stops only its own children and test database and never contacts real providers.
+
+
+Conversation/account placement also lives in SQL. `conversation_affinities` stores bounded, expiring hashes scoped to the authenticated team/member, and its update shares the admission transaction. Replica restart does not erase a live hint; no local cache is required. See [session affinity](session-affinity.md) for eligibility, concurrency, route invalidation and remaining acceptance limits.

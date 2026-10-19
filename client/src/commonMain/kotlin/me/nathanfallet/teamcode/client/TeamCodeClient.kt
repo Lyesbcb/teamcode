@@ -125,7 +125,7 @@ class TeamCodeClient(
     override fun close() = http.close()
 
     companion object {
-        val FORWARDED_HEADERS: Set<String> = setOf("anthropic-version", "anthropic-beta", "x-claude-code-session-id", "user-agent")
+        val FORWARDED_HEADERS: Set<String> = me.nathanfallet.teamcode.api.InferenceHeaders.names
     }
 }
 

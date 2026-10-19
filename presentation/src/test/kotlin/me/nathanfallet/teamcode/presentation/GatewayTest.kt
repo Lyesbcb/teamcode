@@ -14,12 +14,13 @@ import kotlin.test.*
 
 class GatewayTest {
     private val accessToken = "synthetic-teamcode-token-for-tests-only"
-    private class StubGateway : GatewayService {
+    private class StubGateway(private val expectedHeaders: Map<String, String> = emptyMap()) : GatewayService {
         var requests = 0
         override suspend fun status() = GatewaySnapshot("fixture", 0, requests.toLong())
         override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
             requests++
             assertFalse(request.headers.containsKey("authorization"))
+            expectedHeaders.forEach { (name, value) -> assertEquals(value, request.headers[name]) }
             receive(GenerationHead(200, "text/event-stream"), flowOf("data: first\n\n".encodeToByteArray(), "data: last\n\n".encodeToByteArray()))
         }
     }
@@ -46,7 +47,7 @@ class GatewayTest {
         assertEquals(0, gateway.requests)
     }
     @Test fun `stream traverses SDK unchanged and private headers do not reach gateway`() = testApplication {
-        application { configureGateway(StubGateway(), accessToken) }
+        application { configureGateway(StubGateway(mapOf("session-id" to "codex-session")), accessToken) }
         val sdk = TeamCodeClient("http://localhost", { accessToken }) { config -> createClient {
             config(this)
             // Ktor 3.6 test-host's writer timeout child waits for its own parent completion.
@@ -54,7 +55,7 @@ class GatewayTest {
             install(HttpTimeout) { socketTimeoutMillis = null }
         } }
         try {
-            sdk.forwardMessages("""{"model":"fixture","stream":true,"messages":[]}""".encodeToByteArray()) {
+            sdk.forwardMessages("""{"model":"fixture","stream":true,"messages":[]}""".encodeToByteArray(), mapOf("session-id" to "codex-session")) {
                 assertEquals(HttpStatusCode.OK, it.status)
                 assertEquals("data: first\n\ndata: last\n\n", it.bodyAsText())
             }

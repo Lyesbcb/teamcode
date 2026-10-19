@@ -20,6 +20,7 @@ class LocalProxyTest {
             calls++
             assertEquals("Bearer server-token", request.headers[HttpHeaders.Authorization])
             assertNull(request.headers["x-api-key"])
+            assertEquals("codex-session", request.headers["session-id"])
             assertEquals("/v1/messages", request.url.encodedPath)
             respond("event: done\ndata: {}\n\n", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
         }
@@ -29,6 +30,7 @@ class LocalProxyTest {
             val response = client.post("/v1/messages") {
                 contentType(ContentType.Application.Json)
                 header("x-api-key", localToken)
+                header("session-id", "codex-session")
                 setBody(payload())
             }
             assertEquals(HttpStatusCode.OK, response.status)

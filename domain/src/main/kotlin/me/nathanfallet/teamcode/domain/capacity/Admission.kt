@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.domain.capacity
 
 import me.nathanfallet.teamcode.domain.accounts.AccountRecord
 import me.nathanfallet.teamcode.domain.team.Principal
+import me.nathanfallet.teamcode.domain.routing.*
 
 data class MemberPolicy(val memberId: String, val dailyUnits: Long = 0, val maxConcurrent: Int = 2, val poolId: String? = null, val weight: Int = 1)
 data class MemberCapacity(val policy: MemberPolicy, val chargedAndReservedUnits: Long, val activeRequests: Int, val resetsAtMillis: Long, val dailyAllowanceUnits: Long = policy.dailyUnits, val poolDailyUnits: Long = 1_000_000, val poolTotalWeight: Long = 1)
@@ -11,8 +12,9 @@ data class AccountQuota(val accountId: String, val window: String, val utilizati
 fun AccountQuota.appliesTo(model: String): Boolean = !window.startsWith("model:") || model.lowercase().contains(window.removePrefix("model:").substringBefore(':').lowercase())
 data class AdmissionStatistics(val active: Int, val completed: Long)
 interface AdmissionStore {
+    suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget?
     suspend fun statistics(): AdmissionStatistics
-    suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic", excludedAccountIds: Set<String> = emptySet()): Reservation
+    suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic", excludedAccountIds: Set<String> = emptySet(), affinity: RequestAffinity? = null): Reservation
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
     suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean = false)
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity

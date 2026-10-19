@@ -5,15 +5,21 @@ import java.sql.ResultSet
 import java.util.UUID
 import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.team.*
+import me.nathanfallet.teamcode.domain.routing.*
 
 /** Admission is serialized per team; both member and physical account slots are reserved atomically. */
 class SqlAdmissionStore(private val database: Database) : AdmissionStore {
+    private val affinities = SqlSessionAffinity()
+    override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = database.transaction { c ->
+        actor.requireReady(); requireCurrent(c, actor)
+        affinities.target(c, actor, affinity, c.nowMillis())
+    }
     override suspend fun statistics(): AdmissionStatistics = database.transaction { c ->
         val active = c.rows("SELECT COUNT(*) FROM reservations WHERE team_id = 'default' AND state = 'ACTIVE' AND expires_at > ?", c.nowMillis()) { it.getInt(1) }.single()
         val completed = c.rows("SELECT completed FROM gateway_totals WHERE team_id = 'default'") { it.getLong(1) }.single()
         AdmissionStatistics(active, completed)
     }
-    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>): Reservation = database.transaction { c ->
+    override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation = database.transaction { c ->
         actor.requireReady()
         require(units in 1..100_000_000 && excludedAccountIds.size <= 64)
         c.lockTeam(actor.teamId)
@@ -36,11 +42,13 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
         val eligible = candidates.filter { account ->
             account.id !in excludedAccountIds && (active[account.id] ?: 0) < 2 && usage.none { it.accountId == account.id && it.appliesTo(model) && it.utilization >= .95 }
         }
-        val chosen = eligible.minWithOrNull(compareBy<me.nathanfallet.teamcode.domain.accounts.AccountRecord>(
-            { active[it.id] ?: 0 }, { -it.priority },
-            { a -> usage.filter { it.accountId == a.id && it.appliesTo(model) }.maxOfOrNull { it.utilization } ?: 0.0 },
-            { it.id },
-        )) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
+        val pins = affinity?.let { affinities.accounts(c, actor, it, provider, model, now) }.orEmpty()
+        val loads = if (affinity != null) affinities.loads(c, actor.teamId, now) else emptyMap()
+        val chosen = SelectAccountUseCase().select(eligible.map { account ->
+            AccountPlacement(account, active[account.id] ?: 0, loads[account.id] ?: 0,
+                usage.filter { it.accountId == account.id && it.appliesTo(model) }.maxOfOrNull { it.utilization } ?: 0.0)
+        }, pins) ?: throw TeamFailure("pool_unavailable", 429, "No eligible account has free capacity in your assigned pool.")
+        affinity?.let { affinities.record(c, actor, it, RouteTarget(provider, model), chosen.id, now) }
         val id = UUID.randomUUID().toString()
         c.execute("INSERT INTO reservations (id, team_id, member_id, account_id, day_number, units, state, expires_at, created_at, pool_id) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)", id, actor.teamId, actor.member.id, chosen.id, now / DAY, units, now + 15 * 60_000, now, policy.poolId.orEmpty())
         Reservation(id, chosen, units)
@@ -101,6 +109,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore {
     }
     suspend fun maintain() {
         database.transaction { c ->
+            c.execute("DELETE FROM conversation_affinities WHERE expires_at <= ? LIMIT 1000", c.nowMillis())
             c.execute("DELETE FROM quota_history WHERE observed_at < ? LIMIT 1000", c.nowMillis() - 7 * DAY)
             c.execute("DELETE FROM reservations WHERE day_number < ? LIMIT 1000", c.nowMillis() / DAY - 90)
         }

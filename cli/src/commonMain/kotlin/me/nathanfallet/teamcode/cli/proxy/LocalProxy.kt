@@ -60,7 +60,7 @@ fun Application.localProxy(client: TeamCodeClient, localToken: String, maximumBo
             val body = ByteArray(size)
             var offset = 0
             for (chunk in chunks) { chunk.copyInto(body, offset); offset += chunk.size }
-            val headers = TeamCodeClient.FORWARDED_HEADERS.mapNotNull { name -> call.request.header(name)?.let { name to it } }.toMap()
+            val headers = me.nathanfallet.teamcode.api.InferenceHeaders.capture(call.request.headers::getAll)
             client.forwardInference(path, body, headers) { upstream ->
                 listOf("retry-after", "x-teamcode-request-id", "x-teamcode-model", "x-teamcode-provider").forEach { name -> upstream.headers[name]?.let { call.response.header(name, it) } }
                 call.response.header(HttpHeaders.CacheControl, "no-store")

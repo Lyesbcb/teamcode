@@ -23,7 +23,7 @@ A request tries eligible accounts for the preferred target before moving to the 
 
 After all configured targets have no eligible account, TeamCode returns HTTP 429 `pool_unavailable`. Member/team allowances, concurrency and pacing limits can independently return HTTP 429 even when a subscription has capacity; fallback must respect these policies. A request is bounded to 64 distinct accounts and a ten-minute overall deadline. Hitting the account bound returns HTTP 503 `routing_attempt_limit`, which does not assert that all capacity has been exhausted.
 
-HTTP 5xx, transport interruptions and any failure after committed output are not replayed. Their usage stays conservatively reserved unless terminal usage is known. This avoids duplicate model work and duplicated tool actions after an ambiguous result. Session/account affinity is still planned; callers currently send complete conversation history, and incompatible opaque history blocks a provider switch.
+HTTP 5xx, transport interruptions and any failure after committed output are not replayed. Their usage stays conservatively reserved unless terminal usage is known. This avoids duplicate model work and duplicated tool actions after an ambiguous result. Conversation affinity is stored in SQL and shared by replicas; see [session affinity](session-affinity.md). Callers still send complete conversation history, and incompatible opaque history blocks a provider switch. A configured incompatible target can be skipped for a compatible native target without dropping fields.
 
 ## Conversion boundary
 

@@ -43,10 +43,15 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             else (body["max_output_tokens"] as? JsonPrimitive)?.longOrNull ?: 16_384
         if (maximumOutput == null || maximumOutput !in 1..65_536) throw TeamFailure("invalid_max_tokens", 400, "max_tokens must be between 1 and 65536.")
         if (listOf("thread", "previous_response_id", "conversation").any { body[it] != null && body[it] != JsonNull }) throw TeamFailure("thread_unsupported", 400, "Send the complete conversation; provider-managed message threads are not supported by this pool.")
-        val targets = ResolveRouteUseCase().resolve(routes?.list(actor.teamId).orEmpty(), model, request.protocol)
+        val configuredTargets = ResolveRouteUseCase().resolve(routes?.list(actor.teamId).orEmpty(), model, request.protocol)
+        val affinity = SessionAffinityKey.from(request.headers, body, request.protocol, model, configuredTargets)
+        val preferredTarget = affinity?.let { admission.preferredTarget(actor, it) }
+        val targets = if (preferredTarget in configuredTargets) listOf(preferredTarget!!) + configuredTargets.filterNot { it == preferredTarget } else configuredTargets
         val attemptedTargets = mutableMapOf<Pair<String, String>, MutableSet<String>>()
         var attempts = 0
         val reauthenticatedAccounts = mutableSetOf<String>()
+        var compatibleTargetFound = false
+        var translationFailure: TeamFailure? = null
         // Exhaust eligible accounts for each preferred target before trying the next configured provider/model.
         for (target in targets) {
             val resolved = target.model ?: model
@@ -55,8 +60,15 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             val transport = transports.singleOrNull { it.provider == target.provider }
                 ?: throw TeamFailure("unsupported_provider", 400, "The configured route provider is unavailable.")
             val translated = transport.protocol != request.protocol
-            val outgoing = if (translated) codecs.encode(codecs.decode(body, request.protocol), transport.protocol, resolved)
+            val outgoing = try {
+                if (translated) codecs.encode(codecs.decode(body, request.protocol), transport.protocol, resolved)
                 else JsonObject(body + ("model" to JsonPrimitive(resolved)))
+            } catch (error: TeamFailure) {
+                if (error.code != "translation_unsupported") throw error
+                translationFailure = error
+                continue // A native/compatible target can still preserve this request unchanged.
+            }
+            compatibleTargetFound = true
             if (transport.provider == "codex" && outgoing["store"] != null && outgoing["store"] != JsonPrimitive(false)) {
                 throw TeamFailure("unsupported_storage", 400, "The Codex subscription endpoint requires store=false.")
             }
@@ -69,7 +81,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             val estimate = maxOf(request.body.size, outgoing.toString().toByteArray().size).toLong() + 16_384 + maximumOutput * 5
             while (true) {
                 if (attempts >= 64) throw TeamFailure("routing_attempt_limit", 503, "The request reached its bounded routing limit. Retry shortly; available capacity has not been ruled out.")
-                val reservation = try { admission.reserve(actor, estimate, resolved, transport.provider, attemptedAccounts) }
+                val reservation = try { admission.reserve(actor, estimate, resolved, transport.provider, attemptedAccounts, affinity) }
                 catch (error: TeamFailure) { if (error.code != "pool_unavailable") throw error; break }
                 attemptedAccounts += reservation.account.id
                 attempts++
@@ -79,6 +91,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                 } catch (_: SafeRetry) { /* This definite rejection settled with zero charge; select another account. */ }
             }
         }
+        if (!compatibleTargetFound) translationFailure?.let { throw it }
         throw TeamFailure("pool_unavailable", 429, "No eligible account remains in your pool across the configured route targets.")
     }
 

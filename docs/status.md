@@ -158,3 +158,14 @@ The tested `teamcode-windows-x64` development artifact was uploaded after accept
 The entire run completed successfully: JVM/MySQL, Helm, macOS native, Linux native, Windows native and Docker publication. Docker Hub inspection confirmed that `latest` and `sha-45b43fd59eea4451dee5fea6e95a3f8b3e8f0c30` resolve to the same OCI index, `sha256:818221e05ebcdb04f9df00bf98ebe6b551ac84966bd5d87bb82308a5e5205cb6`, with `linux/amd64` and `linux/arm64` images. The Helm default remains `nathanfallet/teamcode:latest`.
 
 See [V1 review](v1-review.md) for the product walkthrough and the remaining release gates; this successful build does not close the full V1 roadmap.
+
+
+### Durable conversation affinity across replicas
+
+- Added bounded MySQL conversation hints, scoped by authenticated team/member and requested model, with one-hour expiry and two-minute activity scoring. Placement and admission share the team-locked transaction; all quota, pool, cooldown, priority and concurrency checks still apply.
+- Claude-specific and Codex generic session headers now survive the native proxy/SDK/server path through a shared allowlist. Malformed or duplicate identifiers disable the hint. Opening-message hashes distinguish subagents without persisting raw session IDs or prompts.
+- Remembered cross-provider targets remain stable across turns and are invalidated by route changes. Unsupported conversion skips to a configured compatible target; all-incompatible requests still fail explicitly before provider dispatch.
+- Local evidence (2026-10-19): `:api:jvmTest :domain:test :infrastructure:test :presentation:test :client:jvmTest :cli:jvmTest :app:buildFatJar` passed. Actual MySQL tests used two independent connection pools and covered model-specific diversion, competing reservations, eligibility changes, member/pool isolation, expiry, revocation and the 1,000-hint member cap. Module boundaries and `git diff --check` passed.
+- The rebuilt macOS ARM64 native binary passed `scripts/smoke-native.py` against the rebuilt server: private configuration, authenticated SDK/proxy transport and progressive SSE. No real provider calls were made for this milestone. Cross-platform CI for this change remains pending publication.
+
+See [conversation affinity](session-affinity.md) for behavior, bounds and remaining live-agent/reset-boundary acceptance. This milestone does not close the remaining [V1 review gates](v1-review.md).
