@@ -76,7 +76,16 @@ def main():
                                  '--signature', str(signature_file)], env=env,
                                 stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
         assert result.returncode != 0 and b'release_file_unreadable' in result.stderr + result.stdout
-    print('PASS: native compiled publisher root, Unicode paths, signature tampering, unknown keys, bounds, binary rejection and no login/configuration.')
+        # These guards must fail before any network request; real GitHub is not a CI dependency.
+        for arguments, diagnostic in [
+            (['update'], b'Use --check'),
+            (['update', '--check', '--version', '../escape'], b'release_version_invalid'),
+        ]:
+            result = subprocess.run([binary, *arguments], env=env, stdin=subprocess.DEVNULL,
+                                    capture_output=True, timeout=5)
+            assert result.returncode != 0 and diagnostic in result.stdout + result.stderr
+        assert not config_root.exists(), 'Release operations must not create team configuration'
+    print('PASS: native publisher trust, Unicode paths, tampering, bounds, binary rejection, update guards and no login/configuration.')
 
 
 if __name__ == '__main__':

@@ -51,11 +51,11 @@ Windows references: [Task Scheduler logon triggers](https://learn.microsoft.com/
 
 The built-in Windows PowerShell service query uses system module paths explicitly, avoiding incompatible PowerShell 7 modules inherited through the caller. See Microsoft's [PSModulePath behavior for intermediate processes](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath).
 
-## Planned versioned updates (not implemented)
+## Version checks and planned installation/rollback
 
 Native release artifacts will be published through GitHub Releases after the required platform checks. A signed manifest will bind each platform artifact to its version and digest; the updater must verify it before executing downloaded code. The release signing key must be separate from the self-hosted server and verified against a trust root shipped with the CLI. Publisher-side RSA-3072/PSS signing and verification are implemented in the [distribution pipeline](distribution.md); the native `verify-release` command is implemented with common cryptographic/rotation tests and local JVM/macOS acceptance. Five-target verifier acceptance and the updater itself remain separate gates.
 
-Planned commands are `teamcode update --check`, `teamcode update`, `teamcode update --version VERSION` and `teamcode update --rollback`. These commands are design targets, not available commands. Automatic checks may notify users; unattended installation is opt-in and waits until the local proxy is idle. A failed check never prevents normal agent launch.
+`teamcode update --check [--version VERSION]` checks signed published metadata without reading team authentication, installing files or touching the service. Native installation commands `teamcode update`, `teamcode update --version VERSION` and `teamcode update --rollback` remain design targets, not available operations. Automatic checks may notify users; unattended installation is opt-in and waits until the local proxy is idle. A failed check never prevents normal agent launch.
 
 A stable launcher will select an installed version from private, versioned application-data directories, separate from configuration and credentials. On Windows this avoids replacing a running executable. Installation must validate the complete new version before atomically switching the selected version, keep the previous working version and serialize competing updater processes. The URL, session token and provider enrollment configuration remain unchanged.
 
