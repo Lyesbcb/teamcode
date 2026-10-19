@@ -12,6 +12,44 @@ from contextlib import nullcontext
 from acceptance_fallback import coding_fallback, verify_fallback
 
 
+def coding_command(binary, agent, model, prompt, env, reasoning_profile):
+    """Build an isolated tool-task launch without accidentally disabling default reasoning."""
+    if reasoning_profile not in ('portable', 'default') or agent not in ('claude', 'codex'):
+        raise ValueError('Unknown coding acceptance profile or agent')
+    # A parent shell override must not silently turn the default-reasoning gate off.
+    env.pop('MAX_THINKING_TOKENS', None)
+    command = [binary, 'run', agent, '--no-guidance', '--']
+    if agent == 'claude':
+        command += ['--bare', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                    '--tools', 'Read,Edit,Bash', '--allowedTools', 'Read,Edit,Bash(python3 -m unittest*)',
+                    '--no-session-persistence', '--disable-slash-commands', '--max-turns', '12', '--model', model,
+                    '--system-prompt', 'Complete the small local coding task using the supplied tools. Stay in the current directory.',
+                    '--verbose', '--output-format', 'stream-json']
+        if reasoning_profile == 'portable':
+            env['MAX_THINKING_TOKENS'] = '0'
+            command += ['--settings', '{"alwaysThinkingEnabled":false}']
+        command += ['-p', prompt]
+    else:
+        command += ['--no-daemon', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+                    '--skip-git-repo-check', '--sandbox', 'workspace-write', '--json',
+                    '-c', 'web_search="disabled"']
+        if reasoning_profile == 'portable':
+            command += ['-c', 'model_reasoning_effort="none"']
+        command += ['--model', model, prompt]
+    return command
+
+
+def conversation_blocks(events):
+    """Claude has structured message bodies; Codex error events can have plain strings."""
+    for event in events:
+        message = event.get('message')
+        if not isinstance(message, dict):
+            continue
+        content = message.get('content')
+        if isinstance(content, list):
+            yield from (block for block in content if isinstance(block, dict))
+
+
 def run_agent(command, work, env):
     # Let TeamCode forward termination to its own child and drain its proxy before
     # forcing only this process to exit. Never include command/output in exceptions.
@@ -30,9 +68,10 @@ def run_agent(command, work, env):
 
 
 def run_coding_tasks(args, binary, root, env, request, token, log):
-    policy = json.loads(request('/api/v1/policy/models', token=token)[1])
-    policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
-    assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
+    if args.coding_reasoning == 'portable':
+        policy = json.loads(request('/api/v1/policy/models', token=token)[1])
+        policy['allowedEfforts'] = list(dict.fromkeys(policy['allowedEfforts'] + ['none']))
+        assert request('/api/v1/policy/models', policy, token, method='PUT')[0] == 200
     target_codex = args.codex_model or 'gpt-6-luna'
     directions = ('claude', 'codex') if args.coding_task == 'both' else (args.coding_task,)
     for agent in directions:
@@ -93,21 +132,8 @@ if __name__ == '__main__':
                   'do not just describe a patch. Do not access the network or other directories. '
                   'Do not delegate or start additional agents. '
                   'Finish with CODING_TASK_OK only after the tests pass.')
-        command = [binary, 'run', agent, '--no-guidance', '--']
-        if agent == 'claude':
-            # Begin with the documented portable profile; reasoning acceptance is a separate gate.
-            child_env['MAX_THINKING_TOKENS'] = '0'
-            command += ['--bare', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-                        '--tools', 'Read,Edit,Bash', '--allowedTools', 'Read,Edit,Bash(python3 -m unittest*)',
-                        '--no-session-persistence', '--disable-slash-commands', '--max-turns', '12',
-                        '--model', incoming, '--settings', '{"alwaysThinkingEnabled":false}',
-                        '--system-prompt', 'Complete the small local coding task using the supplied tools. Stay in the current directory.',
-                        '--verbose', '--output-format', 'stream-json', '-p', prompt]
-        else:
-            command += ['--no-daemon', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
-                        '--skip-git-repo-check', '--sandbox', 'workspace-write', '--json',
-                        '-c', 'model_reasoning_effort="none"', '-c', 'web_search="disabled"',
-                        '--model', incoming, prompt]
+        command = coding_command(binary, agent, incoming, prompt, child_env, args.coding_reasoning)
+        print(f'Coding acceptance: agent={agent} reasoning_profile={args.coding_reasoning}; isolated tools, hooks and homes.', flush=True)
         log_offset = len(log.read_text())
         config = json.loads((root / 'config/teamcode/config.json').read_text())
         boundary = coding_fallback(request, token, config['serverUrl'], work, child_env, native_provider,
@@ -119,7 +145,9 @@ if __name__ == '__main__':
         events = []
         for line in result.stdout.splitlines():
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
+                if isinstance(event, dict):
+                    events.append(event)
             except ValueError:
                 pass
         if result.returncode != 0 or 'CODING_TASK_OK' not in result.stdout:
@@ -146,15 +174,15 @@ if __name__ == '__main__':
                 for message in re.findall(r'unsupported\("([^"$]+)"\)', source_file.read_text()):
                     if message.lower() in diagnostics:
                         print('Matched compatibility diagnostic:', message, flush=True)
-            for event in events:
-                for block in event.get('message', {}).get('content', []):
-                    if isinstance(block, dict) and block.get('type') in ('tool_use', 'tool_result'):
-                        print('Tool event:', block['type'], 'name=' + str(block.get('name')), 'is_error=' + str(block.get('is_error')), 'fields=' + ','.join(sorted(block)), flush=True)
-                        if block['type'] == 'tool_use':
-                            print('Tool argument types:', {key: type(value).__name__ for key, value in block.get('input', {}).items()}, flush=True)
-                        else:
-                            content = str(block.get('content', '')).lower()
-                            print('Tool error categories:', [word for word in ['validation', 'invalid', 'null', 'pages', 'permission', 'denied', 'not found', 'does not exist', 'absolute', 'cancel', 'sibling', 'interrupt', 'not allowed', 'approval', 'exit code', 'rejected'] if word in content], flush=True)
+            for block in conversation_blocks(events):
+                if block.get('type') in ('tool_use', 'tool_result'):
+                    print('Tool event:', block['type'], 'name=' + str(block.get('name')), 'is_error=' + str(block.get('is_error')), 'fields=' + ','.join(sorted(block)), flush=True)
+                    if block['type'] == 'tool_use':
+                        arguments = block.get('input')
+                        print('Tool argument types:', {key: type(value).__name__ for key, value in arguments.items()} if isinstance(arguments, dict) else type(arguments).__name__, flush=True)
+                    else:
+                        content = str(block.get('content', '')).lower()
+                        print('Tool error categories:', [word for word in ['validation', 'invalid', 'null', 'pages', 'permission', 'denied', 'not found', 'does not exist', 'absolute', 'cancel', 'sibling', 'interrupt', 'not allowed', 'approval', 'exit code', 'rejected'] if word in content], flush=True)
             for line in log.read_text()[log_offset:].splitlines():
                 if line.startswith('TeamCode inference '): print(line, flush=True)
             raise AssertionError(f'{agent} coding task failed; raw output withheld to protect credentials.')
@@ -165,8 +193,8 @@ if __name__ == '__main__':
                                  capture_output=True, text=True, timeout=15)
         assert checked.returncode == 0, 'Independent post-agent tests failed'
         if agent == 'claude':
-            calls = [block for event in events if event.get('type') == 'assistant'
-                     for block in event.get('message', {}).get('content', []) if block.get('type') == 'tool_use']
+            calls = [block for block in conversation_blocks([event for event in events if event.get('type') == 'assistant'])
+                     if block.get('type') == 'tool_use']
             assert {'Read', 'Edit', 'Bash'} <= {call.get('name') for call in calls}, 'Read/edit/test tools were not all exercised'
             assert any('python3 -m unittest' in call.get('input', {}).get('command', '') for call in calls)
         else:
