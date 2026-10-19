@@ -322,6 +322,64 @@ class PoolGatewayTest {
         missing.accept(FixtureGatewayService.EVENTS.first().toByteArray())
         assertNull(missing.settledUnits)
     }
+    @Test fun responsesCustomToolsRoundTripThroughTheGatewayAndCallerHistory() = runBlocking {
+        val store = FakeAdmission(account)
+        val code = "text(\"Café 🌍\");\n"
+        var calls = 0
+        var alias: String? = null
+        HttpClient(MockEngine { req ->
+            calls++
+            assertEquals("api.anthropic.com", req.url.host)
+            val sent = Json.parseToJsonElement((req.body as TextContent).text).jsonObject
+            val name = sent["tools"]!!.jsonArray.single().jsonObject["name"]!!.jsonPrimitive.content
+            if (calls == 1) {
+                alias = name
+                val arguments = buildJsonObject { put("input", code) }.toString()
+                val events = listOf(
+                    Json.parseToJsonElement("""{"type":"message_start","message":{"id":"test","usage":{"input_tokens":1,"output_tokens":0}}}"""),
+                    buildJsonObject { put("type", "content_block_start"); put("index", 0); putJsonObject("content_block") { put("type", "tool_use"); put("id", "call_custom"); put("name", name); put("input", JsonObject(emptyMap())) } },
+                    buildJsonObject { put("type", "content_block_delta"); put("index", 0); putJsonObject("delta") { put("type", "input_json_delta"); put("partial_json", arguments) } },
+                    Json.parseToJsonElement("""{"type":"content_block_stop","index":0}"""),
+                    Json.parseToJsonElement("""{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}"""),
+                    Json.parseToJsonElement("""{"type":"message_stop"}"""),
+                )
+                respond(events.joinToString("") { "data: $it\n\n" }, headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            } else {
+                assertEquals(alias, name)
+                val messages = sent["messages"]!!.jsonArray
+                val previousCall = messages[1].jsonObject["content"]!!.jsonArray.single().jsonObject
+                assertEquals(name, previousCall["name"]!!.jsonPrimitive.content)
+                assertEquals(code, previousCall["input"]!!.jsonObject["input"]!!.jsonPrimitive.content)
+                assertEquals("call_custom", messages[2].jsonObject["content"]!!.jsonArray.single().jsonObject["tool_use_id"]!!.jsonPrimitive.content)
+                respond(FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            }
+        }) { install(HttpTimeout) }.use { http ->
+            val policy = object : ModelPolicyStore {
+                override suspend fun get(teamId: String) = ModelPolicy(allowedEfforts = listOf("none"))
+                override suspend fun save(actor: Principal, policy: ModelPolicy) = policy
+            }
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), policy, routes(RouteTarget("anthropic", "claude-haiku-test")))
+            val initial = Json.parseToJsonElement("""{"model":"gpt-6-luna","stream":true,"reasoning":{"effort":"none","context":"all_turns"},"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","format":{"type":"text"}}]}]},{"role":"user","content":"Execute the local tool."}]}""").jsonObject
+            suspend fun execute(body: JsonObject): JsonObject {
+                val output = StringBuilder()
+                gateway.forward(GenerationRequest(body.toString().toByteArray(), emptyMap(), actor, WireProtocol.RESPONSES)) { head, chunks ->
+                    assertEquals("anthropic", head.headers["x-teamcode-provider"])
+                    chunks.collect { output.append(it.decodeToString()) }
+                }
+                return output.lines().filter { it.startsWith("data: ") }.map { Json.parseToJsonElement(it.removePrefix("data: ")).jsonObject }.last()["response"]!!.jsonObject
+            }
+            val result = execute(initial)
+            val call = result["output"]!!.jsonArray.single().jsonObject
+            assertEquals("custom_tool_call", call["type"]!!.jsonPrimitive.content)
+            assertEquals("exec", call["name"]!!.jsonPrimitive.content)
+            assertEquals("functions", call["namespace"]!!.jsonPrimitive.content)
+            assertEquals(code, call["input"]!!.jsonPrimitive.content)
+            val followup = initial["input"]!!.jsonArray + result["output"]!!.jsonArray + buildJsonObject { put("type", "custom_tool_call_output"); put("call_id", "call_custom"); put("output", "Café 🌍") }
+            assertEquals("completed", execute(JsonObject(initial + ("input" to JsonArray(followup))))["status"]!!.jsonPrimitive.content)
+            assertEquals(2, calls)
+            assertEquals<List<Long?>>(listOf(11L, 6L), store.charges)
+        }
+    }
 }
 private class FakeAdmission(private val account: AccountRecord, private val accountsPerProvider: Int = 1, private val knownExhaustedModels: Set<String> = emptySet()) : AdmissionStore {
     val affinities = mutableMapOf<RequestAffinity, RouteTarget>()

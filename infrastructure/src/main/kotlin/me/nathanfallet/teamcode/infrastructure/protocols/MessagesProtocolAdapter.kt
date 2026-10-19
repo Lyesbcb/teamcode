@@ -8,7 +8,7 @@ import me.nathanfallet.teamcode.domain.routing.*
 
 class MessagesProtocolAdapter : ProtocolAdapter {
     override fun decoder(): StreamDecoder = MessagesStreamDecoder()
-    override fun encoder(model: String): StreamEncoder = MessagesStreamEncoder(model)
+    override fun encoder(model: String, tools: List<ToolDefinition>?): StreamEncoder = MessagesStreamEncoder(model)
     override val protocol = WireProtocol.MESSAGES
     override fun decode(body: JsonObject): Conversation {
         fields(body, setOf("model", "stream", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking", "output_config", "temperature", "top_p", "stop_sequences", "metadata", "cache_control"))
@@ -62,16 +62,17 @@ class MessagesProtocolAdapter : ProtocolAdapter {
     }
     override fun encode(c: Conversation, model: String): JsonObject = buildJsonObject {
         put("model", model); put("stream", true); put("max_tokens", c.maxOutputTokens ?: 16_384)
-        if (c.instructions.isNotEmpty()) put("system", c.instructions.joinToString("\n\n"))
+        val instructions = c.instructions + listOfNotNull(c.verbosity?.let { "Requested response verbosity: $it. Apply this preference to user-facing responses while completing the required tool work." })
+        if (instructions.isNotEmpty()) put("system", instructions.joinToString("\n\n"))
         val merged = mutableListOf<Turn>()
         c.turns.forEach { turn ->
             if (merged.lastOrNull()?.role == turn.role) merged[merged.lastIndex] = merged.last().copy(content = merged.last().content + turn.content)
             else merged += turn
         }
         putJsonArray("messages") { merged.forEach { turn -> add(buildJsonObject { put("role", turn.role); put("content", JsonArray(turn.content.map(::anthropicPart))) }) } }
-        if (c.tools.isNotEmpty()) putJsonArray("tools") { c.tools.forEach { tool -> add(buildJsonObject { put("name", tool.name); tool.description?.let { put("description", it) }; put("input_schema", json(tool.schema)); tool.strict?.let { put("strict", it) } }) } }
+        if (c.tools.isNotEmpty()) put("tools", ToolBridge(c.tools).definitions())
         putJsonObject("tool_choice") {
-            when (val choice = c.toolChoice) { ToolChoice.Auto -> put("type", "auto"); ToolChoice.None -> put("type", "none"); ToolChoice.Required -> put("type", "any"); is ToolChoice.Named -> { put("type", "tool"); put("name", choice.name) } }
+            when (val choice = c.toolChoice) { ToolChoice.Auto -> put("type", "auto"); ToolChoice.None -> put("type", "none"); ToolChoice.Required -> put("type", "any"); is ToolChoice.Named -> { put("type", "tool"); put("name", toolWireName(choice.name, choice.namespace, choice.inputFormat)) } }
             c.parallelTools?.let { put("disable_parallel_tool_use", !it) }
         }
         if (c.effort == "none") putJsonObject("thinking") { put("type", "disabled") }
@@ -89,7 +90,7 @@ class MessagesProtocolAdapter : ProtocolAdapter {
                 } else { put("type", "url"); put("url", p.url) }
             } }
         }
-        is Part.ToolCall -> buildJsonObject { put("type", "tool_use"); put("id", p.id); put("name", p.name); put("input", json(p.arguments)) }
+        is Part.ToolCall -> buildJsonObject { put("type", "tool_use"); put("id", p.id); put("name", toolWireName(p.name, p.namespace, p.inputFormat)); put("input", if (p.inputFormat == ToolInputFormat.TEXT) buildJsonObject { put("input", p.arguments) } else json(p.arguments)) }
         is Part.ToolResult -> buildJsonObject { put("type", "tool_result"); put("tool_use_id", p.id); put("content", JsonArray(p.content.map(::anthropicPart))); if (p.isError) put("is_error", true) }
     }
     private fun textBlocks(value: JsonElement?): List<String> = when (value) {

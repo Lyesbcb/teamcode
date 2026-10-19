@@ -12,7 +12,7 @@ interface ProtocolAdapter {
     fun decode(body: JsonObject): Conversation
     fun encode(c: Conversation, model: String): JsonObject
     fun decoder(): StreamDecoder
-    fun encoder(model: String): StreamEncoder
+    fun encoder(model: String, tools: List<ToolDefinition>? = null): StreamEncoder
 }
 
 /** Native requests never pass through this registry. Conversions fail rather than lose semantics. */
@@ -23,7 +23,7 @@ class ConversationCodec(codecs: List<ProtocolAdapter> = listOf(MessagesProtocolA
     private fun codec(protocol: WireProtocol) = protocols[protocol]
         ?: throw TeamFailure("translation_unsupported", 422, "This wire protocol has no registered conversation codec.")
     fun decoder(protocol: WireProtocol) = codec(protocol).decoder()
-    fun encoder(protocol: WireProtocol, model: String) = codec(protocol).encoder(model)
+    fun encoder(protocol: WireProtocol, model: String, tools: List<ToolDefinition>? = null) = codec(protocol).encoder(model, tools)
     fun decode(body: JsonObject, protocol: WireProtocol): Conversation = codec(protocol).decode(body)
     fun encode(value: Conversation, protocol: WireProtocol, model: String): JsonObject = codec(protocol).encode(value, model)
 }

@@ -83,6 +83,7 @@ if __name__ == '__main__':
                   'without changing the input. Edit only numbers_util.py. Do not change the tests. '
                   'Run python3 -m unittest -v and fix any failure. Use tools to read, edit and test; '
                   'do not just describe a patch. Do not access the network or other directories. '
+                  'Do not delegate or start additional agents. '
                   'Finish with CODING_TASK_OK only after the tests pass.')
         command = [binary, 'run', agent, '--no-guidance', '--']
         if agent == 'claude':
@@ -115,6 +116,8 @@ if __name__ == '__main__':
                        'invalid_thinking', 'invalid_max_tokens', 'invalid_effort', 'invalid_request', 'api error']
             print('Coding task failure categories:', [m for m in markers if m in diagnostics], flush=True)
             print('Coding task event types:', sorted({str(event.get('type')) for event in events}), flush=True)
+            for names in re.findall(r'cannot preserve: ([a-zA-Z0-9_, ]{1,512})\.', diagnostics):
+                print('Rejected request field identifiers:', names, flush=True)
             # Match only public, source-authored compatibility messages. Never print
             # arbitrary client output, tool arguments, prompts or provider bodies.
             adapters = Path(__file__).resolve().parents[1] / 'infrastructure/src/main/kotlin/me/nathanfallet/teamcode/infrastructure/protocols'

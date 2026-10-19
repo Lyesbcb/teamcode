@@ -9,13 +9,14 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.domain.gateway.WireProtocol
 import me.nathanfallet.teamcode.domain.routing.StreamEvent
+import me.nathanfallet.teamcode.domain.routing.ToolDefinition
 
 class StreamTranslation(private val codecs: ConversationCodec = ConversationCodec()) {
-    fun translate(source: Flow<ByteArray>, from: WireProtocol, to: WireProtocol, model: String): Flow<ByteArray> {
+    fun translate(source: Flow<ByteArray>, from: WireProtocol, to: WireProtocol, model: String, tools: List<ToolDefinition>? = null): Flow<ByteArray> {
         require(from != to)
         return flow {
             val decoder = codecs.decoder(from)
-            val encoder = codecs.encoder(to, model)
+            val encoder = codecs.encoder(to, model, tools)
             val frames = SseFrames()
             // catch observes only upstream/translation failures, never errors thrown by the downstream collector.
             flow {

@@ -36,18 +36,21 @@ data class Conversation(
     val toolChoice: ToolChoice, val parallelTools: Boolean?, val effort: String?,
     val maxOutputTokens: Long?, val temperature: Double?, val topP: Double?, val stops: List<String>,
     val sidecars: Map<WireProtocol, String> = emptyMap(),
+    val verbosity: String? = null,
 )
 data class Turn(val role: String, val content: List<Part>)
 sealed interface Part {
     data class Text(val text: String) : Part
     data class Image(val url: String, val detail: String? = null) : Part
-    data class ToolCall(val id: String, val name: String, val arguments: String) : Part
-    data class ToolResult(val id: String, val content: List<Part>, val isError: Boolean = false) : Part
+    data class ToolCall(val id: String, val name: String, val arguments: String, val namespace: String? = null, val inputFormat: ToolInputFormat = ToolInputFormat.JSON) : Part
+    data class ToolResult(val id: String, val content: List<Part>, val isError: Boolean = false, val inputFormat: ToolInputFormat = ToolInputFormat.JSON) : Part
 }
-data class ToolDefinition(val name: String, val description: String?, val schema: String, val strict: Boolean?)
+enum class ToolInputFormat { JSON, TEXT }
+data class ToolGrammar(val syntax: String, val definition: String)
+data class ToolDefinition(val name: String, val description: String?, val schema: String, val strict: Boolean?, val namespace: String? = null, val inputFormat: ToolInputFormat = ToolInputFormat.JSON, val grammar: ToolGrammar? = null)
 sealed interface ToolChoice {
     data object Auto : ToolChoice
     data object None : ToolChoice
     data object Required : ToolChoice
-    data class Named(val name: String) : ToolChoice
+    data class Named(val name: String, val namespace: String? = null, val inputFormat: ToolInputFormat = ToolInputFormat.JSON) : ToolChoice
 }

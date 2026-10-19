@@ -6,7 +6,14 @@ import me.nathanfallet.teamcode.domain.routing.*
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 
 
-internal fun fields(value: JsonObject, allowed: Set<String>) { if (value.keys.any { it !in allowed }) unsupported("This request contains fields that the cross-provider route cannot preserve.") }
+internal fun fields(value: JsonObject, allowed: Set<String>) {
+    val unknown = value.keys - allowed
+    if (unknown.isNotEmpty()) {
+        // Reflect only bounded field identifiers to the requesting caller, never values.
+        val names = unknown.take(8).map { if (Regex("[a-zA-Z_][a-zA-Z0-9_]{0,63}").matches(it)) it else "unrecognized_field" }.joinToString(", ")
+        unsupported("This request contains fields that the cross-provider route cannot preserve: $names.")
+    }
+}
 internal fun JsonElement?.obj() = this as? JsonObject ?: unsupported("Expected an object.")
 internal fun JsonObject.text(key: String) = get(key)?.primitiveText() ?: unsupported("A required string is missing.")
 internal fun JsonObject.optionalText(key: String) = get(key)?.takeIf { it != JsonNull }?.primitiveText()

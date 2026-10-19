@@ -60,8 +60,12 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
             val transport = transports.singleOrNull { it.provider == target.provider }
                 ?: throw TeamFailure("unsupported_provider", 400, "The configured route provider is unavailable.")
             val translated = transport.protocol != request.protocol
+            var conversation: Conversation? = null
             val outgoing = try {
-                if (translated) codecs.encode(codecs.decode(body, request.protocol), transport.protocol, resolved)
+                if (translated) {
+                    conversation = codecs.decode(body, request.protocol)
+                    codecs.encode(conversation, transport.protocol, resolved)
+                }
                 else JsonObject(body + ("model" to JsonPrimitive(resolved)))
             } catch (error: TeamFailure) {
                 if (error.code != "translation_unsupported") throw error
@@ -86,7 +90,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                 attemptedAccounts += reservation.account.id
                 attempts++
                 try {
-                    attempt(request, receive, transport, outgoing, resolved, model, reservation, translated, reauthenticatedAccounts)
+                    attempt(request, receive, transport, outgoing, resolved, model, reservation, translated, reauthenticatedAccounts, conversation?.tools)
                     return
                 } catch (_: SafeRetry) { /* This definite rejection settled with zero charge; select another account. */ }
             }
@@ -97,7 +101,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
 
     private class SafeRetry(val failure: TeamFailure) : RuntimeException()
     private suspend fun attempt(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit,
-        transport: ProviderTransport, body: JsonObject, model: String, requestedModel: String, reservation: Reservation, translated: Boolean, reauthenticatedAccounts: MutableSet<String>) {
+        transport: ProviderTransport, body: JsonObject, model: String, requestedModel: String, reservation: Reservation, translated: Boolean, reauthenticatedAccounts: MutableSet<String>, replyTools: List<ToolDefinition>?) {
         val meter = SseUsageMeter()
         var knownCharge: Long? = null
         var dispatched = false
@@ -166,7 +170,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                                 emit(chunk)
                             }
                         }
-                        val chunks = if (translated) StreamTranslation(codecs).translate(source, transport.protocol, request.protocol, requestedModel) else source
+                        val chunks = if (translated) StreamTranslation(codecs).translate(source, transport.protocol, request.protocol, requestedModel, replyTools) else source
                         receive(GenerationHead(status, "text/event-stream", mapOf("x-teamcode-request-id" to reservation.id, "x-teamcode-model" to model, "x-teamcode-provider" to transport.provider)), chunks)
                         completed = meter.settledUnits != null
                     }

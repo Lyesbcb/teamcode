@@ -46,9 +46,16 @@ class RouteDirectivePersistenceTest {
                     a.query { QuotaHistory.deleteWhere { accountId eq account.id } }
                     val now = a.query { nowMillis() }
                     val windows = if (extra) listOf("five_hour", "seven_day", "model:fable:seven_day") else listOf("five_hour", "seven_day")
-                    admission.observe(account.id, windows.flatMap { window -> values.mapIndexed { index, value ->
+                    // Use the same clock as the database's future-observation guard. The
+                    // host clock can run slightly ahead of the disposable MySQL VM.
+                    admission.observe(account.id, QuotaUpdate(windows.flatMap { window -> values.mapIndexed { index, value ->
                         AccountQuota(account.id, window, if (window.startsWith("model:")) .99 else value, now - age - 120_000 + index * 60_000, now + 3_600_000)
-                    } })
+                    } }, now))
+                    assertEquals(values.size * 2L, a.query {
+                        QuotaHistory.selectAll().where {
+                            (QuotaHistory.accountId eq account.id) and (QuotaHistory.windowName inList listOf("five_hour", "seven_day"))
+                        }.count()
+                    }, "Every synthetic shared-window sample must be persisted before evaluating guidance")
                 }
                 suspend fun context(account: AccountRecord, requested: String = "claude-opus-test", resolved: String = requested, effort: String? = null, session: String = "test-session", retain: Boolean = false): RequestAffinity {
                     val protocol = if (requested.startsWith("claude")) WireProtocol.MESSAGES else WireProtocol.RESPONSES
