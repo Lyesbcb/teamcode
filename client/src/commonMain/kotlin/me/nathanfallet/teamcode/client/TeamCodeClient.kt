@@ -60,8 +60,8 @@ class TeamCodeClient(
         return response.body()
     }
 
-    suspend fun login(username: String, password: String, device: String = "TeamCode CLI"): LoginResponse =
-        request("/api/v1/auth/login", HttpMethod.Post, LoginRequest(username, password, device))
+    suspend fun login(username: String, password: String, device: String = "TeamCode CLI", installationId: String? = null): LoginResponse =
+        request("/api/v1/auth/login", HttpMethod.Post, LoginRequest(username, password, device, installationId))
     suspend fun me(): MemberView = request("/api/v1/auth/me", HttpMethod.Get)
     suspend fun changePassword(current: String, replacement: String): SuccessResponse =
         request("/api/v1/auth/password", HttpMethod.Post, PasswordRequest(current, replacement))
@@ -87,6 +87,24 @@ class TeamCodeClient(
         return request("/api/v1/routes/$id", HttpMethod.Delete, RouteDeleteRequest(version))
     }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
+    suspend fun devices(memberId: String? = null): List<DeviceView> = request(memberPath(memberId) + "/devices", HttpMethod.Get)
+    suspend fun authSessions(memberId: String? = null): List<AuthSessionView> = request(memberPath(memberId) + "/auth/sessions", HttpMethod.Get)
+    suspend fun renameDevice(id: String, name: String): DeviceView {
+        identifier(id)
+        return request("/api/v1/devices/$id", HttpMethod.Patch, RenameDeviceRequest(name))
+    }
+    suspend fun revokeDevice(id: String) = revoke("devices", id)
+    suspend fun revokeAuthSession(id: String) = revoke("auth/sessions", id)
+    private suspend fun revoke(resource: String, id: String) {
+        identifier(id)
+        checkResponse(http.delete("$origin/api/v1/$resource/$id") { authenticate(); timeout { requestTimeoutMillis = 10_000 } })
+    }
+    private fun memberPath(id: String?): String {
+        if (id == null) return "/api/v1"
+        identifier(id)
+        return "/api/v1/members/$id"
+    }
+    private fun identifier(id: String) { require(Regex("[a-zA-Z0-9-]{1,36}").matches(id)) { "Invalid identifier." } }
 
     private suspend inline fun <reified R> request(path: String, method: HttpMethod): R {
         val response = http.request("$origin$path") { this.method = method; authenticate(); timeout { requestTimeoutMillis = 10_000 } }

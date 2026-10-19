@@ -26,13 +26,14 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
     install(ContentNegotiation) { json(Serialization.json) }
     install(StatusPages) {
         exception<TeamFailure> { call, error ->
+            if (call.response.isCommitted) throw error // A revoked/failed stream cannot become a replacement JSON response.
             if (error.status == 429) call.response.header(HttpHeaders.RetryAfter, "60")
             if (call.request.path().startsWith("/dashboard")) call.respondText(page("Request failed", "<p>${escape(error.message ?: "Request failed.")}</p><a href='/dashboard'>Back to dashboard</a>"), ContentType.Text.Html, HttpStatusCode.fromValue(error.status))
             else call.respond(HttpStatusCode.fromValue(error.status), ApiError(ErrorDetail(error.code, error.message ?: "Request failed.")))
@@ -81,6 +82,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (directives != null) directiveRoutes(directives)
         if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
         if (routes != null) routingRoutes(routes, publicOrigin)
+        if (devices != null && team != null) deviceRoutes(devices, publicOrigin)
         if (cancellation != null && team != null) {
             post("/api/v1/requests/{id}/cancel") {
                 cancellation.cancel(call.principal, call.parameters["id"].orEmpty())
@@ -97,7 +99,8 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = mode,
                 features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") +
                     (if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()) +
-                    (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList())))
+                    (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList()) +
+                    (if (team != null && devices != null) listOf("team.devices") else emptyList())))
         }
         get<StatusResource> {
             val status = gateway.status()

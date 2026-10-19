@@ -105,7 +105,7 @@ private class NoGateway : GatewayService {
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) { error("No inference expected") }
     override suspend fun status() = GatewaySnapshot("test", 0, 0)
 }
-private class FakeTeam : TeamService {
+internal class FakeTeam : TeamService {
     var created = 0
     private val admin = Principal(Member("admin-id", "admin", Role.ADMIN, false, false), "session", "default")
     override suspend fun authenticate(token: String) = when (token) {
@@ -114,7 +114,7 @@ private class FakeTeam : TeamService {
         "member" -> admin.copy(member = admin.member.copy(role = Role.MEMBER))
         else -> null
     }
-    override suspend fun login(username: String, password: String, device: String) = LoginSession("admin", admin, Long.MAX_VALUE)
+    override suspend fun login(username: String, password: String, device: String, installationId: String?) = LoginSession("admin", admin, Long.MAX_VALUE)
     override suspend fun logout(principal: Principal) = Unit
     override suspend fun changePassword(principal: Principal, current: String, replacement: String) = Unit
     override suspend fun members(principal: Principal): List<Member> { principal.requireAdmin(); return listOf(admin.member) }

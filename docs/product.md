@@ -32,6 +32,8 @@ teamcode service start|stop|restart|status|logs|uninstall
 
 ### Two authentication lifecycles
 
+Implemented identity-management commands include `teamcode whoami`, `teamcode devices list|rename|revoke` and `teamcode auth sessions list|revoke`. See [devices and authentication sessions](devices.md). These login sessions are distinct from the target agent-activity registry behind `teamcode sessions list`, which remains planned.
+
 `login` asks for a username/password created by the team administrator, handles the required initial password change, and stores only a revocable session token. Persist the selected self-hosted server URL and TeamCode authentication under `$XDG_CONFIG_HOME/teamcode/`, falling back to `~/.config/teamcode/`. Ask for the server URL during first setup; subsequent invocations reuse the saved origin and authentication. Use an owner-only directory (0700) and configuration file (0600) on POSIX, and an equivalent owner-only DACL on Windows. Never store provider pool credentials or the user's password in this configuration.
 
 `accounts add` signs into the provider in a local browser, binds the callback to state/PKCE as supported by that provider, and uploads the necessary authentication to a dedicated HTTPS server operation. The server verifies the account identity, encrypts credentials and becomes their refresh owner. No provider password is sent to TeamCode. The local proxy needs only a TeamCode credential after enrollment. Account enrollment requires an explicit permission, not merely membership.

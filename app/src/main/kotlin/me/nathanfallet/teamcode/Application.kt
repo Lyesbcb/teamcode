@@ -29,6 +29,7 @@ import me.nathanfallet.teamcode.infrastructure.database.SqlRequestCancellationSt
 import me.nathanfallet.teamcode.domain.team.TeamService
 import me.nathanfallet.teamcode.infrastructure.database.Database
 import me.nathanfallet.teamcode.infrastructure.database.SqlTeamService
+import me.nathanfallet.teamcode.infrastructure.database.SqlDeviceService
 import me.nathanfallet.teamcode.infrastructure.fixtures.FixtureGatewayService
 import me.nathanfallet.teamcode.presentation.configureGateway
 import org.koin.dsl.koinApplication
@@ -78,6 +79,7 @@ fun main() {
         }
     }
     val team = database?.let { SqlTeamService(it) }
+    val devices = database?.let { SqlDeviceService(it) }
     val initialPassword = runBlocking { team?.bootstrap() }
     if (initialPassword != null) {
         // The sole logging exception: explicitly requested, only after first-admin creation commits.
@@ -94,6 +96,6 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

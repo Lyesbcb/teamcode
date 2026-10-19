@@ -17,12 +17,13 @@ import me.nathanfallet.teamcode.cli.accounts.Accounts
 import me.nathanfallet.teamcode.cli.agents.Agents
 import me.nathanfallet.teamcode.cli.launch.Run
 import me.nathanfallet.teamcode.cli.service.Service
+import me.nathanfallet.teamcode.cli.identity.*
 
 const val VERSION = "0.1.0-SNAPSHOT"
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service(), WhoAmI(), Auth(), Devices()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {
@@ -33,6 +34,7 @@ private class Login : SuspendingCliktCommand(name = "login") {
     private val server by option("--server", help = "Your self-hosted server origin; saved after login.")
     private val username by option("--username", help = "Your TeamCode username; prompted when omitted.")
     private val passwordStdin by option("--password-stdin", help = "Read passwords from stdin for automation.").flag()
+    private val device by option("--device", help = "Device label for a new CLI installation; existing names are preserved.").default("TeamCode CLI")
     override suspend fun run() {
         val terminal by lazy { Terminal() }
         fun read(label: String, secret: Boolean = false): String {
@@ -42,14 +44,15 @@ private class Login : SuspendingCliktCommand(name = "login") {
         val origin = validateServerUrl(server ?: ConfigStore().load()?.serverUrl ?: read("TeamCode server URL"))
         val name = username ?: read("Username")
         var password = read("Password", secret = true)
-        var session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password) }
+        val installation = InstallationStore().id()
+        var session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password, device, installation) }
         if (session.member.passwordChangeRequired) {
             echo("Choose a new password with at least 14 characters. This will sign out all existing sessions.")
             val replacement = read("New password", secret = true)
             require(replacement == read("Confirm new password", secret = true)) { "Passwords do not match." }
             sdk(CliConfig(origin, session.accessToken)).use { it.changePassword(password, replacement) }
             password = replacement
-            session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password) }
+            session = sdk(CliConfig(origin, "unauthenticated")).use { it.login(name, password, device, installation) }
         }
         ConfigStore().save(CliConfig(origin, session.accessToken))
         echo("Signed in as ${session.member.username}. Configuration saved to ${configPath()}.")

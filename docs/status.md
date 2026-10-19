@@ -397,3 +397,22 @@ Final acceptance for this slice: [CI run 39245062065](https://github.com/nathanf
 Registry inspection confirms that `nathanfallet/teamcode:latest` and `nathanfallet/teamcode:sha-f727dbc842f384e5b6d905533ff2ac789ad02452` resolve to the same manifest digest, `sha256:49fc4491af50d19b9125f9d944268ebd6c83fc24fd21c1cb5acbf8ffa7b1514b`, with both `linux/amd64` and `linux/arm64` images. Publication does not deploy or restart a Kubernetes workload. At the owner's request, both temporary diagnostic branches and their clean owned worktree were removed after their runs completed. Their findings and CI references remain recorded here.
 
 This closes the native cancellation gate, not V1 release acceptance. Real-load fairness/forecasting, polling/engine overhead, soft borrowing/reconciliation, remaining team administration, full-default provider portability, versioned distribution/update/rollback and operational acceptance remain in scope.
+
+
+## Registered devices and authentication sessions (2026-10-19)
+
+The CLI now registers a logical installation on password login. Its atomically created private `installation-id` file survives logout and server changes; concurrent first logins reuse one identity. Registration is scoped to the authenticated member, preserves dashboard-edited names and does not change member allowances. Older CLI and browser sessions remain valid without an associated device.
+
+Owners and administrators can list, rename and remove devices and list/revoke authentication sessions through the dashboard, API and native CLI. Commands include `teamcode whoami`, `teamcode devices list|rename|revoke` and `teamcode auth sessions list|revoke`. The planned top-level `teamcode sessions list` agent-run registry remains separate and unimplemented. Device removal revokes all attached tokens; reconnecting requires password authentication. Revocation now monitors authenticated inference even when an older client supplied no cancellation UUID. Already-committed streams are terminated without appending a replacement JSON error.
+
+Verification before publication:
+
+- **138 JVM tests passed**, zero failures/errors/skips: API 3, client 6, domain 25, infrastructure 72, presentation 10, CLI 20 and app 2. Packaged server and actual macOS ARM64/Linux x64 native binaries built successfully.
+- Real MySQL tests with independent pools verify concurrent enrollment, member/team authorization, legacy-session compatibility, name persistence, bounded registrations, scoped session/device revocation and unchanged member spending across devices/reconnects. Typed Exposed fixtures verify upgrades from published identity schemas, including schema 16 to 18; no handwritten fixture SQL was introduced.
+- Two real HTTP servers with independent MySQL pools verify that device revocation on one replica stops an untagged authenticated stream on the other, invalidates subsequent authentication and does not append JSON to committed SSE.
+- Actual macOS and Linux native binaries pass the isolated device fixture, including four concurrent password logins, private atomic installation identity, logout/login persistence, Unicode names, typed lists and authorization/revocation. The native CLI against the real server/MySQL also passes bootstrap/password change, browser member creation, rename, reconnect and multi-session revocation while preserving the independent browser session.
+- Existing macOS native authenticated streaming, pre-response cancellation and service lifecycle fixtures pass again. Exposed replays all **18 migrations** and generates **zero additional migrations**. Published migration files are unchanged. Module/query conventions and whitespace checks pass. No personal credentials or provider requests were used.
+
+An accidental overlap of two local Gradle invocations corrupted their shared test-result output. Both invocations terminated; the full suite and native builds then passed in one serial invocation. Contributor instructions now prohibit overlapping Gradle tasks in the same checkout.
+
+The preceding main commit `567ca97` has a fully green [CI run](https://github.com/nathanfallet/teamcode/actions/runs/39246084876). This new device slice still requires CI, particularly Windows runtime acceptance of concurrent private identity creation and the new commands, before cross-platform acceptance or image publication can be claimed. See [device documentation](devices.md) for behavior and limits. Remaining V1 administration, routing/reasoning, fairness/forecasting, distribution and operations gates remain open.

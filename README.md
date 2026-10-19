@@ -36,6 +36,21 @@ teamcode logout
 
 The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: open the URL in a browser and paste the complete `code#state` (Claude) or final `http://localhost:1455/auth/callback?...` address (Codex) into the hidden prompt. Codex uses its registered redirect address; no local callback listener is started, so paste the address even when the browser reports that the page cannot load. Credentials are sent to TeamCode, where the Claude profile/Max subscription or Codex authenticated subscription identity is checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. Stop any other credential refresher before explicit `handover --confirm` or import `--take-ownership`. Reconnect with `accounts add --provider claude` or `accounts add --provider codex`; verified enrollment updates an existing account. The Codex login flow has synthetic protocol tests; a live browser-consent acceptance run remains pending. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
 
+## Devices and authentication sessions
+
+Use the dashboard's **Devices** page to see your CLI installations and login sessions. Administrators can manage a member's devices from **Team**. Register a friendly label with `teamcode login --device "Developer workstation"`; reconnecting preserves a dashboard-edited name.
+
+```sh
+teamcode whoami
+teamcode devices list
+teamcode auth sessions list
+teamcode devices rename DEVICE_ID --name "Support laptop"
+teamcode auth sessions revoke SESSION_ID
+teamcode devices revoke DEVICE_ID
+```
+
+Revoking a device signs out its sessions across replicas. Usage remains shared by member; adding or reconnecting devices does not reset allowances. The non-secret installation identity survives logout, while the credential file is removed. See [device lifecycle and authorization](docs/devices.md). Authentication sessions are separate from the planned agent-run registry.
+
 ## Kubernetes
 
 The [Helm chart](helm/teamcode/README.md) follows the `pkg` chart conventions, with two stateless server replicas, streaming ingress settings, a persistent optional MySQL 8.4 instance, external database support, HPA, probes and draining. All replicas share database-backed sessions, quotas, refresh ownership and worker leases; see [replica behavior](docs/replicas.md). Redis and sticky sessions are not required. The image workflow publishes `nathanfallet/teamcode:latest` and immutable commit tags after verification.

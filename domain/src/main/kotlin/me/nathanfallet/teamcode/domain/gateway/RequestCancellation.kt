@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.domain.gateway
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
+import kotlin.uuid.Uuid
 import me.nathanfallet.teamcode.domain.team.Principal
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 import me.nathanfallet.teamcode.domain.team.requireReady
@@ -56,10 +57,14 @@ class CancellableGateway(private val delegate: GatewayService, private val cance
     override suspend fun status() = delegate.status()
     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, Flow<ByteArray>) -> Unit) {
         val id = request.clientRequestId
-        if (id == null) delegate.forward(request, receive)
-        else {
-            val actor = request.principal ?: throw TeamFailure("authentication_required", 401, "A member session is required.")
-            cancellation.run(actor, id) { delegate.forward(request, receive) }
+        val actor = request.principal
+        if (actor == null) {
+            if (id != null) throw TeamFailure("authentication_required", 401, "A member session is required.")
+            delegate.forward(request, receive)
+        } else {
+            // Legacy/direct clients have no control ID, but their sessions must still be
+            // revalidated while streaming. This server-only ID never reaches a provider.
+            cancellation.run(actor, id ?: Uuid.random().toString()) { delegate.forward(request, receive) }
         }
     }
 }

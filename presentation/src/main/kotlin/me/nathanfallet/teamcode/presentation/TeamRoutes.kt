@@ -23,7 +23,7 @@ internal suspend inline fun <reified T> ApplicationCall.jsonBody(): T {
 internal fun Route.teamRoutes(team: TeamService) {
     post("/api/v1/auth/login") {
         val input = call.jsonBody<LoginRequest>()
-        val session = team.login(input.username, input.password, input.device)
+        val session = team.login(input.username, input.password, input.device, input.installationId)
         call.respond(LoginResponse(session.token, session.expiresAt, session.principal.member.view()))
     }
     get("/api/v1/auth/me") { call.respond(call.principal.member.view()) }

@@ -73,4 +73,24 @@ class RequestCancellationTest {
         gateway.forward(GenerationRequest(byteArrayOf(), emptyMap())) { _, _ -> }
         assertEquals(1, calls)
     }
+
+    @Test fun authenticatedLegacyRequestsAlsoRemainMonitoredWithoutAClientControlId() = runTest {
+        val store = Store()
+        var entered = false
+        var released = false
+        val gateway = CancellableGateway(object : GatewayService {
+            override suspend fun status() = GatewaySnapshot("test", 0, 0)
+            override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
+                assertNull(request.clientRequestId)
+                entered = true
+                try { awaitCancellation() } finally { released = true }
+            }
+        }, RequestCancellationService(store))
+        val pending = async { gateway.forward(GenerationRequest(byteArrayOf(), emptyMap(), actor)) { _, _ -> } }
+        runCurrent(); assertTrue(entered)
+        store.cancelled = true
+        advanceTimeBy(RequestCancellationService.POLL_MILLIS); runCurrent()
+        assertFailsWith<CancellationException> { pending.await() }
+        assertTrue(released)
+    }
 }

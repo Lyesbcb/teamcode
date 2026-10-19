@@ -26,6 +26,8 @@ object Tokens : Table("tokens") {
     val memberId = reference("member_id", Members.id, onDelete = ReferenceOption.NO_ACTION, onUpdate = ReferenceOption.NO_ACTION, fkName = "tokens_ibfk_1").index("token_member")
     val tokenHash = char("token_hash", 64).uniqueIndex()
     val device = varchar("device", 120)
+    val deviceId = reference("device_id", Devices.id, onDelete = ReferenceOption.CASCADE).nullable().index("token_device")
+    val createdAt = long("created_at").nullable()
     val expiresAt = long("expires_at")
     override val primaryKey = PrimaryKey(id)
 }

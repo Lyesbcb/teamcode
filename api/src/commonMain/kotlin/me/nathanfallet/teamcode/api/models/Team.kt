@@ -3,7 +3,7 @@ package me.nathanfallet.teamcode.api.models
 import kotlinx.serialization.Serializable
 
 @Serializable
-class LoginRequest(val username: String, val password: String, val device: String = "TeamCode CLI") {
+class LoginRequest(val username: String, val password: String, val device: String = "TeamCode CLI", val installationId: String? = null) {
     override fun toString() = "LoginRequest([REDACTED])"
 }
 @Serializable

@@ -13,7 +13,7 @@ class TeamFailure(val code: String, val status: Int, message: String) : Exceptio
 
 /** All authorization and last-administrator invariants belong here or in its transactional adapter. */
 interface TeamService {
-    suspend fun login(username: String, password: String, device: String): LoginSession
+    suspend fun login(username: String, password: String, device: String, installationId: String? = null): LoginSession
     suspend fun authenticate(token: String): Principal?
     suspend fun logout(principal: Principal)
     suspend fun changePassword(principal: Principal, current: String, replacement: String)

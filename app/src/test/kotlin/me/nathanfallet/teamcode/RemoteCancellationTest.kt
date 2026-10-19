@@ -7,6 +7,8 @@ import io.ktor.http.*
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import java.net.Socket
+import java.net.SocketException
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
@@ -33,8 +35,10 @@ class RemoteCancellationTest {
                 val password = teamA.bootstrap()!!
                 val initial = teamA.login("admin", password, "HTTP cancellation")
                 teamA.changePassword(initial.principal, password, "HTTP cancellation replacement")
-                val session = teamA.login("admin", "HTTP cancellation replacement", "HTTP cancellation")
+                val session = teamA.login("admin", "HTTP cancellation replacement", "HTTP cancellation", UUID.randomUUID().toString())
                 val actor = session.principal
+                val devicesA = SqlDeviceService(a); val devicesB = SqlDeviceService(b)
+                val registeredDevice = devicesA.devices(actor).single()
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 47 }))
                 val account = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "http-cancellation", "org"), "HTTP cancellation"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "http-enrollment") as EnrollmentResult.Created
                 accounts.handover("default", account.account.id, accessOnly = true)
@@ -52,6 +56,7 @@ class RemoteCancellationTest {
                     override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
                         assertFalse("x-teamcode-client-request-id" in request.headers, "Control metadata must not enter provider headers")
                         if (streamingMode.get()) {
+                            assertNull(request.clientRequestId, "Legacy clients also need active session revalidation")
                             receive(GenerationHead(200, "text/event-stream"), flow {
                                 try {
                                     emit("data: started\n\n".toByteArray())
@@ -67,8 +72,8 @@ class RemoteCancellationTest {
                         } finally { finished.complete(Unit) }
                     }
                 }, cancellationA)
-                val serverA = embeddedServer(Netty, host = "127.0.0.1", port = 0) { configureGateway(gateway, team = teamA, cancellation = cancellationA) }
-                val serverB = embeddedServer(Netty, host = "127.0.0.1", port = 0) { configureGateway(gateway, team = teamB, cancellation = cancellationB) }
+                val serverA = embeddedServer(Netty, host = "127.0.0.1", port = 0) { configureGateway(gateway, team = teamA, cancellation = cancellationA, devices = devicesA) }
+                val serverB = embeddedServer(Netty, host = "127.0.0.1", port = 0) { configureGateway(gateway, team = teamB, cancellation = cancellationB, devices = devicesB) }
                 serverA.start(wait = false); serverB.start(wait = false)
                 try {
                     val portA = serverA.engine.resolvedConnectors().single().port
@@ -107,18 +112,33 @@ class RemoteCancellationTest {
                         assertEquals(100, admission.capacity(actor).chargedAndReservedUnits)
                     }
                     streamingMode.set(true)
-                    val streamId = UUID.randomUUID().toString()
                     Socket("127.0.0.1", portA).use { inference ->
                         val body = """{"model":"claude-test","stream":true,"messages":[]}""".toByteArray()
                         inference.getOutputStream().apply {
-                            write("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:$portA\r\nAuthorization: Bearer ${session.token}\r\nx-teamcode-client-request-id: $streamId\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n\r\n".toByteArray())
+                            write("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:$portA\r\nAuthorization: Bearer ${session.token}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\n\r\n".toByteArray())
                             write(body); flush()
                         }
                         withTimeout(3_000) { streamingEntered.await() }
                         HttpClient(CIO).use { client ->
-                            assertEquals(HttpStatusCode.NoContent, client.post("http://127.0.0.1:$portB/api/v1/requests/$streamId/cancel") { bearerAuth(session.token) }.status)
+                            assertEquals(HttpStatusCode.NoContent, client.delete("http://127.0.0.1:$portB/api/v1/devices/${registeredDevice.id}") { bearerAuth(session.token) }.status)
+                            assertEquals(HttpStatusCode.Unauthorized, client.get("http://127.0.0.1:$portA/api/v1/auth/me") { bearerAuth(session.token) }.status)
                         }
                         withTimeout(3_000) { streamingReleased.await() }
+                        inference.soTimeout = 3_000
+                        val received = withContext(Dispatchers.IO) {
+                            val output = ByteArrayOutputStream()
+                            val buffer = ByteArray(1024)
+                            try {
+                                while (true) {
+                                    val count = inference.getInputStream().read(buffer)
+                                    if (count < 0) break
+                                    output.write(buffer, 0, count)
+                                }
+                            } catch (_: SocketException) { /* An aborted committed stream may reset the connection. */ }
+                            output.toString(Charsets.UTF_8)
+                        }
+                        assertTrue(received.contains("data: started"))
+                        assertFalse(received.contains("authentication_required"), "Never inject a replacement error body after committed SSE output")
                     }
                 } finally { serverA.stop(0, 5_000); serverB.stop(0, 5_000); admission.settle(held, 0) }
             } }

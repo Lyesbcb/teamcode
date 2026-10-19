@@ -21,11 +21,7 @@ class UnknownQuotaResetPersistenceTest {
                 .locations("classpath:db/migration").target("9").load().migrate()
             Database(container.jdbcUrl, container.username, container.password).use { a ->
             Database(container.jdbcUrl, container.username, container.password).use { b ->
-                val team = SqlTeamService(a)
-                val temporary = team.bootstrap()!!
-                val initial = team.login("admin", temporary, "quota fixture")
-                team.changePassword(initial.principal, temporary, "quota fixture replacement password")
-                val admin = team.login("admin", "quota fixture replacement password", "quota fixture").principal
+                val admin = seedLegacyAdministrator(a, "quota fixture replacement password").principal
                 val store = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 19 }))
                 val account = (store.upsert(
                     VerifiedProviderAccount(AccountIdentity("default", "anthropic", "fixture-user", "fixture-org"), "Fixture account"),

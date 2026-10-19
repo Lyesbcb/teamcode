@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS devices (id VARCHAR(36) PRIMARY KEY, member_id VARCHAR(36) NOT NULL, installation_id VARCHAR(36) NOT NULL, `name` VARCHAR(120) NOT NULL, created_at BIGINT NOT NULL, last_login_at BIGINT NOT NULL, CONSTRAINT fk_devices_member_id__id FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE ON UPDATE RESTRICT);
+ALTER TABLE devices ADD CONSTRAINT device_member_installation UNIQUE (member_id, installation_id);

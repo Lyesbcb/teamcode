@@ -10,6 +10,7 @@
 - Use the Exposed DSL for all database queries, mutations and locks, including test fixtures. Do not write raw SQL or call `exec` with SQL strings. Keep HikariCP for connection pooling and Flyway for migration execution; generate new migrations from Exposed table definitions and review their output. Preserve already-published Flyway migrations unchanged.
 - Put business rules in use cases and services, never in HTTP routes or CLI commands. Use constructor injection and Koin in the server composition root.
 - Native CLI: no JVM at runtime. Test the actual native binary; JVM tests alone do not validate TLS, streaming or process behavior.
+- Do not run overlapping Gradle tasks concurrently in the same checkout/output directories. Batch them in one invocation or use isolated owned worktrees.
 - Never log credentials, prompts or response bodies. The only exception is the initial administrator temporary password, printed once after first-run creation commits, as explicitly requested by the project owner. Never print it again on restart. No real provider calls in normal tests or PR CI.
 - Extend providers through `ProviderTransport` and `OAuthEnrollmentProvider`; extend incoming HTTP formats through `InboundProtocol` and request/stream formats through `ProtocolAdapter`. Keep team policy and account selection shared. Document capability limits and test real protocol fixtures before claiming support.
 - Preserve coroutine cancellation. Bound request bodies, queues, retries and network waits. Never replay a stream after committed output.

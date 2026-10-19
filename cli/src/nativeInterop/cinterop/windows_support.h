@@ -68,7 +68,7 @@ static inline int teamcode_windows_owner_matches(const wchar_t *path, PSID expec
 
 /* Protected DACL with one explicit allow entry for the current user, on both directory and file. */
 static inline int teamcode_windows_write_private(const wchar_t *path, const wchar_t *parent,
-        const wchar_t *temporary, const void *bytes, unsigned long length) {
+        const wchar_t *temporary, const void *bytes, unsigned long length, int replace_existing) {
     wchar_t *sid = teamcode_windows_user_sid();
     if (!sid) return 1;
     size_t capacity = 64 + 2 * wcslen(sid);
@@ -120,8 +120,10 @@ static inline int teamcode_windows_write_private(const wchar_t *path, const wcha
     file = INVALID_HANDLE_VALUE;
     stage = 10;
     for (int attempt = 0; attempt < 20; attempt++) {
-        if (MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { success = 1; break; }
+        DWORD flags = MOVEFILE_WRITE_THROUGH | (replace_existing ? MOVEFILE_REPLACE_EXISTING : 0);
+        if (MoveFileExW(temporary, path, flags)) { success = 1; break; }
         DWORD error = GetLastError();
+        if (!replace_existing && (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS)) { stage = -1; goto cleanup; }
         if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) break;
         Sleep(25); /* A concurrent token read may briefly hold a non-delete-sharing handle. */
     }

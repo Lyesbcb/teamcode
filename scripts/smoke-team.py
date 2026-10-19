@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
                     time.sleep(.25)
             raise RuntimeError('TeamCode readiness timed out')
 
-        def request(path, data=None, token=None, opener=None, form=False, csrf_origin=None):
+        def request(path, data=None, token=None, opener=None, form=False, csrf_origin=None, method=None):
             headers = {}
             body = None
             if data is not None:
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
                 headers['Authorization'] = 'Bearer ' + token
             if csrf_origin:
                 headers['Origin'] = csrf_origin
-            req = urllib.request.Request(origin + path, body, headers)
+            req = urllib.request.Request(origin + path, body, headers, method=method)
             try:
                 with (opener or urllib.request.build_opener()).open(req, timeout=20) as response:
                     return response.status, response.read().decode()
@@ -120,6 +120,17 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert saved['serverUrl'] == origin
         assert password not in json.dumps(saved) and initial not in json.dumps(saved)
         assert request('/api/v1/members', token=token)[0] == 200
+        identity_file = root / 'config/teamcode/installation-id'
+        installation = identity_file.read_text()
+        assert re.fullmatch(r'[0-9a-f-]{36}', installation)
+        status, device_json = request('/api/v1/devices', token=token)
+        devices = json.loads(device_json)
+        assert status == 200 and len(devices) == 1 and devices[0]['current'] and devices[0]['activeSessions'] == 1
+        device_id = devices[0]['id']
+        assert 'admin (admin)' in command([binary, 'whoami'], env=env, timeout=15).stdout
+        assert device_id in command([binary, 'devices', 'list'], env=env, timeout=15).stdout
+        assert 'current' in command([binary, 'auth', 'sessions', 'list'], env=env, timeout=15).stdout
+        command([binary, 'devices', 'rename', device_id, '--name', 'Administrator workstation'], env=env, timeout=15)
         cookies = http.cookiejar.CookieJar()
         browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
         assert request('/dashboard/login', {'username': 'admin', 'password': password}, opener=browser, form=True, csrf_origin=origin)[0] == 200
@@ -143,9 +154,22 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         command([binary, 'status'], env=env, timeout=15)
         command([binary, 'logout'], env=env, timeout=15)
         assert not (root / 'config/teamcode/config.json').exists()
+        assert identity_file.read_text() == installation
         assert request('/api/v1/members', token=token)[0] == 401
+        command([binary, 'login', '--server', origin, '--username', 'admin', '--password-stdin'], env=env, input=password + '\n', timeout=30)
+        assert identity_file.read_text() == installation
+        token = json.loads((root / 'config/teamcode/config.json').read_text())['accessToken']
+        devices = json.loads(request('/api/v1/devices', token=token)[1])
+        assert len(devices) == 1 and devices[0]['id'] == device_id and devices[0]['name'] == 'Administrator workstation'
+        # A different client on the same workstation creates another token under the same device.
+        extra = json.loads(request('/api/v1/auth/login', {'username': 'admin', 'password': password, 'installationId': installation})[1])['accessToken']
+        assert json.loads(request('/api/v1/devices', token=extra)[1])[0]['activeSessions'] == 2
+        command([binary, 'devices', 'revoke', device_id], env=env, timeout=15)
+        assert request('/api/v1/auth/me', token=token)[0] == 401 and request('/api/v1/auth/me', token=extra)[0] == 401
+        assert request('/dashboard/devices', opener=browser)[0] == 200, 'Revoking a CLI device signed out the independent browser'
+        assert 'Administrator workstation' not in request('/dashboard/devices', opener=browser)[1]
         assert password not in log.read_text() and temporary not in log.read_text()
-        print('Team smoke passed: one-time bootstrap, forced password change, browser member creation, native login/logout, restart persistence and revocation.')
+        print('Team smoke passed: bootstrap, password change, browser member creation, native identity/session commands, device rename, login/logout persistence and scoped multi-session revocation.')
     finally:
         stop_own_process()
         if container_created:
