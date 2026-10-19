@@ -157,20 +157,33 @@ def main():
                 assert stat.S_IMODE(identity.stat().st_mode) == 0o600
                 assert stat.S_IMODE(identity.parent.stat().st_mode) == 0o700
             else:
-                acl = r'''
-                $ErrorActionPreference='Stop'
-                $acl=Get-Acl -LiteralPath $env:TEAMCODE_TEST_IDENTITY
-                $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
-                $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-                if (!$acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
-                    $rules[0].IdentityReference.Value -ne $owner -or $rules[0].IsInherited -or
-                    $rules[0].AccessControlType -ne 'Allow' -or
-                    ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) {
-                    throw 'Installation identity is not protected by an owner-only DACL'
-                }
+                # Use the same SID projection as the established Windows config fixture.
+                acl_script = r'''
+                $ErrorActionPreference = 'Stop'
+                $acl = Get-Acl -LiteralPath $env:TEAMCODE_TEST_IDENTITY
+                [pscustomobject]@{
+                  user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                  owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                  protected = $acl.AreAccessRulesProtected
+                  rules = @($acl.Access | ForEach-Object {
+                    [pscustomobject]@{
+                      sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+                      inherited = $_.IsInherited
+                      type = $_.AccessControlType.ToString()
+                      full = ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl
+                    }
+                  })
+                } | ConvertTo-Json -Depth 4 -Compress
                 '''
-                subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', acl],
-                               env=dict(env, TEAMCODE_TEST_IDENTITY=str(identity)), check=True, capture_output=True, timeout=15)
+                for path in (identity, identity.parent):
+                    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', acl_script],
+                                            env=dict(env, TEAMCODE_TEST_IDENTITY=str(path)),
+                                            text=True, encoding='utf-8', capture_output=True, timeout=15)
+                    assert result.returncode == 0, 'Windows identity ACL inspection failed: ' + result.stderr
+                    acl = json.loads(result.stdout)
+                    assert acl['owner'] == acl['user'] and acl['protected'], 'Identity ownership or protected DACL is incorrect'
+                    assert len(acl['rules']) == 1, 'Unexpected users/groups can access the identity'
+                    assert acl['rules'][0] == {'sid': acl['user'], 'inherited': False, 'type': 'Allow', 'full': True}, acl
             assert 'fixture (member)' in command('whoami').stdout
             assert device in command('devices', 'list').stdout
             sessions = command('auth', 'sessions', 'list').stdout
