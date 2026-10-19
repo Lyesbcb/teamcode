@@ -106,7 +106,7 @@ class AgentRunPersistenceTest {
             assertEquals(120, current.chargedAndReservedUnits); assertEquals(2, current.attempts); assertEquals(1, current.completed)
             f.a.query { Reservations.update({ Reservations.runId eq id }) { it[dayNumber] = nowMillis() / DAY - 91 } }
             f.admission.maintain()
-            assertTrue(f.a.query { Reservations.select(Reservations.id).where { Reservations.runId eq id }.empty() })
+            assertEquals(listOf(held.id), f.a.query { Reservations.select(Reservations.id).where { Reservations.runId eq id }.map { it[Reservations.id] } }, "Resolved details expire; the unknown charge remains available for reconciliation")
             assertEquals(120, b.get(f.member.principal, id).run.chargedAndReservedUnits)
             failure("run_allowance") { f.admission.reserve(f.member.principal, input(id, 1)) }
         }

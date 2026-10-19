@@ -113,6 +113,16 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         runId?.let { recordRunAdmission(it, units, affinity, provider, model, now) }
         Reservation(id, chosen, units)
     }
+    override suspend fun recordProviderRequest(reservation: Reservation, requestId: String) {
+        require(ProviderRequestIds.valid(requestId))
+        database.query {
+            lockTeam(reservation.account.identity.teamId)
+            Reservations.update({ (Reservations.id eq reservation.id) and (Reservations.teamId eq reservation.account.identity.teamId) and
+                (Reservations.accountId eq reservation.account.id) and (Reservations.state eq "ACTIVE") }) {
+                it[providerRequestId] = requestId
+            }
+        }
+    }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {
         require(actualUnits == null || actualUnits in 0..100_000_000)
         database.query {
@@ -190,7 +200,8 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
             AdmissionWaiters.deleteWhere(limit = 1000) { expiresAt lessEq now }
             ConversationAffinities.deleteWhere(limit = 1000) { expiresAt lessEq now }
             QuotaHistory.deleteWhere(limit = 1000) { observedAt less now - 7 * DAY }
-            Reservations.deleteWhere(limit = 1000) { dayNumber less now / DAY - 90 }
+            // Unknown charges must remain reviewable, including after an expired process lease.
+            Reservations.deleteWhere(limit = 1000) { (dayNumber less now / DAY - 90) and (state inList listOf("SETTLED", "RECONCILED")) }
             AgentRuns.deleteWhere(limit = 1000) {
                 (heartbeatAt less now - 90 * DAY) and (lastRequestAt.isNull() or (lastRequestAt less now - 90 * DAY)) and
                     (endedAt.isNull() or (endedAt less now - 90 * DAY)) and

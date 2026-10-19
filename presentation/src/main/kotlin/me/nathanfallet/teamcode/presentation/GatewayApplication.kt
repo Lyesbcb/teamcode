@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null, serviceKeys: ServiceKeyService? = null, audit: AuditService? = null, pacingSettings: me.nathanfallet.teamcode.domain.capacity.PacingSettingsStore? = null, forecasts: me.nathanfallet.teamcode.domain.capacity.ForecastService? = null, forecastLivePolicy: ForecastLivePolicy = ForecastLivePolicy(), groups: GroupService? = null, runs: AgentRunService? = null, budgetOverrides: me.nathanfallet.teamcode.domain.capacity.BudgetOverrideService? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null, serviceKeys: ServiceKeyService? = null, audit: AuditService? = null, pacingSettings: me.nathanfallet.teamcode.domain.capacity.PacingSettingsStore? = null, forecasts: me.nathanfallet.teamcode.domain.capacity.ForecastService? = null, forecastLivePolicy: ForecastLivePolicy = ForecastLivePolicy(), groups: GroupService? = null, runs: AgentRunService? = null, budgetOverrides: me.nathanfallet.teamcode.domain.capacity.BudgetOverrideService? = null, reconciliation: me.nathanfallet.teamcode.domain.capacity.UsageReconciliationService? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -86,6 +86,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (accounts != null) accountRoutes(accounts, publicOrigin)
         if (admission != null && team != null) capacityRoutes(admission, team, publicOrigin, budgetOverrides != null)
         if (team != null && admission != null && budgetOverrides != null) { budgetOverrideRoutes(budgetOverrides); budgetOverrideDashboardRoutes(budgetOverrides, admission, publicOrigin) }
+        if (team != null && reconciliation != null) { usageReconciliationRoutes(reconciliation); usageReconciliationDashboardRoutes(reconciliation, publicOrigin) }
         if (directives != null) directiveRoutes(directives, pacingSettings)
         if (pacingSettings != null) pacingSettingsRoutes(pacingSettings, publicOrigin)
         if (forecasts != null) { forecastRoutes(forecasts); forecastLiveRoutes(forecasts, forecastLivePolicy) }
@@ -112,6 +113,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     (if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()) +
                     (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList()) +
                     (if (team != null && runs != null) listOf("team.runs.v1") else emptyList()) +
+                    (if (team != null && reconciliation != null) listOf("capacity.usage-reconciliation.v1") else emptyList()) +
                     (if (team != null && budgetOverrides != null && admission != null) listOf("capacity.budget-overrides.v1") else emptyList()) +
                     (if (team != null && groups != null) listOf("team.groups.v1") else emptyList()) +
                     (if (team != null && devices != null) listOf("team.devices") else emptyList()) +

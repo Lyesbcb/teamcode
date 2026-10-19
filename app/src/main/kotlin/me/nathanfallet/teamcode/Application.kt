@@ -82,6 +82,7 @@ fun main() {
     }
     val team = database?.let { SqlTeamService(it) }
     val runs = database?.let { me.nathanfallet.teamcode.infrastructure.database.AgentRunServiceImpl(it) }
+    val reconciliation = database?.let { me.nathanfallet.teamcode.infrastructure.database.UsageReconciliationServiceImpl(it) }
     val budgetOverrides = database?.let { me.nathanfallet.teamcode.infrastructure.database.BudgetOverrideServiceImpl(it) }
     val groups = database?.let { me.nathanfallet.teamcode.infrastructure.database.GroupServiceImpl(it) }
     val devices = database?.let { SqlDeviceService(it) }
@@ -99,6 +100,7 @@ fun main() {
         single<GatewayService> { gateway }
         if (team != null) single<TeamService> { team }
         if (runs != null) single<me.nathanfallet.teamcode.domain.team.AgentRunService> { runs }
+        if (reconciliation != null) single<me.nathanfallet.teamcode.domain.capacity.UsageReconciliationService> { reconciliation }
         if (budgetOverrides != null) single<me.nathanfallet.teamcode.domain.capacity.BudgetOverrideService> { budgetOverrides }
         if (groups != null) single<me.nathanfallet.teamcode.domain.team.GroupService> { groups }
     }) }
@@ -106,6 +108,6 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null, runs = if (runs != null) koin.koin.get() else null, budgetOverrides = if (budgetOverrides != null) koin.koin.get() else null) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null, runs = if (runs != null) koin.koin.get() else null, budgetOverrides = if (budgetOverrides != null) koin.koin.get() else null, reconciliation = if (reconciliation != null) koin.koin.get() else null) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

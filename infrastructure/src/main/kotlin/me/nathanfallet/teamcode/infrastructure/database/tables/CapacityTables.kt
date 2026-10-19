@@ -30,6 +30,7 @@ object Reservations : Table("reservations") {
     val poolId = varchar("pool_id", 36).default("")
     val sessionKey = char("session_key", 64, "ascii_bin").nullable()
     val runId = reference("run_id", AgentRuns.id, onDelete = ReferenceOption.NO_ACTION).nullable()
+    val providerRequestId = varchar("provider_request_id", 128).nullable()
     override val primaryKey = PrimaryKey(id)
     init {
         index("member_daily", false, memberId, dayNumber)
@@ -38,6 +39,7 @@ object Reservations : Table("reservations") {
         index("team_active", false, teamId, state, expiresAt)
         index("reservation_session", false, memberId, sessionKey, state, expiresAt)
         index("run_active", false, runId, state, expiresAt)
+        index("reconciliation_pending", false, teamId, state, createdAt, id)
     }
 }
 object QuotaWindows : Table("quota_windows") {

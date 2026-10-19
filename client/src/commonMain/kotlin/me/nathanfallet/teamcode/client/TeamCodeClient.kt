@@ -70,6 +70,20 @@ class TeamCodeClient(
         request("/api/v1/directives/current", HttpMethod.Get) else request("/api/v1/directives/current", HttpMethod.Post, DirectiveScope(sessionId))
     suspend fun claimDirective(sessionId: String, stage: String): DirectiveClaimResponse = request("/api/v1/directives/claim", HttpMethod.Post, DirectiveClaimRequest(sessionId, stage))
     suspend fun acknowledgeDirective(id: String, stage: String, sessionId: String? = null, claimId: String? = null): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage, sessionId, claimId))
+    /** Request-specific evidence and reconciliation are restricted to interactive administrators. */
+    suspend fun pendingUsage(memberId: String? = null, beforeId: String? = null): PendingUsagePageView =
+        request(usagePage("pending", memberId, beforeId), HttpMethod.Get)
+    suspend fun reconciledUsage(memberId: String? = null, beforeId: String? = null): ReconciledUsagePageView =
+        request(usagePage("reconciliations", memberId, beforeId), HttpMethod.Get)
+    suspend fun usageReview(id: String): UsageReviewView { identifier(id); return request("/api/v1/usage/reservations/$id", HttpMethod.Get) }
+    suspend fun reconcileUsage(id: String, input: UsageReconciliationRequest): ReconciledUsageView {
+        identifier(id); return request("/api/v1/usage/reservations/$id/reconcile", HttpMethod.Post, input)
+    }
+    private fun usagePage(resource: String, memberId: String?, beforeId: String?): String {
+        memberId?.let(::identifier); beforeId?.let(::identifier)
+        val parameters = listOfNotNull(memberId?.let { "member=$it" }, beforeId?.let { "before=$it" }).joinToString("&")
+        return "/api/v1/usage/$resource" + if (parameters.isEmpty()) "" else "?$parameters"
+    }
     /** Temporary daily allocations require an interactive administrator and never reset usage. */
     suspend fun budgetOverrides(memberId: String, beforeId: String? = null): BudgetOverridePageView {
         identifier(memberId); beforeId?.let(::identifier)

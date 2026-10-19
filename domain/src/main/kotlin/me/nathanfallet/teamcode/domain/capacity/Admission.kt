@@ -38,6 +38,8 @@ interface AdmissionStore {
     }
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
     suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean = false)
+    /** Best available provider correlation, recorded before streaming; never a usage estimate. */
+    suspend fun recordProviderRequest(reservation: Reservation, requestId: String) = Unit
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity
     suspend fun configure(actor: Principal, policy: MemberPolicy): MemberPolicy
     suspend fun poolBudgets(actor: Principal): List<PoolBudget>

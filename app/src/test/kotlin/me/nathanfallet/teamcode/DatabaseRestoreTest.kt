@@ -165,9 +165,16 @@ class DatabaseRestoreTest {
         val runs = AgentRunServiceImpl(database)
         val runId = UUID.randomUUID().toString()
         runs.start(admin.principal, runId, "claude", "interactive")
-        admission.settle(admission.reserve(admin.principal, AdmissionInput(100, "claude-test", "anthropic", runId = runId)), 30, true)
-        admission.settle(admission.reserve(admin.principal, AdmissionInput(70, "claude-test", "anthropic", runId = runId)), null)
+        admission.settle(admission.reserve(admin.principal, AdmissionInput(100, "claude-test", "anthropic", runId = runId)), 20, true)
+        val review = admission.reserve(admin.principal, AdmissionInput(70, "claude-test", "anthropic", runId = runId))
+        admission.recordProviderRequest(review, "req_restore_reconciled")
+        admission.settle(review, null)
+        UsageReconciliationServiceImpl(database).reconcile(admin.principal, review.id,
+            UsageReconciliationChange(70, 70, UsageEvidence.PROVIDER_RECORD, "Synthetic restored provider record", "Verified restored usage", "req_restore_reconciled"))
         admission.reserve(admin.principal, AdmissionInput(100, "claude-test", "anthropic", runId = runId))
+        val stillUnknown = admission.reserve(admin.principal, AdmissionInput(10, "claude-test", "anthropic", runId = runId))
+        admission.recordProviderRequest(stillUnknown, "req_restore_pending")
+        admission.settle(stillUnknown, null)
         runs.configure(admin.principal, runId, RunPolicy(500, 2, true))
         runs.end(admin.principal, runId, 0)
         val overrides = BudgetOverrideServiceImpl(database)
@@ -197,6 +204,8 @@ class DatabaseRestoreTest {
             "modelPolicy" to SqlModelPolicyStore(database).get("default"), "routes" to SqlRoutingStore(database).list("default"),
             "pacingSettings" to SqlPacingSettingsStore(database).get(actor),
             "groups" to GroupServiceImpl(database).list(actor).map { GroupServiceImpl(database).get(actor, it.group.id) },
+            "usagePending" to UsageReconciliationServiceImpl(database).pending(actor),
+            "usageHistory" to UsageReconciliationServiceImpl(database).history(actor),
             "budgetOverrides" to members.associate { it.id to BudgetOverrideServiceImpl(database).history(actor, it.id) },
             "runs" to AgentRunServiceImpl(database).list(actor, all = true).runs.map { AgentRunServiceImpl(database).get(actor, it.id) },
             "devices" to SqlDeviceService(database).devices(actor), "keys" to SqlServiceKeyService(database).list(actor),
@@ -221,7 +230,7 @@ class DatabaseRestoreTest {
             configureGateway(gateway, team = team, accounts = accounts, admission = admission,
                 modelPolicies = SqlModelPolicyStore(database), routes = SqlRoutingStore(database),
                 devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() },
-                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database), groups = GroupServiceImpl(database), runs = AgentRunServiceImpl(database), budgetOverrides = BudgetOverrideServiceImpl(database))
+                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database), groups = GroupServiceImpl(database), runs = AgentRunServiceImpl(database), budgetOverrides = BudgetOverrideServiceImpl(database), reconciliation = UsageReconciliationServiceImpl(database))
         }
         server.start(wait = false)
         try {
@@ -229,7 +238,7 @@ class DatabaseRestoreTest {
             HttpClient(CIO) { install(HttpTimeout) { requestTimeoutMillis = 5_000 }; followRedirects = false }.use { http ->
                 suspend fun get(path: String, token: String = fixture.admin.token) = http.get(origin + path) { bearerAuth(token) }
                 assertEquals(HttpStatusCode.OK, get("/ready").status)
-                for (path in listOf("/api/v1/members", "/api/v1/groups", "/api/v1/runs", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/forecasts", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
+                for (path in listOf("/api/v1/members", "/api/v1/groups", "/api/v1/runs", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/forecasts", "/api/v1/usage/pending", "/api/v1/usage/reconciliations", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
                     val response = get(path)
                     assertEquals(HttpStatusCode.OK, response.status, "Restored HTTP access failed: $path")
                     val body = response.bodyAsText()
@@ -252,12 +261,20 @@ class DatabaseRestoreTest {
                 assertEquals(history.getValue("activeOverrideId"), capacity.getValue("budgetOverride").jsonObject.getValue("id"))
                 assertEquals(HttpStatusCode.Forbidden, get(overridesPath, fixture.activeKey.accessToken).status)
                 assertEquals(HttpStatusCode.Forbidden, get(overridesPath, fixture.memberToken).status)
+                val pendingUsage = Json.parseToJsonElement(get("/api/v1/usage/pending").bodyAsText()).jsonObject.getValue("requests").jsonArray.single().jsonObject
+                assertEquals("req_restore_pending", pendingUsage.getValue("providerRequestId").jsonPrimitive.content)
+                val reconciledUsage = Json.parseToJsonElement(get("/api/v1/usage/reconciliations").bodyAsText()).jsonObject.getValue("reconciliations").jsonArray.single().jsonObject
+                assertEquals("req_restore_reconciled", reconciledUsage.getValue("providerRequestId").jsonPrimitive.content)
+                assertEquals(70, reconciledUsage.getValue("actualUnits").jsonPrimitive.long)
+                assertEquals(HttpStatusCode.Forbidden, get("/api/v1/usage/pending", fixture.activeKey.accessToken).status)
+                assertEquals(HttpStatusCode.Forbidden, get("/api/v1/usage/reconciliations", fixture.memberToken).status)
                 val run = Json.parseToJsonElement(get("/api/v1/runs", fixture.activeKey.accessToken).bodyAsText()).jsonObject.getValue("runs").jsonArray.single().jsonObject
                 assertEquals("ENDED", run.getValue("state").jsonPrimitive.content)
                 assertEquals(200, run.getValue("chargedAndReservedUnits").jsonPrimitive.long)
                 assertEquals(1, run.getValue("completed").jsonPrimitive.long)
                 assertTrue(run.getValue("policy").jsonObject.getValue("paused").jsonPrimitive.boolean)
                 val group = Json.parseToJsonElement(get("/api/v1/groups", fixture.memberToken).bodyAsText()).jsonArray.single().jsonObject
+                assertEquals(listOf(group.getValue("id")), reconciledUsage.getValue("groupIds").jsonArray.toList())
                 assertTrue(group.getValue("canManage").jsonPrimitive.boolean, "Scoped manager role must survive restore")
                 assertEquals(200, group.getValue("chargedAndReservedUnits").jsonPrimitive.long)
                 assertEquals(group.getValue("id"), capacity.getValue("groups").jsonArray.single().jsonObject.getValue("id"))

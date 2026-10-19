@@ -144,6 +144,10 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         assert capacity['budgetOverride']['id'] == override_id and 'Replica exception' not in body
         status, body = request(origins[1], '/dashboard/capacity/' + member_id + '/overrides', token=token, dashboard=True)
         assert status == 200 and 'Replica exception &lt;audited&gt;' in body
+        for review_path, collection in [('/api/v1/usage/pending', 'requests'), ('/api/v1/usage/reconciliations', 'reconciliations')]:
+            status, body = request(origins[0], review_path, token=token)
+            assert status == 200 and json.loads(body)[collection] == []
+            assert request(origins[1], review_path, token=member_token)[0] == 403
         run_id = str(uuid.uuid4())
         run_path = '/api/v1/runs/' + run_id
         status, body = request(origins[0], '/api/v1/runs', {'id': run_id, 'agent': 'claude', 'workload': 'background'}, member_token)
@@ -188,6 +192,8 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         start(0)
         await_ready(origins[0])
         assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        assert request(origins[0], '/api/v1/usage/pending', token=token)[0] == 200
+        assert request(origins[1], '/api/v1/usage/reconciliations', token=token)[0] == 200
         status, body = request(origins[0], override_path, token=token)
         assert status == 200 and json.loads(body)['activeOverrideId'] == override_id
         assert request(origins[1], override_path + '/' + override_id + '/revoke', {'reason': 'Restart verified'}, token)[0] == 200

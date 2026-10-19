@@ -143,6 +143,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
                     var refreshRejected = false
                     knownCharge = null
                     transport.send(reservation.account, token, body, request.headers - setOf("x-teamcode-run-id", "x-teamcode-workload")) { response ->
+                        transport.requestId(response.headers)?.let { admission.recordProviderRequest(reservation, it) }
                         val now = System.currentTimeMillis()
                         val observation = transport.quotaUpdate(reservation.account.id, model, response.headers, now)
                         val observations = observation.windows

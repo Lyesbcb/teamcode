@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.presentation.configureGateway
 import org.testcontainers.mysql.MySQLContainer
 
 /** Owned MySQL, two real gateway sockets and a loopback-only synthetic provider. */
-internal class AgentRunHttpFixture : AutoCloseable {
+internal class AgentRunHttpFixture(private val reportUsage: Boolean = true) : AutoCloseable {
     private val container = MySQLContainer("mysql:8.4").withDatabaseName("teamcode").withTmpFs(mapOf("/var/lib/mysql" to "rw,nosuid,size=1g"))
     lateinit var a: Database; private set
     lateinit var b: Database; private set
@@ -54,7 +54,12 @@ internal class AgentRunHttpFixture : AutoCloseable {
                 check(call.request.headers["x-teamcode-run-id"] == null && call.request.headers["x-teamcode-workload"] == null)
                 val body = Json.parseToJsonElement(call.receiveText()).jsonObject
                 check(body["stream"] == JsonPrimitive(true)); dispatches.incrementAndGet()
-                call.respondText(if (call.parameters["provider"] == "anthropic") FixtureGatewayService.EVENTS.joinToString("") else RESPONSES, ContentType.Text.EventStream)
+                val kind = call.parameters["provider"]
+                call.response.headers.append(if (kind == "anthropic") "request-id" else "x-request-id", "req_fixture_$kind")
+                val response = if (kind == "anthropic") {
+                    if (reportUsage) FixtureGatewayService.EVENTS.joinToString("") else "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                } else RESPONSES
+                call.respondText(response, ContentType.Text.EventStream)
             } }
         }
         servers += upstream; upstream.start(wait = false)
@@ -84,7 +89,7 @@ internal class AgentRunHttpFixture : AutoCloseable {
                 SqlModelPolicyStore(database), SqlRoutingStore(database), queued = AwaitAdmissionUseCase(admission))
             val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
                 configureGateway(gateway, team = SqlTeamService(database), admission = admission, runs = AgentRunServiceImpl(database),
-                    directives = SqlDirectiveService(database), pacingSettings = SqlPacingSettingsStore(database))
+                    directives = SqlDirectiveService(database), pacingSettings = SqlPacingSettingsStore(database), reconciliation = UsageReconciliationServiceImpl(database))
             }
             servers += server; server.start(wait = false)
             "http://127.0.0.1:${server.engine.resolvedConnectors().single().port}"

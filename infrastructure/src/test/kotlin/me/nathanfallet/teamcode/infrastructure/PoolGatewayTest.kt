@@ -22,6 +22,32 @@ import kotlinx.serialization.json.*
 import io.ktor.http.content.TextContent
 
 class PoolGatewayTest {
+    @Test fun providerCorrelationIsCapturedBeforeStreamingWithoutBeingExposedToTheCaller() = runBlocking {
+        val store = FakeAdmission(account)
+        HttpClient(MockEngine { respond(FixtureGatewayService.EVENTS.joinToString(""), headers = headersOf(
+            HttpHeaders.ContentType to listOf("text/event-stream"), "request-id" to listOf("req_fixture_001"))) }) { install(HttpTimeout) }.use { http ->
+            val gateway = PoolGateway(store, credentials, listOf(ClaudeTransport(http)), FakeModelPolicies())
+            gateway.forward(request()) { head, chunks ->
+                assertEquals(listOf("req_fixture_001"), store.providerRequests.map { it.second })
+                assertFalse(head.headers.values.contains("req_fixture_001"))
+                chunks.collect { }
+            }
+            assertTrue(store.didSettle)
+        }
+    }
+    @Test fun transportCorrelationRejectsConflictsDuplicatesUnsafeAndOversizedValues() {
+        HttpClient(MockEngine { error("No network request expected") }).use { http ->
+            for (transport in listOf(ClaudeTransport(http), CodexTransport(http))) {
+                assertEquals("req_fixture", transport.requestId(headersOf("request-id", "req_fixture")))
+                assertEquals("req_fixture", transport.requestId(headersOf("x-request-id", "req_fixture")))
+                assertNull(transport.requestId(headersOf("request-id" to listOf("req_one"), "x-request-id" to listOf("req_two"))))
+                assertNull(transport.requestId(headersOf("request-id", listOf("req_one", "req_two"))))
+                for (bad in listOf("https://untrusted.example/secret", "bad identifier", "x".repeat(129)))
+                    assertNull(transport.requestId(headersOf("request-id", bad)))
+            }
+        }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test fun temporaryAdmissionPressureWaitsAndKeepsWorkloadOutOfProviderHeaders() = runTest {
         val store = FakeAdmission(account)
@@ -487,6 +513,8 @@ private class FakeAdmission(private val account: AccountRecord, private val acco
     val affinities = mutableMapOf<RequestAffinity, RouteTarget>()
     override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = affinities[affinity]
     override suspend fun statistics() = AdmissionStatistics(0, 0)
+    val providerRequests = mutableListOf<Pair<String, String>>()
+    override suspend fun recordProviderRequest(reservation: Reservation, requestId: String) { providerRequests += reservation.id to requestId }
     val charges = mutableListOf<Long?>()
     val observations = mutableListOf<Pair<String, QuotaUpdate>>()
     var settled: Long? = null

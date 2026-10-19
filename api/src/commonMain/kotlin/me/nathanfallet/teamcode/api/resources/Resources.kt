@@ -45,3 +45,15 @@ class BudgetOverridesResource(val memberId: String, val before: String? = null) 
     @Serializable @Resource("{id}/revoke")
     class Revoke(val parent: BudgetOverridesResource, val id: String)
 }
+
+@Serializable @Resource("/api/v1/usage")
+class UsageResource {
+    @Serializable @Resource("pending")
+    class Pending(val parent: UsageResource = UsageResource(), val member: String? = null, val before: String? = null)
+    @Serializable @Resource("reconciliations")
+    class History(val parent: UsageResource = UsageResource(), val member: String? = null, val before: String? = null)
+    @Serializable @Resource("reservations/{id}")
+    class Reservation(val parent: UsageResource = UsageResource(), val id: String) {
+        @Serializable @Resource("reconcile") class Reconcile(val parent: Reservation)
+    }
+}
