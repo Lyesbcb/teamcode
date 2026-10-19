@@ -32,6 +32,7 @@ The API returns at most 50 events, newest identifier first. Response shape (even
 - Service/CI credential creation and revocation, including self-revocation through logout.
 - Account enrollment and credential replacement, operator metadata configuration, access-only activation and refresh-ownership handover.
 - Member allowance/concurrency/weight policy, pool budgets, model/effort/experimental settings and routing rule changes.
+- Controller observation/enforcement changes (`pacing.observation_enabled`, `pacing.enforcement_enabled`).
 
 Account writes and their audit event commit in the same team-locked transaction. The write names either an authenticated principal or an explicit trusted system operation. Current interactive administrator permissions are checked again after provider identity verification and before any write or idempotency replay is returned. Revocation during a remote verification therefore prevents the later mutation. Repeating the same enrollment operation does not append a duplicate event; conflicting or denied writes append none. Repeating an unchanged handover state also appends none.
 

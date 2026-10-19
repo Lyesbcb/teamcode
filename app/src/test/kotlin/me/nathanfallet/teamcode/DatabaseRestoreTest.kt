@@ -164,6 +164,7 @@ class DatabaseRestoreTest {
         accounts.configure(AccountMutationActor.System, "default", enrolled.account.id, "Restored Max account", true, 7)
         database.query { Accounts.update({ Accounts.id eq enrolled.account.id }) { it[refreshPending] = true; it[refreshStartedAt] = 0 } }
         SqlModelPolicyStore(database).save(admin.principal, ModelPolicy(allowedEfforts = listOf("provider-default", "high"), maximumThinkingTokens = 1024))
+        SqlPacingSettingsStore(database).save(admin.principal, PacingSettings(observationOnly = true))
         SqlRoutingStore(database).save(admin.principal, RouteRule("restore-opus", "claude-opus-*", listOf(RouteTarget("anthropic"), RouteTarget("codex", "gpt-6-astra")), priority = 7))
         return Fixture(admin, memberTokens[0], other.token, activeKey, revokedKey.accessToken, enrolled.account.id, access, refresh, secrets)
     }
@@ -179,6 +180,7 @@ class DatabaseRestoreTest {
             "pools" to admission.poolBudgets(actor), "quotas" to admission.quotas(actor),
             "statistics" to admission.statistics(), "accounts" to SqlAccountStore(database, CredentialCipher(key)).list("default"),
             "modelPolicy" to SqlModelPolicyStore(database).get("default"), "routes" to SqlRoutingStore(database).list("default"),
+            "pacingSettings" to SqlPacingSettingsStore(database).get(actor),
             "devices" to SqlDeviceService(database).devices(actor), "keys" to SqlServiceKeyService(database).list(actor),
             "audit" to SqlAuditService(database).list(actor),
             "envelopes" to database.query { Accounts.select(Accounts.id, Accounts.credentialEnvelope, Accounts.refreshPending, Accounts.refreshStartedAt).associate {
@@ -200,7 +202,8 @@ class DatabaseRestoreTest {
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             configureGateway(gateway, team = team, accounts = accounts, admission = admission,
                 modelPolicies = SqlModelPolicyStore(database), routes = SqlRoutingStore(database),
-                devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() })
+                devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() },
+                pacingSettings = SqlPacingSettingsStore(database))
         }
         server.start(wait = false)
         try {
@@ -208,12 +211,14 @@ class DatabaseRestoreTest {
             HttpClient(CIO) { install(HttpTimeout) { requestTimeoutMillis = 5_000 }; followRedirects = false }.use { http ->
                 suspend fun get(path: String, token: String = fixture.admin.token) = http.get(origin + path) { bearerAuth(token) }
                 assertEquals(HttpStatusCode.OK, get("/ready").status)
-                for (path in listOf("/api/v1/members", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/devices", "/api/v1/audit")) {
+                for (path in listOf("/api/v1/members", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
                     val response = get(path)
                     assertEquals(HttpStatusCode.OK, response.status, "Restored HTTP access failed: $path")
                     val body = response.bodyAsText()
                     assertTrue(fixture.secrets.none(body::contains), "Restored HTTP response leaked fixture credentials")
                 }
+                assertTrue(Json.parseToJsonElement(get("/api/v1/policy/pacing").bodyAsText()).jsonObject.getValue("observationOnly").jsonPrimitive.boolean,
+                    "Restoration must retain observation mode instead of re-enabling enforcement")
                 val capacity = Json.parseToJsonElement(get("/api/v1/capacity", fixture.activeKey.accessToken).bodyAsText()).jsonObject
                 assertEquals(200, capacity.getValue("chargedAndReservedUnits").jsonPrimitive.long)
                 assertEquals(500, capacity.getValue("dailyUnits").jsonPrimitive.long)

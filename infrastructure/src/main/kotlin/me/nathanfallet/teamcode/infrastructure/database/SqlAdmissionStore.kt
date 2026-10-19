@@ -54,7 +54,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         val table = if (scope.isEmpty()) Directives else SessionDirectives
         val directive = table.selectAll().where { (table.memberId eq actor.member.id) and (table.scopeKey eq scope) and (table.expiresAt greater now) }.singleOrNull()
         if (current.activeRequests >= policy.maxConcurrent) throw TeamFailure("member_concurrency", 429, "Your concurrent request limit has been reached.")
-        if (directive != null && directive[table.minInterval] > 0) {
+        if (directive != null && directive[table.minInterval] > 0 && !readPacingSettings(actor.teamId).observationOnly) {
             val session = directive[table.scopeKey].takeIf { it.isNotEmpty() }
             val sessionFilter = session?.let { Reservations.sessionKey eq it } ?: Op.TRUE
             val latest = Reservations.createdAt.max()

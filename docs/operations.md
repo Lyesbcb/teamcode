@@ -30,7 +30,7 @@ mysqldump --host=DB_HOST --user=BACKUP_USER --password \
    ```
 
 4. Supply the exact matching `encryption-key` and an image compatible with the restored schema. Startup validates/applies Flyway migrations; Helm rollback does not undo them. A restored team must not generate another bootstrap administrator password.
-5. Check `/ready`, administrator login, members/devices, model/effort policy, routing, pool budgets, weighted allowances, spent/reserved usage, scoped API keys and the audit journal. Compare them to the checkpoint record before enabling traffic.
+5. Check `/ready`, administrator login, members/devices, model/effort policy, controller observation/enforcement mode, routing, pool budgets, weighted allowances, spent/reserved usage, scoped API keys and the audit journal. Compare them to the checkpoint record before enabling traffic.
 6. Reconcile provider credentials and access changes since the checkpoint. A backup can predate an OAuth rotation, password change or revocation. Reconnect affected provider accounts through the CLI; revoke/reissue restored sessions and service keys as necessary through the supported administration APIs/CLI. Do not clear an uncertain refresh marker to retry a possibly consumed refresh token. Retain administrator access while performing recovery.
 7. Enable traffic only after those checks, then verify native-provider behavior with a deliberately small request. Existing streams cannot resume from a database backup and must not be replayed automatically.
 

@@ -104,6 +104,7 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
             DirectiveReceipts.deleteWhere(limit = 1000) { receivedAt less now - 7 * 86_400_000 }
         }
     }
+    override suspend fun preview(actor: Principal): AgentDirective? = delivery.preview(actor)
     override suspend fun current(actor: Principal, sessionId: String?): AgentDirective? = delivery.current(actor, sessionId)
     override suspend fun claim(actor: Principal, sessionId: String, stage: String): DirectiveDelivery? = delivery.claim(actor, sessionId, stage)
     override suspend fun acknowledge(actor: Principal, id: String, stage: String, sessionId: String?, claimId: String?) = delivery.acknowledge(actor, id, stage, sessionId, claimId)

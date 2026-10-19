@@ -56,6 +56,7 @@ fun main() {
     val modelPolicies = database?.let { SqlModelPolicyStore(it) }
     val routes = database?.let { me.nathanfallet.teamcode.infrastructure.database.SqlRoutingStore(it) }
     val directives = database?.let { SqlDirectiveService(it) }
+    val pacingSettings = database?.let { me.nathanfallet.teamcode.infrastructure.database.SqlPacingSettingsStore(it) }
     val transports = listOf(ClaudeTransport(providerHttp), CodexTransport(providerHttp))
     val credentialSource = database?.let { SqlCredentialSource(it, cipher!!) { account, token -> transports.single { it.provider == account.identity.provider }.refresh(token) } }
     val cancellationStore = database?.let { SqlRequestCancellationStore(it) }
@@ -98,6 +99,6 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

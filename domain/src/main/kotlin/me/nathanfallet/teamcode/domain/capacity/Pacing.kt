@@ -56,6 +56,8 @@ class PacingUseCase {
 data class DirectiveDelivery(val directive: AgentDirective, val claimId: String)
 
 interface DirectiveService {
+    /** Informational controller output, including when automatic delivery is disabled. */
+    suspend fun preview(actor: me.nathanfallet.teamcode.domain.team.Principal): AgentDirective? = current(actor)
     suspend fun current(actor: me.nathanfallet.teamcode.domain.team.Principal, sessionId: String? = null): AgentDirective?
     suspend fun claim(actor: me.nathanfallet.teamcode.domain.team.Principal, sessionId: String, stage: String): DirectiveDelivery?
     suspend fun acknowledge(actor: me.nathanfallet.teamcode.domain.team.Principal, id: String, stage: String, sessionId: String? = null, claimId: String? = null)

@@ -71,6 +71,11 @@ class TeamCodeClient(
     suspend fun claimDirective(sessionId: String, stage: String): DirectiveClaimResponse = request("/api/v1/directives/claim", HttpMethod.Post, DirectiveClaimRequest(sessionId, stage))
     suspend fun acknowledgeDirective(id: String, stage: String, sessionId: String? = null, claimId: String? = null): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage, sessionId, claimId))
     suspend fun capacity(): CapacityView = request("/api/v1/capacity", HttpMethod.Get)
+    /** Controller configuration is managed with an interactive administrator login. */
+    suspend fun pacingSettings(): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Get)
+    suspend fun savePacingSettings(settings: PacingSettingsView): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Put, settings)
+    /** Read proposed advice for the current member, even when automatic delivery is disabled. */
+    suspend fun pacingPreview(): PacingPreviewResponse = request("/api/v1/directives/preview", HttpMethod.Get)
     suspend fun accounts(): List<AccountView> = request("/api/v1/accounts", HttpMethod.Get)
     suspend fun enrollAccount(input: EnrollAccountRequest): EnrollAccountResponse = request("/api/v1/accounts", HttpMethod.Post, input)
     suspend fun handoverAccount(id: String, accessOnly: Boolean = false): AccountView {

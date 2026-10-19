@@ -26,11 +26,11 @@ created = False
 def command(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
 
-def request(origin, path, data=None, token=None):
+def request(origin, path, data=None, token=None, method=None):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
-    req = urllib.request.Request(origin + path, None if data is None else json.dumps(data).encode(), headers)
+    req = urllib.request.Request(origin + path, None if data is None else json.dumps(data).encode(), headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
             return response.status, response.read().decode()
@@ -102,6 +102,17 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         assert request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)[0] == 201
         status, body = request(origins[1], '/api/v1/members', token=token)
         assert status == 200 and len(json.loads(body)) == 2
+        # The real application wires durable controller configuration into both replicas.
+        pacing_path = '/api/v1/policy/pacing'
+        status, body = request(origins[0], pacing_path, token=token)
+        assert status == 200 and not json.loads(body).get('observationOnly', False)
+        assert request(origins[0], pacing_path, {'observationOnly': True}, token, method='PUT')[0] == 200
+        status, body = request(origins[1], pacing_path, token=token)
+        assert status == 200 and json.loads(body)['observationOnly'] is True
+        status, body = request(origins[1], '/api/v1/directives/preview', token=token)
+        assert status == 200 and json.loads(body)['settings']['observationOnly'] is True
+        status, body = request(origins[0], '/api/v1/directives/current', token=token)
+        assert status == 200 and json.loads(body)['directive'] is None
         # Kill only our exact child, deliberately bypassing graceful shutdown to exercise recovery.
         first.kill()
         first.wait(timeout=10)
@@ -109,6 +120,11 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         start(0)
         await_ready(origins[0])
         assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        status, body = request(origins[0], pacing_path, token=token)
+        assert status == 200 and json.loads(body)['observationOnly'] is True
+        assert request(origins[1], pacing_path, {'observationOnly': False}, token, method='PUT')[0] == 200
+        status, body = request(origins[0], pacing_path, token=token)
+        assert status == 200 and not json.loads(body).get('observationOnly', False)
         assert sum(log.read_text().count('TeamCode temporary administrator password:') for log in logs) == 1
         # Readiness must reflect shared storage availability; liveness must not trigger a database-outage restart storm.
         command('docker', 'pause', name)
@@ -120,8 +136,9 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
             await_ready(origin)
         assert request(origins[1], '/api/v1/auth/logout', {}, token)[0] == 200
         assert request(origins[0], '/api/v1/auth/me', token=token)[0] == 401
+        assert request(origins[0], pacing_path, {'observationOnly': True}, token, method='PUT')[0] == 401
         assert all(password not in log.read_text() and db_password not in log.read_text() for log in logs)
-        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
+        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members/controller mode, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
     finally:
         for child in children:
             if child.poll() is None:
