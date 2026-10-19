@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS request_cancellations (team_id VARCHAR(36), member_id VARCHAR(36), request_id VARCHAR(36), expires_at BIGINT NOT NULL, CONSTRAINT pk_request_cancellations PRIMARY KEY (team_id, member_id, request_id), CONSTRAINT fk_request_cancellations_team_id__id FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE ON UPDATE RESTRICT, CONSTRAINT fk_request_cancellations_member_id__id FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE ON UPDATE RESTRICT);
+CREATE INDEX cancellation_expiry ON request_cancellations (expires_at);
+CREATE INDEX cancellation_member_expiry ON request_cancellations (team_id, member_id, expires_at);
+CREATE INDEX cancellation_team_expiry ON request_cancellations (team_id, expires_at);

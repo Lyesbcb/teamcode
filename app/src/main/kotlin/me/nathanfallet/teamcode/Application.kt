@@ -23,6 +23,9 @@ import me.nathanfallet.teamcode.infrastructure.database.SqlAccountStore
 import me.nathanfallet.teamcode.infrastructure.providers.ClaudeAccountVerifier
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
 import me.nathanfallet.teamcode.domain.gateway.GatewayService
+import me.nathanfallet.teamcode.domain.gateway.CancellableGateway
+import me.nathanfallet.teamcode.domain.gateway.RequestCancellationService
+import me.nathanfallet.teamcode.infrastructure.database.SqlRequestCancellationStore
 import me.nathanfallet.teamcode.domain.team.TeamService
 import me.nathanfallet.teamcode.infrastructure.database.Database
 import me.nathanfallet.teamcode.infrastructure.database.SqlTeamService
@@ -54,7 +57,9 @@ fun main() {
     val directives = database?.let { SqlDirectiveService(it) }
     val transports = listOf(ClaudeTransport(providerHttp), CodexTransport(providerHttp))
     val credentialSource = database?.let { SqlCredentialSource(it, cipher!!) { account, token -> transports.single { it.provider == account.identity.provider }.refresh(token) } }
-    val gateway = if (database != null) PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!, routes, queued = me.nathanfallet.teamcode.domain.capacity.AwaitAdmissionUseCase(admission)) else FixtureGatewayService()
+    val cancellationStore = database?.let { SqlRequestCancellationStore(it) }
+    val cancellation = cancellationStore?.let { RequestCancellationService(it) }
+    val gateway = if (database != null) CancellableGateway(PoolGateway(admission!!, credentialSource!!, transports, modelPolicies!!, routes, queued = me.nathanfallet.teamcode.domain.capacity.AwaitAdmissionUseCase(admission)), cancellation!!) else FixtureGatewayService()
     val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     if (accountStore != null) {
         val work = SqlScheduledWork(database!!)
@@ -62,7 +67,7 @@ fun main() {
         workers.launch {
             while (isActive) {
                 try {
-                    work.runDue("maintenance") { admission.maintain(); directives!!.update() }
+                    work.runDue("maintenance") { admission.maintain(); cancellationStore!!.maintain(); directives!!.update() }
                     monitor.sample()
                 }
                 catch (_: TimeoutCancellationException) { System.err.println("TeamCode maintenance deadline exceeded.") }
@@ -89,6 +94,6 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Actual native proxy: disconnect before headers must close the pending upstream request."""
+"""Actual native proxy: pre-header disconnect must stop server work through scoped cancellation."""
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 
 
 def main():
@@ -22,6 +24,11 @@ def main():
     disconnected = threading.Event()
     survivor_entered = threading.Event()
     release_survivor = threading.Event()
+    control_received = threading.Event()
+    lock = threading.Lock()
+    requests = {}
+    cancelled_ids = set()
+    errors = []
     token = secrets.token_urlsafe(32)
     local_token = secrets.token_urlsafe(32)
 
@@ -33,8 +40,33 @@ def main():
             if self.headers.get('Authorization') != 'Bearer ' + token:
                 self.send_error(401)
                 return
-            body = self.rfile.read(int(self.headers['Content-Length']))
+            match = re.fullmatch(r'/api/v1/requests/([0-9a-f-]{36})/cancel', self.path)
+            if match:
+                # This fixture models the server contract. Production uses shared Exposed
+                # markers and cancels its handler, not this fixture's socket registry.
+                with lock:
+                    request_id = match.group(1)
+                    cancelled_ids.add(request_id)
+                    target = requests.get(request_id)
+                assert target is not None, 'Cancellation targeted an unknown inference'
+                model, connection = target
+                assert model == 'synthetic-queued-request', 'Cancellation targeted a live peer'
+                control_received.set()
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass  # Native engines may already have closed the inference connection.
+                self.send_response(204)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
             model = json.loads(body).get('model')
+            request_id = self.headers.get('x-teamcode-client-request-id', '')
+            assert re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request_id), 'Missing SDK-owned request UUID'
+            with lock:
+                assert request_id not in requests, 'Inference identifiers must be unique'
+                requests[request_id] = model, self.connection
             if model in ('synthetic-survivor', 'synthetic-next-request'):
                 if model == 'synthetic-survivor':
                     survivor_entered.set()
@@ -60,7 +92,11 @@ def main():
             except TimeoutError:
                 pass
 
-    upstream = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    class Server(ThreadingHTTPServer):
+        def handle_error(self, *_):
+            errors.append(traceback.format_exc())
+
+    upstream = Server(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     thread.start()
     process = None
@@ -100,6 +136,7 @@ def main():
                             assert entered.wait(5), 'The request never reached the synthetic upstream'
                             # Closing before any response must cancel only this request's transport.
                         assert disconnected.wait(5), 'Client disconnect left an upstream admission request running'
+                        assert control_received.wait(3), 'SDK did not send the authenticated cancellation control call'
                         release_survivor.set()
                         response = survivor.getresponse()
                         assert response.status == 200 and b'"done":true' in response.read(), 'Cancellation interrupted another request'
@@ -113,7 +150,7 @@ def main():
                         assert response.status == 200 and b'"done":true' in response.read()
                     finally:
                         following.close()
-                    print('Native pre-response disconnect cancelled only its upstream request; concurrent and subsequent requests passed.')
+                    assert len(cancelled_ids) == 1, 'Completed or surviving inference was cancelled'
                 finally:
                     process.terminate()
                     try:
@@ -125,6 +162,9 @@ def main():
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=5)
+    assert not errors, '\n'.join(errors)
+    assert len(cancelled_ids) == 1, 'Shutdown cancelled a completed inference'
+    print('Native pre-response disconnect sent scoped cancellation and stopped server work; concurrent and subsequent requests passed.')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 package me.nathanfallet.teamcode.client
 
 import kotlinx.coroutines.*
+import kotlin.uuid.Uuid
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
@@ -108,30 +109,71 @@ class TeamCodeClient(
     suspend fun forwardInference(path: String, body: ByteArray, headers: Map<String, String> = emptyMap(), receive: suspend (HttpResponse) -> Unit) {
         require(path in setOf("/v1/messages", "/v1/responses")) { "Unsupported inference path." }
         check(!inferenceClosed.isCompleted) { "The TeamCode client is closed." }
+        val requestId = Uuid.random().toString()
+        // Capture once: a config change must not send cancellation with another identity.
+        val credential = token()?.takeIf { it.isNotBlank() }
+        var consumed = false
         // Curl/WinHTTP can retain a pre-header request after coroutine cancellation. An
         // independently owned engine lets us close that transport without cancelling peers.
         // Management keeps its shared connection pool; inference engines live for one call.
-        createHttpClient(configureHttpClient).use { inference ->
-            lateinit var requestJob: Job
-            val statement = inference.preparePost("$origin$path") {
-                requestJob = executionContext
-                contentType(ContentType.Application.Json)
-                for ((name, value) in headers) {
-                    require(name.lowercase() in FORWARDED_HEADERS) { "Unsupported inference header." }
-                    header(name, value)
+        try {
+            createHttpClient(configureHttpClient).use { inference ->
+                lateinit var requestJob: Job
+                val statement = inference.preparePost("$origin$path") {
+                    requestJob = executionContext
+                    contentType(ContentType.Application.Json)
+                    for ((name, value) in headers) {
+                        require(name.lowercase() in FORWARDED_HEADERS) { "Unsupported inference header." }
+                        header(name, value)
+                    }
+                    header("x-teamcode-client-request-id", requestId)
+                    credential?.let { bearerAuth(it) }
+                    setBody(body)
                 }
-                authenticate()
-                setBody(body)
+                coroutineScope {
+                    val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                        try {
+                            inferenceClosed.await()
+                            this@coroutineScope.cancel(CancellationException("The TeamCode client is closed."))
+                        }
+                        finally { requestJob.cancel(); inference.close() }
+                    }
+                    try { statement.execute { response -> receive(response); consumed = true } }
+                    finally { cancellation.cancel() }
+                }
             }
-            coroutineScope {
-                val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
-                    try { inferenceClosed.await() }
-                    finally { requestJob.cancel(); inference.close() }
+        } catch (error: CancellationException) {
+            // Native engines may finish execute() before cancellation is rethrown by
+            // coroutineScope itself. Catch outside the entire owned transport lifetime.
+            if (!consumed) cancelInference(requestId, credential)
+            throw error
+        } catch (error: Exception) {
+            // Some engines report an I/O failure while their caller is already cancelled.
+            if (!consumed && !currentCoroutineContext().isActive) cancelInference(requestId, credential)
+            throw error
+        }
+    }
+
+    /** Best effort, independently owned control transport survives SDK/inference shutdown. */
+    private suspend fun cancelInference(requestId: String, credential: String?) = withContext(NonCancellable) {
+        withTimeoutOrNull(2_500) {
+            createHttpClient(configureHttpClient).use { control ->
+                repeat(2) { attempt ->
+                    try {
+                        val response = control.post("$origin/api/v1/requests/$requestId/cancel") {
+                            credential?.let { bearerAuth(it) }
+                            timeout { connectTimeoutMillis = 750; socketTimeoutMillis = 750; requestTimeoutMillis = 1_000 }
+                        }
+                        if (response.status.value < 500) return@withTimeoutOrNull
+                    } catch (error: TimeoutCancellationException) {
+                        currentCoroutineContext().ensureActive()
+                    } catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { /* Retry only the idempotent cancellation control call. */ }
+                    if (attempt == 0) delay(100)
                 }
-                try { statement.execute { response -> receive(response) } }
-                finally { cancellation.cancel() }
             }
         }
+        Unit
     }
 
     private suspend fun HttpRequestBuilder.authenticate() {

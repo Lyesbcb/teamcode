@@ -1,6 +1,7 @@
 # TeamCode contributor instructions
 
 - All repository content must be English. Root package and Gradle group: `me.nathanfallet.teamcode`.
+- Squash-merge pull requests; do not create merge commits or rebase-merge PRs.
 - Standalone public project. No ControlResell dependencies, registries, secrets, infrastructure or CI.
 - Use TeamClaude as the behavioral reference. Before implementing account enrollment, provider routing, agent launchers or service integration, inspect the corresponding implementation and regression tests in the sibling `teamclaude` checkout. Reuse its established behavior where applicable; document adaptations required by native Kotlin, team authorization or shared persistence. Do not invent a parallel mechanism without first checking the reference.
 - Keep `cli -> client -> api`. The CLI must never depend on server domain or infrastructure modules.

@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol())) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -81,6 +81,12 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (directives != null) directiveRoutes(directives)
         if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
         if (routes != null) routingRoutes(routes, publicOrigin)
+        if (cancellation != null && team != null) {
+            post("/api/v1/requests/{id}/cancel") {
+                cancellation.cancel(call.principal, call.parameters["id"].orEmpty())
+                call.respond(HttpStatusCode.NoContent)
+            }
+        }
         get("/health") { call.respondText("OK") }
         get("/ready") {
             if (readiness()) call.respondText("OK")
@@ -89,7 +95,9 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         get<CapabilitiesResource> {
             val mode = gateway.status().mode
             call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = mode,
-                features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") + if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()))
+                features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") +
+                    (if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()) +
+                    (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList())))
         }
         get<StatusResource> {
             val status = gateway.status()
@@ -108,7 +116,8 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
             if (model?.isString != true || model.content.isBlank()) throw InvalidRequest("A model name is required.")
             inbound.validateConversation(value)
             val headers = me.nathanfallet.teamcode.api.InferenceHeaders.capture(call.request.headers::getAll)
-            gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null, inbound.protocol)) { head, chunks ->
+            val clientRequestId = call.request.headers.getAll("x-teamcode-client-request-id")?.let { it.singleOrNull() ?: "" }
+            gateway.forward(GenerationRequest(bytes, headers, if (team != null) call.principal else null, inbound.protocol, clientRequestId)) { head, chunks ->
                 head.headers.filterKeys { it.lowercase() in setOf("retry-after", "x-teamcode-request-id", "x-teamcode-model", "x-teamcode-provider") }.forEach { (name, value) -> call.response.header(name, value) }
                 call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.response.header("X-Accel-Buffering", "no")

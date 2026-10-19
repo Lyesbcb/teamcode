@@ -15,6 +15,7 @@ dependencies {
     implementation(libs.koin.core)
     implementation(libs.logback)
     testImplementation(kotlin("test-junit5"))
+    testImplementation(libs.testcontainers.mysql)
     testRuntimeOnly(libs.junit)
 }
 tasks.test { useJUnitPlatform() }

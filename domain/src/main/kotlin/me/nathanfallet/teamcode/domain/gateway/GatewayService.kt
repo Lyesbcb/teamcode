@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import me.nathanfallet.teamcode.domain.team.Principal
 
 /** Protocol bytes remain opaque on native passthrough paths. */
-data class GenerationRequest(val body: ByteArray, val headers: Map<String, String>, val principal: Principal? = null, val protocol: WireProtocol = WireProtocol.MESSAGES)
+data class GenerationRequest(val body: ByteArray, val headers: Map<String, String>, val principal: Principal? = null, val protocol: WireProtocol = WireProtocol.MESSAGES, val clientRequestId: String? = null)
 enum class WireProtocol { MESSAGES, RESPONSES }
 data class GenerationHead(val status: Int, val contentType: String, val headers: Map<String, String> = emptyMap())
 
