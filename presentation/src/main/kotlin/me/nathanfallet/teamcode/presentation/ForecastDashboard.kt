@@ -9,12 +9,21 @@ import me.nathanfallet.teamcode.domain.capacity.*
 private fun decimal(value: Double) = String.format(Locale.ROOT, "%.1f", value)
 private fun timestamp(value: Long?) = value?.let { Instant.ofEpochMilli(it).toString() } ?: "Unknown"
 
-/** Server-rendered snapshot with local SVG tooltips; no browser script or external chart service. */
-internal fun forecastDashboard(snapshot: ForecastSnapshot): String = with(snapshot) {
+/** Options are rendered once by the server and reused by its authenticated live snapshot stream. */
+internal fun forecastAccountOptions(snapshot: ForecastSnapshot) = snapshot.accounts.joinToString("") {
+    """<option value="${escape(it.id)}" ${if (it.id == snapshot.account?.id) "selected" else ""}>${escape(it.displayName)} · ${escape(it.provider)}</option>"""
+}
+
+/** Progressive enhancement preserves manual refresh when scripting is disabled or unavailable. */
+internal fun forecastDashboard(snapshot: ForecastSnapshot, live: Boolean = false): String {
+    val controls = """<form method="get"><label>Subscription account <select id="forecast-account" name="account" ${if (snapshot.accounts.isEmpty()) "disabled" else ""}>${forecastAccountOptions(snapshot)}</select></label><button>Show account / refresh</button></form>"""
+    if (!live) return controls + forecastDashboardContent(snapshot)
+    return controls + """<p><span id="forecast-live-status" role="status" aria-live="polite" data-state="connecting">Live updates are connecting. Manual refresh remains available.</span> <button type="button" id="forecast-live-toggle">Pause live updates</button></p><div id="forecast-content" data-account="${escape(snapshot.account?.id.orEmpty())}" data-snapshot="${snapshot.generatedAtMillis}">${forecastDashboardContent(snapshot)}</div><script defer src="/dashboard/assets/forecasts.js"></script><noscript><p>Live updates require JavaScript. Use Show account / refresh to update this snapshot.</p></noscript>"""
+}
+
+/** The same escaped content feeds initial HTML and live frames, with no duplicate chart implementation. */
+internal fun forecastDashboardContent(snapshot: ForecastSnapshot): String = with(snapshot) {
     val selected = account ?: return "<p>No subscription accounts yet. Add or import an account from the TeamCode CLI.</p>"
-    val options = accounts.joinToString("") {
-        """<option value="${escape(it.id)}" ${if (it.id == selected.id) "selected" else ""}>${escape(it.displayName)} · ${escape(it.provider)}</option>"""
-    }
     val cards = windows.mapIndexed { index, series ->
         val status = when (series.forecast.state) {
             QuotaForecast.State.UNKNOWN -> "Rate unknown"
@@ -34,7 +43,7 @@ internal fun forecastDashboard(snapshot: ForecastSnapshot): String = with(snapsh
         }
         """<section class="forecast-card"><h2>${escape(series.quota.window)}</h2><p><strong>$status</strong> · ${decimal(series.quota.utilization * 100)}% observed</p>${forecastChart(series, generatedAtMillis, pressureThreshold, "forecast-$index")}<dl><dt>Latest observation (UTC)</dt><dd>${timestamp(series.quota.observedAtMillis)}</dd><dt>Reset (UTC)</dt><dd>${timestamp(series.quota.resetsAtMillis)}</dd><dt>Recent speed</dt><dd>${series.forecast.pointsPerHour?.let { "${decimal(it)} percentage points / hour" } ?: "Unknown"}</dd><dt>Pressure ETA (UTC)</dt><dd>$eta</dd><dt>Latest continuous segment</dt><dd>${series.learningSamples} measurements over ${series.learningSpanMillis / 1000} seconds</dd></dl></section>"""
     }.joinToString("")
-    """<style>.forecast-card{margin:24px 0;padding:20px;border:1px solid #343b4c;border-radius:12px}.forecast-card svg{display:block;width:100%;max-width:900px;height:auto}.forecast-card dl{display:grid;grid-template-columns:minmax(180px,1fr) 2fr;gap:8px}.forecast-card dd{margin:0;overflow-wrap:anywhere}.forecast-card dt{color:#a5afc3}</style><form method="get"><label>Subscription account <select name="account">$options</select></label><button>Show account / refresh</button></form><p>Snapshot: ${timestamp(generatedAtMillis)}. ${escape(selected.provider)} · ${escape(selected.state)}${if (selected.disabled) " · Disabled" else ""} · Pool: ${escape(selected.poolId ?: "shared")}.</p><p>Each curve is one observed window on this account. Solid lines are measurements; dashed lines are conditional projections, clipped at reset or one hour ahead. Hover a point for its value and time. Gaps, resets and decreases start separate segments. Percentages from different subscriptions are never added.</p><p>The pressure threshold is ${decimal(pressureThreshold * 100)}%. A rate needs at least three continuous measurements spanning a minute and a known reset; fresh data is at most five minutes old. Unknown data is shown explicitly. These window estimates do not grant account/model access or describe the member's current controller decision; see <a href="/dashboard/agent-guidance">Agent guidance</a>.</p>${if (truncated) "<p class='notice'>Only a bounded subset of accounts, windows or history is shown. Missing history may prevent learning a rate.</p>" else ""}${if (windows.isEmpty()) "<p>No provider windows have been observed for this account. No capacity estimate is available.</p>" else cards}"""
+    """<style>.forecast-card{margin:24px 0;padding:20px;border:1px solid #343b4c;border-radius:12px}.forecast-card svg{display:block;width:100%;max-width:900px;height:auto}.forecast-card dl{display:grid;grid-template-columns:minmax(180px,1fr) 2fr;gap:8px}.forecast-card dd{margin:0;overflow-wrap:anywhere}.forecast-card dt{color:#a5afc3}</style><p>Snapshot: ${timestamp(generatedAtMillis)}. ${escape(selected.provider)} · ${escape(selected.state)}${if (selected.disabled) " · Disabled" else ""} · Pool: ${escape(selected.poolId ?: "shared")}.</p><p>Each curve is one observed window on this account. Solid lines are measurements; dashed lines are conditional projections, clipped at reset or one hour ahead. Hover a point for its value and time. Gaps, resets and decreases start separate segments. Percentages from different subscriptions are never added.</p><p>The pressure threshold is ${decimal(pressureThreshold * 100)}%. A rate needs at least three continuous measurements spanning a minute and a known reset; fresh data is at most five minutes old. Unknown data is shown explicitly. These window estimates do not grant account/model access or describe the member's current controller decision; see <a href="/dashboard/agent-guidance">Agent guidance</a>.</p>${if (truncated) "<p class='notice'>Only a bounded subset of accounts, windows or history is shown. Missing history may prevent learning a rate.</p>" else ""}${if (windows.isEmpty()) "<p>No provider windows have been observed for this account. No capacity estimate is available.</p>" else cards}"""
 }
 
 /** Draw only supplied segments; presentation never joins discontinuities or invents missing values. */

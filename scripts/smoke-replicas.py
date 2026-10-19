@@ -26,10 +26,13 @@ created = False
 def command(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
 
-def request(origin, path, data=None, token=None, method=None):
+def request(origin, path, data=None, token=None, method=None, dashboard=False):
     headers = {'Content-Type': 'application/json'}
     if token:
-        headers['Authorization'] = 'Bearer ' + token
+        if dashboard:
+            headers['Cookie'] = 'teamcode_session=' + token
+        else:
+            headers['Authorization'] = 'Bearer ' + token
     req = urllib.request.Request(origin + path, None if data is None else json.dumps(data).encode(), headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
@@ -103,6 +106,10 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         forecast = json.loads(body)
         assert status == 200 and forecast['account'] is None and forecast['windows'] == []
         assert forecast['pressureThreshold'] == .9 and not forecast['truncated']
+        status, body = request(origins[0], '/dashboard/assets/forecasts.js', token=token, dashboard=True)
+        assert status == 200 and 'new EventSource(url)' in body
+        status, body = request(origins[1], '/dashboard/forecasts', token=token, dashboard=True)
+        assert status == 200 and 'forecast-live-status' in body and '/dashboard/assets/forecasts.js' in body
         assert request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)[0] == 201
         status, body = request(origins[1], '/api/v1/members', token=token)
         assert status == 200 and len(json.loads(body)) == 2

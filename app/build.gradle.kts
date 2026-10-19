@@ -21,6 +21,17 @@ dependencies {
     testRuntimeOnly(libs.junit)
 }
 tasks.test { useJUnitPlatform() }
+
+// Explicit local browser acceptance; ordinary CI keeps its existing Linux JVM checks.
+tasks.register<JavaExec>("smokeForecastBrowser") {
+    group = "verification"
+    description = "Verify live forecasts with owned MySQL/Netty/Chrome fixtures (Node 22+ and Chrome required)"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("me.nathanfallet.teamcode.ForecastBrowserFixtureKt")
+    args(rootProject.layout.projectDirectory.file("scripts/smoke-forecast-browser.mjs").asFile.absolutePath,
+        layout.buildDirectory.file("preview/forecasts-live.png").get().asFile.absolutePath)
+}
 ktor {
     docker {
         jreVersion.set(JavaVersion.VERSION_21)

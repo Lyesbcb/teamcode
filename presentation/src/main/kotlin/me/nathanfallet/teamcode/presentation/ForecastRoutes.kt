@@ -19,11 +19,11 @@ internal fun Route.forecastRoutes(forecasts: ForecastService) {
     }
     get("/dashboard/forecasts") {
         val snapshot = forecasts.load(call.principal, call.singleForecastAccount())
-        call.respondText(page("Quota forecasts", forecastDashboard(snapshot)), ContentType.Text.Html)
+        call.respondText(page("Quota forecasts", forecastDashboard(snapshot, live = true)), ContentType.Text.Html)
     }
 }
 
-private fun ApplicationCall.singleForecastAccount(): String? {
+internal fun ApplicationCall.singleForecastAccount(): String? {
     val accounts = request.queryParameters.getAll("account") ?: return null
     if (accounts.size != 1) throw TeamFailure("invalid_account", 400, "Choose one account.")
     return accounts.single()
