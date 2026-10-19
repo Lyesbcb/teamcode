@@ -19,7 +19,7 @@ import me.nathanfallet.teamcode.cli.launch.Run
 import me.nathanfallet.teamcode.cli.service.Service
 import me.nathanfallet.teamcode.cli.identity.*
 
-const val VERSION = "0.1.0-SNAPSHOT"
+const val VERSION = me.nathanfallet.teamcode.api.BuildInfo.VERSION
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."

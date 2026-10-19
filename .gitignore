@@ -12,3 +12,6 @@ data/
 *.log
 __pycache__/
 *.pyc
+
+dist/
+staged/

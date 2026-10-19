@@ -181,3 +181,5 @@ For a manually managed proxy, use a custom provider pointed at `http://127.0.0.1
 The subscription adapter uses ChatGPT's Codex endpoint, never the metered OpenAI API. It requires streamed requests with complete conversation input; provider-managed previous-response/thread state is currently rejected. Tool definitions and native Responses fields are preserved. Usage accounting includes cached input and reasoning output exactly once.
 
 To exercise the actual Codex CLI instead of Claude in the opt-in acceptance script, add `--skip-claude --codex-model gpt-6-luna`. Model availability depends on the subscription. Native Codex-to-Codex transport is verified; Claude-to-Codex translation requires the experimental settings flag and the documented compatible profile.
+
+Versioned native assets are being prepared with shared CLI/server build identity, five-target runtime acceptance and a checked release manifest. See [native distribution and remaining update/rollback work](docs/distribution.md). No `teamcode update` command or published stable CLI release is currently claimed.

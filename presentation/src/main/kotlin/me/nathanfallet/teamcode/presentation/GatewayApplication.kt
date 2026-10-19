@@ -99,7 +99,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         }
         get<CapabilitiesResource> {
             val mode = gateway.status().mode
-            call.respond(Capabilities(serverVersion = "0.1.0-SNAPSHOT", mode = mode,
+            call.respond(Capabilities(serverVersion = me.nathanfallet.teamcode.api.BuildInfo.VERSION, mode = mode,
                 features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") +
                     (if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()) +
                     (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList()) +

@@ -46,6 +46,7 @@ def main():
     args = argparse.ArgumentParser()
     args.add_argument('--binary', type=Path, required=True)
     args.add_argument('--jar', type=Path, required=True)
+    args.add_argument('--expected-version')
     options = args.parse_args()
     server_port, local_port = port(), port()
     token, local_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
@@ -61,6 +62,11 @@ def main():
                 server = subprocess.Popen(['java', '-jar', str(options.jar.resolve())], env=env, stdout=server_log, stderr=server_log)
                 processes.append(server)
                 wait_ready(origin + '/health', server)
+                if options.expected_version:
+                    capabilities = json.loads(wait_ready(origin + '/api/v1/capabilities', server, token))
+                    assert capabilities['serverVersion'] == options.expected_version
+                    probe = subprocess.run([binary, 'version'], capture_output=True, text=True, timeout=15, check=True)
+                    assert probe.stdout.strip() == 'TeamCode ' + options.expected_version
                 subprocess.run([binary, 'configure', '--server', origin], input=token + '\n', text=True,
                                env=env, check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 config_path = Path(directory) / 'teamcode/config.json'

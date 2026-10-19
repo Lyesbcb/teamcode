@@ -2,8 +2,11 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v[0-9]*']
   pull_request:
   workflow_dispatch:
+env:
+  ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || '0.1.0-SNAPSHOT' }}
 permissions:
   contents: read
 concurrency:
@@ -21,6 +24,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: python3 scripts/check-module-graph.py
       - run: python3 -m unittest discover -s scripts -p 'test_acceptance_*.py'
+      - run: python3 -m unittest discover -s scripts -p 'test_release_*.py'
       - run: ./gradlew :api:jvmTest :client:jvmTest :domain:test :infrastructure:test :presentation:test :cli:jvmTest :app:test :app:buildFatJar
       - run: python3 scripts/smoke-replicas.py --jar app/build/libs/app-all.jar
       - uses: actions/upload-artifact@v4
@@ -43,7 +47,7 @@ jobs:
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
   image:
-    needs: [jvm, helm, native, windows]
+    needs: [jvm, helm, native, windows, bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,7 +59,7 @@ jobs:
           path: app/build/libs
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
         with:
           username: nathanfallet
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
@@ -63,10 +67,10 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag') }}
           tags: |
-            nathanfallet/teamcode:latest
-            nathanfallet/teamcode:sha-${{ github.sha }}
+            ${{ github.ref_type == 'tag' && format('nathanfallet/teamcode:{0}', github.ref_name) || 'nathanfallet/teamcode:latest' }}
+            nathanfallet/teamcode:sha-${{ github.sha }}${{ github.ref_type == 'tag' && format('-{0}', github.ref_name) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/nathanfallet/teamcode
             org.opencontainers.image.licenses=Apache-2.0
@@ -74,7 +78,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, macos-15-intel, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -90,35 +94,48 @@ jobs:
         shell: bash
         run: |
           case "$(uname -s)-$(uname -m)" in
-            Darwin-arm64) target=MacosArm64; directory=macosArm64 ;;
-            Darwin-x86_64) target=MacosX64; directory=macosX64 ;;
-            Linux-x86_64) target=LinuxX64; directory=linuxX64 ;;
+            Darwin-arm64) target=MacosArm64; directory=macosArm64; asset=macos-arm64 ;;
+            Darwin-x86_64) target=MacosX64; directory=macosX64; asset=macos-x64 ;;
+            Linux-x86_64) target=LinuxX64; directory=linuxX64; asset=linux-x64 ;;
             *) echo 'Unsupported runner architecture'; exit 1 ;;
           esac
-          echo "NATIVE_TARGET=$target" >> "$GITHUB_ENV"
-          echo "NATIVE_DIRECTORY=$directory" >> "$GITHUB_ENV"
-      - run: ./gradlew :cli:linkDebugExecutable${NATIVE_TARGET} :app:buildFatJar
-      - run: python3 scripts/smoke-native.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
-      - run: python3 scripts/smoke-devices.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
-      - run: python3 scripts/smoke-run.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
-      - run: python3 scripts/smoke-queued-cancel.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
-      - run: python3 scripts/smoke-hook.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
+          {
+            echo "NATIVE_TARGET=$target"
+            echo "NATIVE_DIRECTORY=$directory"
+            echo "NATIVE_ASSET=$asset"
+            echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}"
+          } >> "$GITHUB_ENV"
+      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" :app:buildFatJar
+      - run: python3 scripts/smoke-native.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
+      - run: python3 scripts/smoke-devices.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+      - run: python3 scripts/smoke-run.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-queued-cancel.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+      - run: python3 scripts/smoke-hook.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - name: Start Linux user service manager
         if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo loginctl enable-linger "$(id -un)"
           sudo systemctl start "user@$(id -u).service"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-      - run: python3 scripts/smoke-service.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
+          } >> "$GITHUB_ENV"
+      - run: python3 scripts/smoke-service.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - name: Verify persistent team setup with the native CLI
         if: runner.os == 'Linux'
-        run: python3 scripts/smoke-team.py --binary cli/build/bin/${NATIVE_DIRECTORY}/debugExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+        run: python3 scripts/smoke-team.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
+      - name: Stage the tested native release asset
+        run: python3 scripts/release-bundle.py stage --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --target "$NATIVE_ASSET" --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ env.NATIVE_ASSET }}
+          path: dist/*
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: teamcode-${{ env.NATIVE_DIRECTORY }}
-          path: cli/build/bin/${{ env.NATIVE_DIRECTORY }}/debugExecutable/teamcode.kexe
+          path: cli/build/bin/${{ env.NATIVE_DIRECTORY }}/releaseExecutable/teamcode.kexe
           retention-days: 7
   windows:
     runs-on: windows-latest
@@ -132,13 +149,122 @@ jobs:
         with:
           node-version: '22'
       - uses: gradle/actions/setup-gradle@v4
-      - run: .\gradlew.bat :cli:linkDebugExecutableMingwX64
-      - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe --allow-machine-test-certificate
-      - run: python scripts/smoke-devices.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
-      - run: python scripts/smoke-queued-cancel.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
-      - run: python scripts/smoke-hook.py --binary cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+      - run: .\gradlew.bat :cli:linkReleaseExecutableMingwX64
+      - run: python scripts/smoke-windows.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --allow-machine-test-certificate
+      - run: python scripts/smoke-devices.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
+      - run: python scripts/smoke-queued-cancel.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
+      - run: python scripts/smoke-hook.py --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
+      - name: Stage the tested native release asset
+        shell: pwsh
+        run: |
+          $releaseVersion = $env:ORG_GRADLE_PROJECT_teamcodeVersion -replace '^v', ''
+          python scripts/release-bundle.py stage --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --target windows-x64 --version $releaseVersion --commit $env:GITHUB_SHA --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: dist/*
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: teamcode-windows-x64
-          path: cli/build/bin/mingwX64/debugExecutable/teamcode.exe
+          path: cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
           retention-days: 7
+
+  linux_arm64_build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: ./gradlew :cli:linkReleaseExecutableLinuxArm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-linux-arm64
+          path: cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+          retention-days: 1
+  linux_arm64:
+    needs: [linux_arm64_build, jvm]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-linux-arm64
+          path: cli/build/bin/linuxArm64/releaseExecutable
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-jar
+          path: app/build/libs
+      - name: Select the real ARM64 runtime
+        run: |
+          test "$(uname -m)" = aarch64
+          chmod 755 cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+          echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}" >> "$GITHUB_ENV"
+      - run: python3 scripts/smoke-native.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
+      - run: python3 scripts/smoke-devices.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+      - run: python3 scripts/smoke-run.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-queued-cancel.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+      - run: python3 scripts/smoke-hook.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+      - name: Start Linux user service manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
+          } >> "$GITHUB_ENV"
+      - run: python3 scripts/smoke-service.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+      - run: python3 scripts/smoke-team.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - name: Stage the tested native release asset
+        run: python3 scripts/release-bundle.py stage --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --target linux-arm64 --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64
+          path: dist/*
+          retention-days: 7
+  bundle:
+    needs: [native, windows, linux_arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: staged
+      - name: Verify and assemble all five tested targets
+        run: python3 scripts/release-bundle.py assemble --inputs staged --version "${ORG_GRADLE_PROJECT_teamcodeVersion#v}" --commit "$GITHUB_SHA" --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teamcode-release-bundle
+          path: dist/*
+          retention-days: 7
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [image, bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: teamcode-release-bundle
+          path: dist
+      - name: Publish the verified version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "TeamCode ${GITHUB_REF_NAME#v}" "${flags[@]}"
