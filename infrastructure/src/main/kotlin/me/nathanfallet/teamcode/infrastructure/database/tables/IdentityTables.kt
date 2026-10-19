@@ -40,7 +40,7 @@ object AuditEvents : Table("audit_events") {
     val subjectId = varchar("subject_id", 36)
     val occurredAt = long("occurred_at")
     override val primaryKey = PrimaryKey(id)
-    init { index("audit_team_time", false, teamId, occurredAt) }
+    init { index("audit_team_time", false, teamId, occurredAt); index("audit_team_id", false, teamId, id) }
 }
 object LoginBudget : Table("login_budget") {
     val id = integer("id")

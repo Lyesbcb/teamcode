@@ -48,8 +48,8 @@ class RequestCancellationPersistenceTest {
                 assertEquals("authentication_required", assertFailsWith<TeamFailure> { storeB.isCancelled(admin.copy(teamId = "another-team"), early) }.code)
 
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 43 }))
-                val account = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "cancellation-test", "org"), "Cancellation account"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "cancellation-enrollment") as EnrollmentResult.Created
-                accounts.handover("default", account.account.id, accessOnly = true)
+                val account = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "cancellation-test", "org"), "Cancellation account"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "cancellation-enrollment") as EnrollmentResult.Created
+                accounts.handover(AccountMutationActor.System, "default", account.account.id, accessOnly = true)
                 val admissionA = SqlAdmissionStore(a)
                 val admissionB = SqlAdmissionStore(b)
                 admissionA.configure(admin, MemberPolicy(admin.member.id, maxConcurrent = 1))

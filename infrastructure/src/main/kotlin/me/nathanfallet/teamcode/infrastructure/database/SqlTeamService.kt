@@ -19,7 +19,9 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
         lockTeam("default")
         if (!Members.select(Members.id).where { Members.teamId eq "default" }.limit(1).empty()) return@query null
         val password = Passwords.secret()
-        Members.insert { it[id] = UUID.randomUUID().toString(); it[teamId] = "default"; it[username] = "admin"; it[passwordHash] = passwords.hash(password); it[role] = "ADMIN" }
+        val adminId = UUID.randomUUID().toString()
+        Members.insert { it[id] = adminId; it[teamId] = "default"; it[username] = "admin"; it[passwordHash] = passwords.hash(password); it[role] = "ADMIN" }
+        audit("default", "system", "member.bootstrap", adminId)
         password
     }
     override suspend fun login(username: String, password: String, device: String, installationId: String?): LoginSession {
@@ -62,7 +64,12 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
                 .singleOrNull()?.let(::principal)
         }
     }
-    override suspend fun logout(principal: Principal) { database.query { Tokens.deleteWhere { (id eq principal.tokenId) and (memberId eq principal.member.id) } } }
+    override suspend fun logout(principal: Principal) { database.query {
+        lockTeam(principal.teamId)
+        val actor = fresh(this, principal)
+        Tokens.deleteWhere { (id eq actor.tokenId) and (memberId eq actor.member.id) }
+        audit(actor.teamId, actor.member.id, if (actor.serviceScopes == null) "session.logout" else "service_key.revoked", actor.tokenId)
+    } }
     override suspend fun changePassword(principal: Principal, current: String, replacement: String) {
         if (replacement.length !in 14..1024 || replacement == current) throw TeamFailure("invalid_password", 400, "Choose a different password with at least 14 characters (up to 1024).")
         hashing.withPermit { database.query {

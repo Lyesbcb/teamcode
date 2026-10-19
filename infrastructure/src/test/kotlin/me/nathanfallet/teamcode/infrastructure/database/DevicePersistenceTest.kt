@@ -74,8 +74,8 @@ class DevicePersistenceTest {
                 failure("not_found") { first.revokeDevice(admin, "00000000-0000-0000-0000-000000000001") }
 
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 53 }))
-                val account = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "device-test", "org"), "Device test"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "device-enrollment") as EnrollmentResult.Created
-                accounts.handover("default", account.account.id, accessOnly = true)
+                val account = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "device-test", "org"), "Device test"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "device-enrollment") as EnrollmentResult.Created
+                accounts.handover(AccountMutationActor.System, "default", account.account.id, accessOnly = true)
                 val admissionA = SqlAdmissionStore(a); val admissionB = SqlAdmissionStore(b)
                 admissionA.configure(admin, MemberPolicy(adminId, dailyUnits = 100, maxConcurrent = 2))
                 val reservation = admissionA.reserve(relogin.principal, 60, "claude-test")

@@ -40,8 +40,8 @@ class RemoteCancellationTest {
                 val devicesA = SqlDeviceService(a); val devicesB = SqlDeviceService(b)
                 val registeredDevice = devicesA.devices(actor).single()
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 47 }))
-                val account = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "http-cancellation", "org"), "HTTP cancellation"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "http-enrollment") as EnrollmentResult.Created
-                accounts.handover("default", account.account.id, accessOnly = true)
+                val account = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "http-cancellation", "org"), "HTTP cancellation"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "http-enrollment") as EnrollmentResult.Created
+                accounts.handover(AccountMutationActor.System, "default", account.account.id, accessOnly = true)
                 val admission = SqlAdmissionStore(a)
                 admission.configure(actor, MemberPolicy(actor.member.id, maxConcurrent = 1))
                 val held = admission.reserve(actor, 100, "claude-test")

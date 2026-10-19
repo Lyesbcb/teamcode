@@ -43,13 +43,13 @@ class TeamPersistenceTest {
                 val store = SqlAccountStore(database, CredentialCipher(ByteArray(32) { 42 }))
                 val verified = VerifiedProviderAccount(AccountIdentity("default", "anthropic", "verified-account", "verified-org"), "Provider name")
                 val credentials = ProviderCredentials("synthetic-access", "synthetic-refresh", System.currentTimeMillis() + 3600000)
-                val enrolled = store.upsert(verified, credentials, null, "operation-00000001") as EnrollmentResult.Created
-                val repeat = store.upsert(verified, credentials, null, "operation-00000001") as EnrollmentResult.Created
+                val enrolled = store.upsert(AccountMutationActor.System, verified, credentials, null, "operation-00000001") as EnrollmentResult.Created
+                val repeat = store.upsert(AccountMutationActor.System, verified, credentials, null, "operation-00000001") as EnrollmentResult.Created
                 assertEquals(enrolled.account.id, repeat.account.id)
-                val configured = store.configure("default", enrolled.account.id, "Team-owned name", true, 7)
-                store.handover("default", configured.id)
+                val configured = store.configure(AccountMutationActor.System, "default", enrolled.account.id, "Team-owned name", true, 7)
+                store.handover(AccountMutationActor.System, "default", configured.id)
                 val rotated = ProviderCredentials("synthetic-access-next", "synthetic-refresh-next", credentials.expiresAtMillis)
-                val raced = coroutineScope { (2..3).map { n -> async { store.upsert(verified, rotated, 1, "operation-0000000$n") } }.awaitAll() }
+                val raced = coroutineScope { (2..3).map { n -> async { store.upsert(AccountMutationActor.System, verified, rotated, 1, "operation-0000000$n") } }.awaitAll() }
                 assertEquals(1, raced.count { it is EnrollmentResult.Updated })
                 assertEquals(1, raced.count { it is EnrollmentResult.Conflict })
                 val updated = store.find(verified.identity)!!
@@ -66,11 +66,11 @@ class TeamPersistenceTest {
                     val c = this
                     assertTrue(Accounts.select(Accounts.credentialEnvelope).map { it[Accounts.credentialEnvelope] }.all { it.startsWith("v1:") && !it.contains("synthetic") })
                 }
-                store.configure("default", updated.id, "Shared", false, 0)
+                store.configure(AccountMutationActor.System, "default", updated.id, "Shared", false, 0)
                 val privateVerified = VerifiedProviderAccount(verified.identity.copy(accountId = "private-account"), "Protected")
-                val protected = (store.upsert(privateVerified, credentials, null, "operation-private01") as EnrollmentResult.Created).account
-                store.configure("default", protected.id, "Protected", false, 0, "alice-only")
-                store.handover("default", protected.id)
+                val protected = (store.upsert(AccountMutationActor.System, privateVerified, credentials, null, "operation-private01") as EnrollmentResult.Created).account
+                store.configure(AccountMutationActor.System, "default", protected.id, "Protected", false, 0, "alice-only")
+                store.handover(AccountMutationActor.System, "default", protected.id)
                 val pendingAlice = service.login("alice", reset.temporaryPassword, "test")
                 service.changePassword(pendingAlice.principal, reset.temporaryPassword, "alice new secure password")
                 val readyAlice = service.login("alice", "alice new secure password", "test").principal
@@ -91,8 +91,8 @@ class TeamPersistenceTest {
                 assertEquals(10, admission.capacity(readyAlice).chargedAndReservedUnits)
                 admission.observe(updated.id, listOf(AccountQuota(updated.id, "seven_day", .96, System.currentTimeMillis(), System.currentTimeMillis() + 3_600_000)))
                 val codexIdentity = VerifiedProviderAccount(verified.identity.copy(provider = "codex", accountId = "codex-user"), "Codex")
-                val codex = (store.upsert(codexIdentity, credentials, null, "operation-codex01") as EnrollmentResult.Created).account
-                store.handover("default", codex.id, accessOnly = true)
+                val codex = (store.upsert(AccountMutationActor.System, codexIdentity, credentials, null, "operation-codex01") as EnrollmentResult.Created).account
+                store.handover(AccountMutationActor.System, "default", codex.id, accessOnly = true)
                 val codexRequest = admission.reserve(admin.principal, 20, "gpt-6-luna", "codex")
                 assertEquals(codex.id, codexRequest.account.id)
                 admission.settle(codexRequest, 0)
@@ -108,21 +108,21 @@ class TeamPersistenceTest {
                 assertEquals(100, admission.capacity(admin.principal, support.member.id).dailyAllowanceUnits)
                 assertEquals(60, admission.capacity(admin.principal).chargedAndReservedUnits)
                 val expired = ProviderCredentials("expired-access", "rotating-refresh", 1)
-                store.upsert(verified, expired, 2, "operation-expired01")
+                store.upsert(AccountMutationActor.System, verified, expired, 2, "operation-expired01")
                 val renewals = java.util.concurrent.atomic.AtomicInteger()
                 val refreshing = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { _, _ ->
                     renewals.incrementAndGet(); delay(50)
                     ProviderCredentials("renewed-access", "rotated-refresh", System.currentTimeMillis() + 3_600_000)
                 }
-                store.handover("default", updated.id, accessOnly = true)
+                store.handover(AccountMutationActor.System, "default", updated.id, accessOnly = true)
                 assertEquals("access_token_expired", assertFailsWith<TeamFailure> { refreshing.fresh(store.find(verified.identity)!!) }.code)
                 assertEquals(0, renewals.get())
                 assertEquals(AccountState.ACCESS_ONLY, store.find(verified.identity)!!.state)
-                store.handover("default", updated.id)
+                store.handover(AccountMutationActor.System, "default", updated.id)
                 coroutineScope { (1..4).map { async { refreshing.fresh(store.find(verified.identity)!!) } }.awaitAll() }
                 assertEquals(1, renewals.get())
                 assertEquals("rotated-refresh", store.credentials("default", updated.id).refreshToken)
-                store.upsert(privateVerified, expired, 1, "operation-expired02")
+                store.upsert(AccountMutationActor.System, privateVerified, expired, 1, "operation-expired02")
                 val broken = SqlCredentialSource(database, CredentialCipher(ByteArray(32) { 42 })) { _, _ -> throw IllegalStateException("unknown refresh outcome") }
                 assertFailsWith<TeamFailure> { broken.fresh(store.find(privateVerified.identity)!!) }
                 assertEquals(AccountState.RECONNECT_REQUIRED, store.find(privateVerified.identity)!!.state)

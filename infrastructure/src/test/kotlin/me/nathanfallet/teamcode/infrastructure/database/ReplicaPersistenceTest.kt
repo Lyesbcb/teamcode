@@ -43,8 +43,8 @@ class ReplicaPersistenceTest {
                 val store = SqlAccountStore(a, cipher)
                 val verified = VerifiedProviderAccount(AccountIdentity("default", "anthropic", "synthetic-user", "synthetic-org"), "Replica test")
                 val valid = ProviderCredentials("synthetic-access", "synthetic-refresh", System.currentTimeMillis() + 3_600_000)
-                var account = (store.upsert(verified, valid, null, "replica-enroll-0001") as EnrollmentResult.Created).account
-                account = store.handover("default", account.id)
+                var account = (store.upsert(AccountMutationActor.System, verified, valid, null, "replica-enroll-0001") as EnrollmentResult.Created).account
+                account = store.handover(AccountMutationActor.System, "default", account.id)
                 val admissionA = SqlAdmissionStore(a)
                 val admissionB = SqlAdmissionStore(b)
                 admissionA.configure(admin.principal, MemberPolicy(admin.principal.member.id, 1000, 1))
@@ -80,7 +80,7 @@ class ReplicaPersistenceTest {
                 assertEquals(130, admissionB.capacity(admin.principal).chargedAndReservedUnits) // A dead pod cannot refund spend.
 
                 val expired = ProviderCredentials("expired-access", "rotating-refresh", 1)
-                account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0001") as EnrollmentResult.Updated).account
+                account = (store.upsert(AccountMutationActor.System, verified, expired, account.credentialVersion, "replica-expired-0001") as EnrollmentResult.Updated).account
                 val renewals = AtomicInteger()
                 val entered = CompletableDeferred<Unit>()
                 val release = CompletableDeferred<Unit>()
@@ -90,8 +90,8 @@ class ReplicaPersistenceTest {
                 coroutineScope {
                     val first = async { sourceA.fresh(account) }
                     entered.await()
-                    assertEquals(EnrollmentResult.Conflict, store.upsert(verified, valid, account.credentialVersion, "replica-race-000001"))
-                    assertFailsWith<TeamFailure> { store.handover("default", account.id) }
+                    assertEquals(EnrollmentResult.Conflict, store.upsert(AccountMutationActor.System, verified, valid, account.credentialVersion, "replica-race-000001"))
+                    assertFailsWith<TeamFailure> { store.handover(AccountMutationActor.System, "default", account.id) }
                     val second = async { sourceB.fresh(account) }
                     release.complete(Unit)
                     assertEquals(valid.accessToken, first.await().accessToken)
@@ -124,15 +124,15 @@ class ReplicaPersistenceTest {
                     admissionB.reserve(admin.principal, 100, "claude-opus-test")
                 }.code)
                 admissionA.settle(admissionB.reserve(admin.principal, 100, "claude-sonnet-test"), 0, false)
-                account = (store.upsert(verified, expired, account.credentialVersion, "replica-expired-0002") as EnrollmentResult.Updated).account
+                account = (store.upsert(AccountMutationActor.System, verified, expired, account.credentialVersion, "replica-expired-0002") as EnrollmentResult.Updated).account
                 // Simulate a process killed after committing refresh intent, before persisting the rotated token.
                 a.query { Accounts.update({ Accounts.id eq account.id }) { it[refreshPending] = true; it[refreshStartedAt] = 0 } }
                 assertEquals("provider_reconnect", assertFailsWith<TeamFailure> { sourceB.fresh(account) }.code)
                 assertEquals(1, renewals.get())
                 assertEquals(AccountState.RECONNECT_REQUIRED, store.find(verified.identity)!!.state)
-                assertFailsWith<TeamFailure> { store.handover("default", account.id) }
-                store.upsert(verified, valid, account.credentialVersion, "replica-reconnect-01")
-                account = store.handover("default", account.id)
+                assertFailsWith<TeamFailure> { store.handover(AccountMutationActor.System, "default", account.id) }
+                store.upsert(AccountMutationActor.System, verified, valid, account.credentialVersion, "replica-reconnect-01")
+                account = store.handover(AccountMutationActor.System, "default", account.id)
                 assertEquals(valid.accessToken, sourceA.fresh(account).accessToken)
 
                 val workA = SqlScheduledWork(a)

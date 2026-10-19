@@ -32,8 +32,8 @@ class RouteDirectivePersistenceTest {
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 29 }))
                 suspend fun account(provider: String): AccountRecord {
                     val verified = VerifiedProviderAccount(AccountIdentity("default", provider, provider, "test-org"), provider)
-                    val record = (accounts.upsert(verified, ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "forecast-$provider") as EnrollmentResult.Created).account
-                    return accounts.handover("default", record.id, accessOnly = true)
+                    val record = (accounts.upsert(AccountMutationActor.System, verified, ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "forecast-$provider") as EnrollmentResult.Created).account
+                    return accounts.handover(AccountMutationActor.System, "default", record.id, accessOnly = true)
                 }
                 val claude = account("anthropic")
                 val codex = account("codex")
@@ -111,9 +111,9 @@ class RouteDirectivePersistenceTest {
                 context(codex, resolved = "gpt-6-astra", effort = "low")
                 assertEquals(Pace.CAN_INCREASE, pace().advice.pace)
                 policies.save(actor, ModelPolicy(experimentalCrossProviderTranslation = true))
-                accounts.configure("default", codex.id, "Codex", false, 0, "private")
+                accounts.configure(AccountMutationActor.System, "default", codex.id, "Codex", false, 0, "private")
                 assertEquals(Pace.UNKNOWN, pace().advice.pace, "Another pool's idle quota is inaccessible")
-                accounts.configure("default", codex.id, "Codex", false, 0)
+                accounts.configure(AccountMutationActor.System, "default", codex.id, "Codex", false, 0)
                 assertEquals(Pace.CAN_INCREASE, pace().advice.pace)
                 observations(codex, listOf(.1, .1, .1), age = 400_000)
                 assertEquals(Pace.UNKNOWN, pace().advice.pace, "Hysteresis never retains stale optimistic guidance")

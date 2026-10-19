@@ -26,9 +26,9 @@ class QuotaModelLimitsPersistenceTest {
                 val admin = team.login("admin", "quota binding replacement password", "quota binding fixture").principal
                 val store = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 21 }))
                 suspend fun enroll(name: String, provider: String): AccountRecord {
-                    val account = (store.upsert(VerifiedProviderAccount(AccountIdentity("default", provider, name, "fixture-org"), name),
+                    val account = (store.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", provider, name, "fixture-org"), name),
                         ProviderCredentials("synthetic-access", "synthetic-refresh", System.currentTimeMillis() + 3_600_000), null, name) as EnrollmentResult.Created).account
-                    store.handover("default", account.id)
+                    store.handover(AccountMutationActor.System, "default", account.id)
                     return account
                 }
                 val account = enroll("codex-a", "codex")

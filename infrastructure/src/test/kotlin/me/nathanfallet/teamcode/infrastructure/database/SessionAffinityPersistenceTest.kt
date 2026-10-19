@@ -31,9 +31,9 @@ class SessionAffinityPersistenceTest {
                 val store = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 23 }))
                 suspend fun account(name: String, provider: String = "anthropic", pool: String? = null): AccountRecord {
                     val verified = VerifiedProviderAccount(AccountIdentity("default", provider, name, "test-org"), name)
-                    val record = (store.upsert(verified, ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "enroll-affinity-$name") as EnrollmentResult.Created).account
-                    store.configure("default", record.id, name, false, 0, pool)
-                    return store.handover("default", record.id, accessOnly = true)
+                    val record = (store.upsert(AccountMutationActor.System, verified, ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "enroll-affinity-$name") as EnrollmentResult.Created).account
+                    store.configure(AccountMutationActor.System, "default", record.id, name, false, 0, pool)
+                    return store.handover(AccountMutationActor.System, "default", record.id, accessOnly = true)
                 }
                 val accounts = listOf(account("first"), account("second"))
                 val admissionA = SqlAdmissionStore(a)
@@ -62,11 +62,11 @@ class SessionAffinityPersistenceTest {
                 assertEquals(first.id, place(admissionA, parent).account.id)
                 a.query { Accounts.update({ Accounts.id eq other.id }) { it[cooldownUntil] = 0 } }
 
-                store.configure("default", other.id, other.displayName, false, 5)
+                store.configure(AccountMutationActor.System, "default", other.id, other.displayName, false, 5)
                 assertEquals(other.id, place(admissionB, parent).account.id, "An administrator's higher priority preempts affinity")
-                store.configure("default", other.id, other.displayName, true, 5)
+                store.configure(AccountMutationActor.System, "default", other.id, other.displayName, true, 5)
                 assertEquals(first.id, place(admissionB, parent).account.id, "Disabled accounts cannot retain a pin")
-                store.configure("default", other.id, other.displayName, false, 0)
+                store.configure(AccountMutationActor.System, "default", other.id, other.displayName, false, 0)
 
                 // Two independent connection pools see the first placement before admitting the next.
                 val concurrent = coroutineScope { listOf(admissionA, admissionB).map { service -> async {

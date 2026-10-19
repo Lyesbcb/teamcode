@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         command([binary, 'configure', '--server', origin], env=ci_env, input=key_secret + '\n', timeout=15)
         assert 'admin (admin)' in command([binary, 'whoami'], env=ci_env, timeout=15).stdout
         assert request('/api/v1/capacity', token=key_secret)[0] == 200
-        for denied in ('/api/v1/service-keys', '/api/v1/accounts', '/api/v1/members', '/api/v1/quotas', '/api/v1/status'):
+        for denied in ('/api/v1/service-keys', '/api/v1/accounts', '/api/v1/members', '/api/v1/quotas', '/api/v1/status', '/api/v1/audit'):
             assert request(denied, token=key_secret)[0] == 403, 'Service key escaped its owner/scopes'
         assert request('/api/v1/members', {'username': 'forbidden', 'role': 'ADMIN'}, key_secret)[0] == 403
         cookies = http.cookiejar.CookieJar()
@@ -169,6 +169,15 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert request('/api/v1/members', token=member_token)[0] == 403
         assert request('/api/v1/register', {})[0] == 401
         assert request('/dashboard/accounts', opener=browser)[0] == 200
+        status, audit_json = request('/api/v1/audit', token=token)
+        journal = json.loads(audit_json)
+        assert status == 200 and len(journal['events']) <= 50
+        actions = {event['action'] for event in journal['events']}
+        assert {'member.bootstrap', 'member.created', 'service_key.created', 'device.renamed'} <= actions
+        assert not any(secret in audit_json for secret in (initial, password, temporary, token, key_secret))
+        assert request('/api/v1/audit', token=member_token)[0] == 403
+        status, audit_html = request('/dashboard/audit', opener=browser)
+        assert status == 200 and 'Audit history' in audit_html and 'member.created' in audit_html
         stop_own_process()
         start()
         assert 'temporary administrator password' not in log.read_text()
@@ -184,6 +193,8 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert not (root / 'config/teamcode/config.json').exists()
         assert identity_file.read_text() == installation
         assert request('/api/v1/members', token=token)[0] == 401
+        audit_status, audit_after = request('/dashboard/audit', opener=browser)
+        assert audit_status == 200 and 'session.logout' in audit_after and 'service_key.revoked' in audit_after
         command([binary, 'login', '--server', origin, '--username', 'admin', '--password-stdin'], env=env, input=password + '\n', timeout=30)
         assert identity_file.read_text() == installation
         token = json.loads((root / 'config/teamcode/config.json').read_text())['accessToken']
@@ -197,7 +208,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert request('/dashboard/devices', opener=browser)[0] == 200, 'Revoking a CLI device signed out the independent browser'
         assert 'Administrator workstation' not in request('/dashboard/devices', opener=browser)[1]
         assert password not in log.read_text() and temporary not in log.read_text()
-        print('Team smoke passed: bootstrap, password change, browser member creation, native identity/session commands, device rename, login/logout persistence, scoped CI key creation/persistence/revocation and scoped multi-session revocation.')
+        print('Team smoke passed: bootstrap, password change, browser member creation, native identity/session commands, device rename, login/logout persistence, scoped CI key creation/persistence/revocation, scoped multi-session revocation and persistent admin audit history.')
     finally:
         stop_own_process()
         if container_created:

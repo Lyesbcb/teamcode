@@ -23,11 +23,11 @@ class UnknownQuotaResetPersistenceTest {
             Database(container.jdbcUrl, container.username, container.password).use { b ->
                 val admin = seedLegacyAdministrator(a, "quota fixture replacement password").principal
                 val store = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 19 }))
-                val account = (store.upsert(
+                val account = (store.upsert(AccountMutationActor.System,
                     VerifiedProviderAccount(AccountIdentity("default", "anthropic", "fixture-user", "fixture-org"), "Fixture account"),
                     ProviderCredentials("synthetic-access", "synthetic-refresh", System.currentTimeMillis() + 3_600_000), null, "quota-fixture-enrollment"
                 ) as EnrollmentResult.Created).account
-                store.handover("default", account.id)
+                store.handover(AccountMutationActor.System, "default", account.id)
                 val first = SqlAdmissionStore(a)
                 val second = SqlAdmissionStore(b)
                 val now = a.query { nowMillis() }
@@ -40,9 +40,11 @@ class UnknownQuotaResetPersistenceTest {
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
                 assertEquals(known, second.quotas(admin).single(), "Nullable migration changed a known observation")
 
+                // Keep synthetic samples and their envelope on the same database clock.
+                // A host clock a millisecond ahead must not turn this ordering test into a future-envelope test.
                 val zero = known.copy(utilization = 0.0, observedAtMillis = now, resetsAtMillis = null)
-                second.observe(account.id, listOf(zero))
-                first.observe(account.id, listOf(known.copy(observedAtMillis = now - 1_000)))
+                second.observe(account.id, QuotaUpdate(listOf(zero), now))
+                first.observe(account.id, QuotaUpdate(listOf(known.copy(observedAtMillis = now - 1_000)), now))
                 assertEquals(zero, first.quotas(admin).single(), "Delayed known-reset sample replaced a newer unknown-reset observation")
                 val admitted = first.reserve(admin, 1, "claude-opus")
                 second.settle(admitted, 0)
@@ -50,7 +52,7 @@ class UnknownQuotaResetPersistenceTest {
                     val c = this; QuotaHistory.select(QuotaHistory.resetsAt).where { QuotaHistory.accountId eq account.id }.orderBy(QuotaHistory.observedAt to SortOrder.DESC).limit(1).single()[QuotaHistory.resetsAt] == null })
 
                 val scoped = AccountQuota(account.id, "model:opus", 1.0, now, null)
-                first.observe(account.id, listOf(scoped))
+                first.observe(account.id, QuotaUpdate(listOf(scoped), now))
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
                 val sonnet = second.reserve(admin, 1, "claude-sonnet")
                 first.settle(sonnet, 0)
@@ -67,7 +69,7 @@ class UnknownQuotaResetPersistenceTest {
                     val c = this; QuotaWindows.update({ (QuotaWindows.accountId eq account.id) and (QuotaWindows.windowName eq "model:opus") }) { it[resetsAt] = now + 3_600_000 } }
                 assertEquals("pool_unavailable", assertFailsWith<TeamFailure> { second.reserve(admin, 1, "claude-opus") }.code)
                 val before = second.quotas(admin)
-                first.observe(account.id, listOf(scoped.copy(utilization = 0.0, observedAtMillis = now + 3_600_000)))
+                first.observe(account.id, QuotaUpdate(listOf(scoped.copy(utilization = 0.0, observedAtMillis = now + 3_600_000)), now))
                 assertEquals(before, second.quotas(admin), "Future-dated samples must not erase protection")
             } }
         }

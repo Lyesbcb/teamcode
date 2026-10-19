@@ -1,5 +1,7 @@
 package me.nathanfallet.teamcode.domain.accounts
 
+import me.nathanfallet.teamcode.domain.team.Principal
+
 /** Provider identity is populated by a server-side verifier, never by display-name matching. */
 data class AccountIdentity(val teamId: String, val provider: String, val accountId: String, val organizationId: String) {
     init { require(listOf(teamId, provider, accountId, organizationId).all { it.isNotBlank() }) }
@@ -29,10 +31,16 @@ interface AccountVerifier {
     suspend fun verify(teamId: String, credentials: ProviderCredentials): VerifiedProviderAccount
 }
 
+/** Every write names a human principal or an explicit trusted server operation. Never deserialize this from a request. */
+sealed interface AccountMutationActor {
+    data class User(val principal: Principal) : AccountMutationActor
+    data object System : AccountMutationActor
+}
+
 interface AccountsRepository {
     suspend fun find(identity: AccountIdentity): AccountRecord?
     /** Must atomically enforce identity uniqueness, version and metadata-preserving updates. */
-    suspend fun upsert(verified: VerifiedProviderAccount, credentials: ProviderCredentials, expectedVersion: Long?, operationId: String): EnrollmentResult
+    suspend fun upsert(author: AccountMutationActor, verified: VerifiedProviderAccount, credentials: ProviderCredentials, expectedVersion: Long?, operationId: String): EnrollmentResult
 }
 
 sealed interface EnrollmentResult {

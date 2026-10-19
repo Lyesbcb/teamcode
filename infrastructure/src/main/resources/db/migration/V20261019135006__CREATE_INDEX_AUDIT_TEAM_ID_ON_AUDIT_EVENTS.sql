@@ -1,0 +1,1 @@
+CREATE INDEX audit_team_id ON audit_events (team_id, id);

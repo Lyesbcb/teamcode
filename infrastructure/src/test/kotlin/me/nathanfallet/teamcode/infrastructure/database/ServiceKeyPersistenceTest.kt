@@ -59,8 +59,8 @@ class ServiceKeyPersistenceTest {
     }
     private suspend fun verifyLedgerAndRevocation(a: Database, b: Database, admin: Principal, key: CreatedServiceKey, actor: Principal) = coroutineScope {
         val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 59 }))
-        val account = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "service-account", "org"), "Service account"), ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "service-enrollment") as EnrollmentResult.Created
-        accounts.handover("default", account.account.id, accessOnly = true)
+        val account = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "service-account", "org"), "Service account"), ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, "service-enrollment") as EnrollmentResult.Created
+        accounts.handover(AccountMutationActor.System, "default", account.account.id, accessOnly = true)
         val admissionA = SqlAdmissionStore(a); val admissionB = SqlAdmissionStore(b)
         admissionA.configurePool(admin, PoolBudget("", 200))
         admissionA.configure(admin, MemberPolicy(admin.member.id, dailyUnits = 100))

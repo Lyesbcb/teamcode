@@ -31,8 +31,8 @@ class AdmissionQueuePersistenceTest {
                 team.changePassword(login.principal, created.temporaryPassword, "queue colleague replacement")
                 val colleague = team.login("colleague", "queue colleague replacement", "queue test").principal
                 val accounts = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 37 }))
-                val enrolled = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "queue-test", "org"), "Queue account"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "queue-enrollment") as EnrollmentResult.Created
-                accounts.handover("default", enrolled.account.id, accessOnly = true)
+                val enrolled = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "queue-test", "org"), "Queue account"), ProviderCredentials("synthetic", "synthetic-refresh", Long.MAX_VALUE), null, "queue-enrollment") as EnrollmentResult.Created
+                accounts.handover(AccountMutationActor.System, "default", enrolled.account.id, accessOnly = true)
                 val first = SqlAdmissionStore(a)
                 val second = SqlAdmissionStore(b)
                 first.configure(admin, MemberPolicy(admin.member.id, maxConcurrent = 4))
@@ -70,9 +70,9 @@ class AdmissionQueuePersistenceTest {
                 val sameProvider = second.enqueue(colleague, input)
                 first.settle(second.reserveQueued(colleague, sameProvider, input), 0)
                 first.release(admin, unrelated)
-                val protectedAccount = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", "protected-test", "org"), "Protected account"), ProviderCredentials("synthetic-protected", "synthetic-refresh", Long.MAX_VALUE), null, "protected-enrollment") as EnrollmentResult.Created
-                accounts.handover("default", protectedAccount.account.id, accessOnly = true)
-                accounts.configure("default", protectedAccount.account.id, "Protected account", false, 0, "protected")
+                val protectedAccount = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", "protected-test", "org"), "Protected account"), ProviderCredentials("synthetic-protected", "synthetic-refresh", Long.MAX_VALUE), null, "protected-enrollment") as EnrollmentResult.Created
+                accounts.handover(AccountMutationActor.System, "default", protectedAccount.account.id, accessOnly = true)
+                accounts.configure(AccountMutationActor.System, "default", protectedAccount.account.id, "Protected account", false, 0, "protected")
                 first.configure(admin, MemberPolicy(colleague.member.id, poolId = "protected"))
                 val shared = first.enqueue(admin, input)
                 val protectedTicket = second.enqueue(colleague, input)
@@ -140,8 +140,8 @@ class AdmissionQueuePersistenceTest {
     val policiesA = SqlModelPolicyStore(a)
     val policiesB = SqlModelPolicyStore(b)
     assertFalse(policiesA.get("default").experimentalCrossProviderTranslation)
-    val codex = accounts.upsert(VerifiedProviderAccount(AccountIdentity("default", "codex", "queue-codex", "org"), "Codex"), ProviderCredentials("synthetic-codex", "synthetic-refresh", Long.MAX_VALUE), null, "codex-enrollment") as EnrollmentResult.Created
-    accounts.handover("default", codex.account.id, accessOnly = true)
+    val codex = accounts.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "codex", "queue-codex", "org"), "Codex"), ProviderCredentials("synthetic-codex", "synthetic-refresh", Long.MAX_VALUE), null, "codex-enrollment") as EnrollmentResult.Created
+    accounts.handover(AccountMutationActor.System, "default", codex.account.id, accessOnly = true)
     policiesB.save(admin, ModelPolicy(experimentalCrossProviderTranslation = true))
     assertTrue(policiesA.get("default").experimentalCrossProviderTranslation)
     val translated = AdmissionInput(100, "gpt-test", "codex", context = AdmissionContext(

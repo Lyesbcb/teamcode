@@ -120,6 +120,8 @@ Read [architecture](docs/architecture.md), [product](docs/product.md), [roadmap]
 
 ## Capacity and model policies
 
+Interactive administrators can inspect **Dashboard → Audit** or `GET /api/v1/audit` for paginated administrative and authentication metadata. Service/CI keys cannot read this journal. See [audit coverage and API pagination](docs/audit.md).
+
 The dashboard exposes member weights, per-member concurrency and optional hard daily caps, pool budgets, observed provider quota windows, model/effort restrictions and current agent guidance. Daily credits are an internal team budget, not a conversion of Max subscription percentages. With weights 5/5/1 and a budget of 1,100 credits, members receive 500/500/100; changing weights does not erase spend. Reservations and actual usage survive restarts. Separate pool identifiers isolate accounts for protected members.
 
 Default model policy permits `claude-*` and `gpt-*` (existing saved policies are not broadened) and denies `*fable*`. Administrators can set allowed/denied patterns and reasoning efforts in `/dashboard/models`. Requests are rejected before dispatch when a policy is violated. No effort is silently replaced.

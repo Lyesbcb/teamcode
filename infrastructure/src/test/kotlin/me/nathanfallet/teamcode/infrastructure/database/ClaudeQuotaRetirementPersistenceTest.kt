@@ -28,9 +28,9 @@ class ClaudeQuotaRetirementPersistenceTest {
                 val actor = team.login("admin", "Claude quota fixture replacement", "Claude quota fixture").principal
                 val store = SqlAccountStore(a, CredentialCipher(ByteArray(32) { 25 }))
                 suspend fun account(name: String): AccountRecord {
-                    val enrolled = (store.upsert(VerifiedProviderAccount(AccountIdentity("default", "anthropic", name, "org"), name),
+                    val enrolled = (store.upsert(AccountMutationActor.System, VerifiedProviderAccount(AccountIdentity("default", "anthropic", name, "org"), name),
                         ProviderCredentials("synthetic-access", "synthetic-refresh", Long.MAX_VALUE), null, name) as EnrollmentResult.Created).account
-                    return store.handover("default", enrolled.id, accessOnly = true)
+                    return store.handover(AccountMutationActor.System, "default", enrolled.id, accessOnly = true)
                 }
                 val claude = account("claude-a")
                 val other = account("claude-b")

@@ -86,6 +86,10 @@ class TeamCodeClient(
         require(Regex("[a-zA-Z0-9_-]{1,36}").matches(id) && version > 0)
         return request("/api/v1/routes/$id", HttpMethod.Delete, RouteDeleteRequest(version))
     }
+    suspend fun audit(beforeId: Long? = null): AuditPageView {
+        require(beforeId == null || beforeId > 0) { "Use a positive audit event identifier." }
+        return request("/api/v1/audit" + (beforeId?.let { "?before=$it" } ?: ""), HttpMethod.Get)
+    }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
     suspend fun serviceKeys(memberId: String? = null): List<ServiceKeyView> = request(memberPath(memberId) + "/service-keys", HttpMethod.Get)
     suspend fun createServiceKey(input: CreateServiceKeyRequest, memberId: String? = null): CreatedServiceKeyResponse =
