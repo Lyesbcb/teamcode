@@ -59,17 +59,17 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
         if (customCodexHooks && !noGuidance) {
             echo("Custom Codex CLI hook overrides detected; add teamcode agents hook to those hooks for guidance.", err = true)
         }
-        val codexGuidance = if (agent == "codex" && !noGuidance && !customCodexHooks) try {
-            codexGuidanceOptions(servicePlatform(), configPath()).also {
+        val guidance = if (agent == "codex" && !noGuidance && !customCodexHooks) try {
+            codexGuidance(servicePlatform(), configPath()).also {
                 echo("TeamCode guidance hooks are available. Review and trust them in Codex /hooks before first use.", err = true)
             }
         } catch (_: Exception) {
             echo("Automatic guidance could not be prepared; continuing with server-side limits.", err = true)
-            emptyList()
-        } else emptyList()
+            AgentLaunch(emptyList(), emptyMap())
+        } else AgentLaunch(emptyList(), emptyMap())
         try {
-            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString(), codexGuidance)
-            return runInteractiveProcess(agent, plan.arguments, plan.environment)
+            val plan = agentLaunch(agent, arguments, port, token, plugin?.directory?.toString(), guidance.arguments)
+            return runInteractiveProcess(agent, plan.arguments, plan.environment + guidance.environment)
         } finally {
             try { plugin?.close() } catch (_: Exception) { echo("The temporary guidance plugin could not be removed.", err = true) }
         }

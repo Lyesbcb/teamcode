@@ -215,3 +215,10 @@ Local evidence:
 - The shared bridge refactor also passed the real **Claude Code 2.1.302** guidance fixture with its Bash tool round trip.
 
 Native stdin and generated-command checks are wired into desktop CI, including Windows PowerShell execution. Their updated cross-platform run is pending this push; MinGW linking alone is not Windows runtime acceptance. Full real Codex Windows client acceptance, independent subagent fan-out, forecast load replay/charts, and the remaining [V1 gates](v1-review.md) stay open.
+
+
+### Windows hook executable lookup
+
+CI runs [39182797785](https://github.com/nathanfallet/teamcode/actions/runs/39182797785) and [39217843645](https://github.com/nathanfallet/teamcode/actions/runs/39217843645) exposed a Windows hook invocation failure. The Windows acceptance deliberately removes nonessential PATH entries; Windows PowerShell lives below `System32/WindowsPowerShell/v1.0`, outside that minimal PATH. Native/npm launches worked but the new guidance command could not find PowerShell. Docker publication remained blocked by the failing Windows gate.
+
+The launcher now adds the OS-provided PowerShell directory to the Codex child environment only. The minimal-PATH acceptance remains intact. Local CLI JVM tests, macOS/MinGW linking and the real Codex 0.163.0 five-scenario guidance fixture pass. Windows runtime confirmation awaits the fix's CI run; linking is not a substitute for it.

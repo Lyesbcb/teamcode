@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.cli.launch
 
 import kotlinx.serialization.json.JsonPrimitive
 import me.nathanfallet.teamcode.cli.platform.ServicePlatform
+import me.nathanfallet.teamcode.cli.platform.environment
 import okio.Path.Companion.toPath
 import kotlin.io.encoding.Base64
 
@@ -22,7 +23,7 @@ internal fun hasCodexHookOverrides(arguments: List<String>): Boolean {
 }
 
 /** A stable hook definition avoids re-review on every ephemeral proxy port or token rotation. */
-internal fun codexGuidanceOptions(platform: ServicePlatform, config: String): List<String> {
+internal fun codexGuidance(platform: ServicePlatform, config: String): AgentLaunch {
     require(platform.executable.toPath().isAbsolute && config.toPath().isAbsolute)
     val arguments = listOf(platform.executable, "agents", "hook", "--config", config)
     require(arguments.none { '\u0000' in it })
@@ -38,5 +39,13 @@ internal fun codexGuidanceOptions(platform: ServicePlatform, config: String): Li
         "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Base64.encode(utf16)}"
     } else arguments.joinToString(" ") { "'${it.replace("'", "'\"'\"'")}'" }
     val handler = "[{hooks=[{type=\"command\",command=${JsonPrimitive(command)},timeout=5,additionalContextLimit=1000}]}]"
-    return listOf("-c", "hooks.UserPromptSubmit=$handler", "-c", "hooks.PreToolUse=$handler")
+    val overrides = if (platform.os == "windows") {
+        val systemRoot = requireNotNull(environment("SystemRoot")).toPath()
+        require(systemRoot.isAbsolute)
+        val powershell = systemRoot / "System32" / "WindowsPowerShell" / "v1.0"
+        // Native/npm launchers can receive a deliberately minimal PATH. PowerShell ships with Windows
+        // but lives below System32; make it discoverable without changing any persistent user setting.
+        mapOf("PATH" to listOfNotNull(environment("PATH")?.takeIf { it.isNotBlank() }, powershell.toString()).joinToString(";"))
+    } else emptyMap()
+    return AgentLaunch(listOf("-c", "hooks.UserPromptSubmit=$handler", "-c", "hooks.PreToolUse=$handler"), overrides)
 }
