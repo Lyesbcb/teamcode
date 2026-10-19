@@ -38,3 +38,10 @@ class RunsResource(val member: String? = null, val all: Boolean = false, val bef
         @Serializable @Resource("policy") class Policy(val parent: Id)
     }
 }
+
+/** Interactive administrator history and explicitly expiring daily-allocation exceptions. */
+@Serializable @Resource("/api/v1/members/{memberId}/budget-overrides")
+class BudgetOverridesResource(val memberId: String, val before: String? = null) {
+    @Serializable @Resource("{id}/revoke")
+    class Revoke(val parent: BudgetOverridesResource, val id: String)
+}

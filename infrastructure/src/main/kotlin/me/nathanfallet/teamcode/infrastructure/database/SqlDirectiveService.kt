@@ -79,7 +79,7 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                     // A different route, policy, pool, priority or eligible account set must not
                     // inherit optimistic advice (or an old throttle) from another capacity context.
                     val scope = listOf(runLimits.maxConcurrent.toString(), pool.orEmpty(), modelPolicy.toString(), valid.toString(), scopedAllowanceAvailable.toString(),
-                        runLimits.contextKey, runPolicies.truncated.toString(),
+                        runLimits.contextKey, runPolicies.truncated.toString(), capacity.budgetOverride?.id.orEmpty(),
                         capacity.groups.map { "${it.group}:${it.paused}" }.sorted().joinToString("\n"),
                         active.map { it.toString() }.sorted().joinToString("\n"),
                         accessible.map { "${it.id}:${it.priority}" }.sorted().joinToString("\n")).joinToString("\n")

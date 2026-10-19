@@ -57,7 +57,7 @@ Track installed/running/authenticated/connected states separately. Retry network
 - Overview: usable capacity, 5-hour/weekly windows, reset times, forecast confidence, waiting work and controller decisions.
 - Provider accounts: CLI enrollment instructions, connection/refresh health, ownership, pools, permissions, pause/drain and reconnection status; no secret display.
 - Team: administrator-created users, groups, roles, devices and CI credentials.
-- Budgets: member/group/run limits, concurrency, protected reserves and audited temporary overrides.
+- Budgets: member/group/run limits, concurrency, protected reserves and [audited temporary daily-allocation overrides](budget-overrides.md).
 - Model routing: requested aliases, actual targets, capabilities, explicit fallbacks and a why-this-route explanation.
 - Sessions: activity metadata, directives, delivery/acknowledgment status; private content is not a team leaderboard.
 - Personal account: own usage, reservations, device management, CLI integration and refusal explanations.

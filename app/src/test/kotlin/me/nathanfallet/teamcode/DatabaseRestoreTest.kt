@@ -94,7 +94,7 @@ class DatabaseRestoreTest {
                     val admission = SqlAdmissionStore(restored)
                     assertEquals(200, admission.capacity(admin).chargedAndReservedUnits)
                     assertEquals("member_allowance", assertFailsWith<TeamFailure> {
-                        admission.reserve(admin, 400, "claude-test")
+                        admission.reserve(admin, 401, "claude-test")
                     }.code, "A restored active/uncertain reservation must not reset remaining allowance")
                     // Verify persisted refresh uncertainty without constructing any provider transport.
                     restored.query { Accounts.update({ Accounts.id eq fixture.accountId }) { it[disabled] = false } }
@@ -170,6 +170,10 @@ class DatabaseRestoreTest {
         admission.reserve(admin.principal, AdmissionInput(100, "claude-test", "anthropic", runId = runId))
         runs.configure(admin.principal, runId, RunPolicy(500, 2, true))
         runs.end(admin.principal, runId, 0)
+        val overrides = BudgetOverrideServiceImpl(database)
+        val previousOverride = overrides.grant(admin.principal, admin.principal.member.id, BudgetOverrideChange(650, 1440, "Restore history fixture"))
+        overrides.revoke(admin.principal, admin.principal.member.id, previousOverride.id, "Earlier exception completed")
+        overrides.grant(admin.principal, admin.principal.member.id, BudgetOverrideChange(600, 1440, "Restore active exception"))
         val now = System.currentTimeMillis()
         admission.observe(enrolled.account.id, listOf(AccountQuota(enrolled.account.id, "seven_day", .4, now, now + DAY)))
         accounts.configure(AccountMutationActor.System, "default", enrolled.account.id, "Restored Max account", true, 7)
@@ -193,6 +197,7 @@ class DatabaseRestoreTest {
             "modelPolicy" to SqlModelPolicyStore(database).get("default"), "routes" to SqlRoutingStore(database).list("default"),
             "pacingSettings" to SqlPacingSettingsStore(database).get(actor),
             "groups" to GroupServiceImpl(database).list(actor).map { GroupServiceImpl(database).get(actor, it.group.id) },
+            "budgetOverrides" to members.associate { it.id to BudgetOverrideServiceImpl(database).history(actor, it.id) },
             "runs" to AgentRunServiceImpl(database).list(actor, all = true).runs.map { AgentRunServiceImpl(database).get(actor, it.id) },
             "devices" to SqlDeviceService(database).devices(actor), "keys" to SqlServiceKeyService(database).list(actor),
             "audit" to SqlAuditService(database).list(actor),
@@ -216,7 +221,7 @@ class DatabaseRestoreTest {
             configureGateway(gateway, team = team, accounts = accounts, admission = admission,
                 modelPolicies = SqlModelPolicyStore(database), routes = SqlRoutingStore(database),
                 devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() },
-                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database), groups = GroupServiceImpl(database), runs = AgentRunServiceImpl(database))
+                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database), groups = GroupServiceImpl(database), runs = AgentRunServiceImpl(database), budgetOverrides = BudgetOverrideServiceImpl(database))
         }
         server.start(wait = false)
         try {
@@ -237,7 +242,16 @@ class DatabaseRestoreTest {
                 assertEquals("seven_day", forecast.getValue("windows").jsonArray.single().jsonObject.getValue("window").jsonPrimitive.content)
                 val capacity = Json.parseToJsonElement(get("/api/v1/capacity", fixture.activeKey.accessToken).bodyAsText()).jsonObject
                 assertEquals(200, capacity.getValue("chargedAndReservedUnits").jsonPrimitive.long)
-                assertEquals(500, capacity.getValue("dailyUnits").jsonPrimitive.long)
+                assertEquals(600, capacity.getValue("dailyUnits").jsonPrimitive.long)
+                assertEquals(500, capacity.getValue("baseDailyUnits").jsonPrimitive.long)
+                val overridesPath = "/api/v1/members/${fixture.admin.principal.member.id}/budget-overrides"
+                val history = Json.parseToJsonElement(get(overridesPath).bodyAsText()).jsonObject
+                val records = history.getValue("overrides").jsonArray.map { it.jsonObject }
+                assertEquals(2, records.size)
+                assertTrue(records.any { it.getValue("revocationReason") == JsonPrimitive("Earlier exception completed") })
+                assertEquals(history.getValue("activeOverrideId"), capacity.getValue("budgetOverride").jsonObject.getValue("id"))
+                assertEquals(HttpStatusCode.Forbidden, get(overridesPath, fixture.activeKey.accessToken).status)
+                assertEquals(HttpStatusCode.Forbidden, get(overridesPath, fixture.memberToken).status)
                 val run = Json.parseToJsonElement(get("/api/v1/runs", fixture.activeKey.accessToken).bodyAsText()).jsonObject.getValue("runs").jsonArray.single().jsonObject
                 assertEquals("ENDED", run.getValue("state").jsonPrimitive.content)
                 assertEquals(200, run.getValue("chargedAndReservedUnits").jsonPrimitive.long)

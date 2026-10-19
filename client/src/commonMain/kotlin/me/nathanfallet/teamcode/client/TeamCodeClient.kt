@@ -70,6 +70,19 @@ class TeamCodeClient(
         request("/api/v1/directives/current", HttpMethod.Get) else request("/api/v1/directives/current", HttpMethod.Post, DirectiveScope(sessionId))
     suspend fun claimDirective(sessionId: String, stage: String): DirectiveClaimResponse = request("/api/v1/directives/claim", HttpMethod.Post, DirectiveClaimRequest(sessionId, stage))
     suspend fun acknowledgeDirective(id: String, stage: String, sessionId: String? = null, claimId: String? = null): SuccessResponse = request("/api/v1/directives/receipt", HttpMethod.Post, DirectiveReceipt(id, stage, sessionId, claimId))
+    /** Temporary daily allocations require an interactive administrator and never reset usage. */
+    suspend fun budgetOverrides(memberId: String, beforeId: String? = null): BudgetOverridePageView {
+        identifier(memberId); beforeId?.let(::identifier)
+        return request("/api/v1/members/$memberId/budget-overrides" + (beforeId?.let { "?before=$it" } ?: ""), HttpMethod.Get)
+    }
+    suspend fun grantBudgetOverride(memberId: String, input: BudgetOverrideRequest): BudgetOverrideView {
+        identifier(memberId); input.replacesId?.let(::identifier)
+        return request("/api/v1/members/$memberId/budget-overrides", HttpMethod.Post, input)
+    }
+    suspend fun revokeBudgetOverride(memberId: String, id: String, reason: String): BudgetOverrideView {
+        identifier(memberId); identifier(id)
+        return request("/api/v1/members/$memberId/budget-overrides/$id/revoke", HttpMethod.Post, RevokeBudgetOverrideRequest(reason))
+    }
     suspend fun capacity(): CapacityView = request("/api/v1/capacity", HttpMethod.Get)
     /** Controller configuration is managed with an interactive administrator login. */
     suspend fun pacingSettings(): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Get)

@@ -11,14 +11,17 @@ import java.net.Socket
 import java.net.URI
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
+import me.nathanfallet.teamcode.presentation.ForecastLivePolicy
 import org.junit.jupiter.api.Timeout
 import kotlin.test.*
 
 class ForecastLiveHttpTest {
     @Test @Timeout(120)
     fun anOpenHttpStreamSeesAnotherReplicasUpdatesAndRevocationAndStopsOnSocketReset() = runBlocking {
-        withForecastLiveFixture { fixture ->
-            HttpClient(CIO) { followRedirects = false; install(HttpTimeout) { requestTimeoutMillis = 15_000 } }.use { client ->
+        // Three sequential five-second assertions must fit within the same stream lifetime.
+        // Browser reconnect acceptance keeps the fixture's short default lifetime.
+        withForecastLiveFixture(ForecastLivePolicy(100, 30_000)) { fixture ->
+            HttpClient(CIO) { followRedirects = false; install(HttpTimeout) { requestTimeoutMillis = 30_000 } }.use { client ->
                 client.prepareGet("${fixture.originA}/dashboard/forecasts/stream?account=${fixture.accountId}") {
                     header(HttpHeaders.Cookie, "teamcode_session=${fixture.session.token}")
                 }.execute { response ->

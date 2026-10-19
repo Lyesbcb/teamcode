@@ -140,6 +140,10 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         actor.requireAdmin()
         if (policy.dailyUnits !in 0..100_000_000_000 || policy.weight !in 0..1000 || policy.maxConcurrent !in 1..32 || policy.poolId?.let { !Regex("[a-zA-Z0-9_-]{1,36}").matches(it) } == true) throw TeamFailure("invalid_policy", 400, "Invalid daily allowance, concurrency limit or pool identifier.")
         lockTeam(actor.teamId); requireCurrent(this, actor); ensureMember(actor.teamId, policy.memberId)
+        val previous = readMemberPolicy(this, policy.memberId)
+        if (previous.poolId != policy.poolId) readActiveBudgetOverride(actor.teamId, previous, nowMillis())?.let {
+            revokeBudgetOverride(actor, policy.memberId, it.id, nowMillis(), "Member pool changed.", "budget_override.pool_changed")
+        }
         MemberPolicies.upsert {
             it[memberId] = policy.memberId; it[dailyUnits] = policy.dailyUnits; it[maxConcurrent] = policy.maxConcurrent; it[poolId] = policy.poolId; it[weight] = policy.weight
         }

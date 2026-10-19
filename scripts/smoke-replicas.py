@@ -133,6 +133,17 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         status, body = request(origins[1], '/api/v1/auth/login', {'username': 'replica-member', 'password': member_password})
         assert status == 200
         member_token = json.loads(body)['accessToken']
+        override_path = '/api/v1/members/' + member_id + '/budget-overrides'
+        status, body = request(origins[0], override_path, {'dailyUnits': 750000, 'durationMinutes': 60, 'reason': 'Replica exception <audited>'}, token)
+        assert status == 201
+        override_id = json.loads(body)['id']
+        assert request(origins[1], override_path, token=member_token)[0] == 403
+        status, body = request(origins[1], '/api/v1/capacity', token=member_token)
+        capacity = json.loads(body)
+        assert status == 200 and capacity['dailyUnits'] == 750000 and capacity['baseDailyUnits'] == 500000
+        assert capacity['budgetOverride']['id'] == override_id and 'Replica exception' not in body
+        status, body = request(origins[1], '/dashboard/capacity/' + member_id + '/overrides', token=token, dashboard=True)
+        assert status == 200 and 'Replica exception &lt;audited&gt;' in body
         run_id = str(uuid.uuid4())
         run_path = '/api/v1/runs/' + run_id
         status, body = request(origins[0], '/api/v1/runs', {'id': run_id, 'agent': 'claude', 'workload': 'background'}, member_token)
@@ -177,6 +188,11 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         start(0)
         await_ready(origins[0])
         assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        status, body = request(origins[0], override_path, token=token)
+        assert status == 200 and json.loads(body)['activeOverrideId'] == override_id
+        assert request(origins[1], override_path + '/' + override_id + '/revoke', {'reason': 'Restart verified'}, token)[0] == 200
+        status, body = request(origins[0], '/api/v1/capacity', token=member_token)
+        assert status == 200 and json.loads(body)['budgetOverride'] is None and json.loads(body)['dailyUnits'] == 500000
         status, body = request(origins[0], run_path, token=member_token)
         assert status == 200 and json.loads(body)['run']['policy']['budgetUnits'] == 12345
         assert request(origins[1], run_path + '/end', {'exitCode': 7}, member_token)[0] == 200
@@ -205,7 +221,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         assert request(origins[0], pacing_path, {'observationOnly': True}, token, method='PUT')[0] == 401
         assert request(origins[0], assignment_path + '/pause', {'paused': False}, token, method='PATCH')[0] == 401
         assert all(all(value not in log.read_text() for value in (password, db_password, member_password, member_token, created_member['temporaryPassword'])) for log in logs)
-        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members/groups/controller mode, scoped manager revocation and pause enforcement, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
+        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members/groups/controller mode/temporary quota overrides, scoped manager revocation and pause enforcement, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
     finally:
         for child in children:
             if child.poll() is None:
