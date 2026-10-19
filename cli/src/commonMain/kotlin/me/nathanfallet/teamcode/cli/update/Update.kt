@@ -4,6 +4,7 @@ import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.choice
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -27,9 +28,21 @@ internal class Update : SuspendingCliktCommand(name = "update") {
     private val version by option("--version", help = "Choose a published version, including prereleases or an explicit downgrade.")
     private val bundle by option("--bundle", help = "Use an offline signed release directory.")
     private val root by option("--root", help = "Explicit managed installation directory; ordinary launches discover their own installation.")
+    private val notifications by option("--notifications", help = "Configure background signed release notifications for this managed installation.").choice("on", "off", "status")
     override fun help(context: Context) = "Check or update a managed native installation; preserve login and drain its owned service."
 
     override suspend fun run() = releaseOperation {
+        if (notifications != null) {
+            if (check || rollback || version != null || bundle != null) throw UsageError("--notifications cannot be combined with a check, installation or rollback.")
+            val store = root?.let { InstallationStore(defaultInstallationPaths(it)) } ?: managedInstallation()
+                ?: throw CliOperationException("release_not_managed")
+            if (store.state() == null) throw CliOperationException("release_not_managed")
+            val settings = PeriodicReleaseCheck(store.paths, VERSION)
+            if (notifications != "status") settings.setNotifications(notifications == "on")
+            echo("Background release notifications: ${if (settings.notificationsEnabled()) "on" else "off"}.")
+            if (!me.nathanfallet.teamcode.cli.platform.environment("TEAMCODE_DISABLE_AUTOUPDATE").isNullOrEmpty()) echo("Environment override: background checks are disabled.")
+            return@releaseOperation
+        }
         if (check) {
             if (rollback || bundle != null || root != null) throw UsageError("--check cannot be combined with --rollback, --bundle or --root.")
             val result = ReleaseClient { configure -> HttpClient { configure(this) } }.use { CheckRelease(it, currentVersion = VERSION)(version) }

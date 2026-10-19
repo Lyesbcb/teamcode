@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual native installation/update/rollback using two already signed local bundles."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ def main():
     parser.add_argument('--first-bundle', type=Path, required=True)
     parser.add_argument('--second-bundle', type=Path, required=True)
     parser.add_argument('--service', action='store_true', help='Also exercise the actual owned OS service; Linux needs a user manager.')
+    parser.add_argument('--notification-bundle', type=Path, help='Optionally verify service notifications from fresh signed newer metadata without network checks.')
     args = parser.parse_args()
     binary = str(args.binary.resolve())
     target = ('windows-x64' if os.name == 'nt' else
@@ -41,7 +43,7 @@ def main():
         root = Path(directory) / "application é space's"
         install_root = root / 'installation'
         config_root = root / 'configuration'
-        env = dict(os.environ, XDG_CONFIG_HOME=str(config_root))
+        env = dict(os.environ, XDG_CONFIG_HOME=str(config_root), TEAMCODE_DISABLE_AUTOUPDATE='1')
         root.mkdir()
         launcher = install_root / 'bin' / ('teamcode.exe' if os.name == 'nt' else 'teamcode')
 
@@ -65,6 +67,17 @@ def main():
         run(binary, ['install', '--bundle', str(first), '--root', str(install_root)])
         selected(0)
         original_launcher = hashlib.sha256(launcher.read_bytes()).hexdigest()
+        before_settings = state()
+        def notifications(mode):
+            return run(binary, ['update', '--root', str(install_root), '--notifications', mode])
+        assert 'notifications: on.' in notifications('status')
+        notifications('off')
+        assert 'notifications: off.' in notifications('status')
+        notifications('on')
+        assert 'notifications: on.' in notifications('status')
+        # OS managers do not inherit the invoking shell's environment; persist the CI opt-out.
+        notifications('off')
+        assert state() == before_settings
         run(binary, ['install', '--bundle', str(first), '--root', str(install_root)])
         selected(0)
         run(launcher, ['update', '--bundle', str(second)])
@@ -139,6 +152,19 @@ def main():
                 with socket.socket() as listener:
                     listener.bind(('127.0.0.1', 0)); local_port = listener.getsockname()[1]
                 installed_service = True
+                notification_cache = None
+                if args.notification_bundle:
+                    notification_manifest = (args.notification_bundle / 'manifest.json').read_bytes()
+                    notification_signature = (args.notification_bundle / 'manifest.sig').read_bytes()
+                    notice_version = json.loads(notification_manifest)['version']
+                    # Native install roots enforce a private inherited Windows DACL as well.
+                    notification_cache = json.dumps({'schemaVersion': 1, 'checkedAtMillis': int(time.time() * 1000),
+                        'manifest': base64.b64encode(notification_manifest).decode('ascii'),
+                        'signature': base64.b64encode(notification_signature).decode('ascii')}).encode()
+                    cache_path = install_root / 'update-check.json'
+                    cache_path.write_bytes(notification_cache)
+                    cache_path.chmod(0o600)
+                    notifications('on')
                 run(launcher, ['service', 'install', '--port', str(local_port)])
                 settings_path = config_root / 'teamcode/service.json'
                 saved_settings = settings_path.read_bytes()
@@ -166,6 +192,14 @@ def main():
                     raise AssertionError('No fresh owned-service startup was observed')
                 identity(manifests[0]['version'])
                 first_start = start_marker()
+                if notification_cache is not None:
+                    for _ in range(80):
+                        logs = settings_path.with_name('service.log').read_text(encoding='utf-8')
+                        if f'TeamCode {notice_version} is available.' in logs: break
+                        time.sleep(.1)
+                    else: raise AssertionError('The actual managed service did not report its authenticated cached release')
+                    assert cache_path.read_bytes() == notification_cache, 'A fresh cached check made a release fetch or rewrote metadata'
+                    notifications('off')
                 api_version = 2
                 try: run(launcher, ['update', '--bundle', str(second)], error='release_candidate_incompatible')
                 finally: api_version = 1

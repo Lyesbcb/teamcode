@@ -5,6 +5,11 @@ import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.arguments.*
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.choice
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import me.nathanfallet.teamcode.cli.SystemExit
 import me.nathanfallet.teamcode.cli.loadConfig
 import me.nathanfallet.teamcode.cli.sdk
@@ -23,10 +28,13 @@ private class LaunchAgent(private val agent: String) : SuspendingCliktCommand(na
     private val noGuidance by option("--no-guidance", help = "Disable automatic session guidance for this launch.").flag()
     private val workload by option("--workload", help = "Scheduling class for this launch; quotas and permissions still apply.").choice("interactive", "background").default("interactive")
     private val arguments by argument("AGENT_ARGS").multiple()
-    override suspend fun run() {
+    override suspend fun run() = coroutineScope {
         val service = loadService(configPath())
         val lease = me.nathanfallet.teamcode.cli.update.agentInstallationLease(service?.executable)
-        try { runAgent() } finally { lease?.close() }
+        val updates = launch { me.nathanfallet.teamcode.cli.update.watchReleaseUpdates { echo(it, err = true) } }
+        try { runAgent() } finally {
+            try { withContext(NonCancellable) { updates.cancelAndJoin() } } finally { lease?.close() }
+        }
     }
     private suspend fun runAgent() {
         val config = loadConfig()

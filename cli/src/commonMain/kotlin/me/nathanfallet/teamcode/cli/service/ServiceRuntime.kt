@@ -78,16 +78,18 @@ internal suspend fun serve(settings: ServiceSettings) = coroutineScope {
             }
         }) { configure -> HttpClient { configure(this) } }
         val server = proxyServer(client, settings.localToken, settings.port, settings.id, origin, ::report)
+        var updates: Job? = null
         try {
             server.start(wait = false)
             // Ktor's Native startup registers its own signal handler. The service owns both
             // the proxy lifetime and the outer command loop, so install our handler last.
             installServiceSignalHandlers()
             report("Local proxy is listening. Upstream connectivity and authentication are checked on each request.")
+            updates = launch { me.nathanfallet.teamcode.cli.update.watchReleaseUpdates(::report) }
             while (!stopRequested(settings)) delay(250)
             report("Stopping: draining existing requests for up to ten minutes.")
         } finally {
-            withContext(NonCancellable) { server.stop(600_000, 610_000); client.close() }
+            withContext(NonCancellable) { updates?.cancelAndJoin(); server.stop(600_000, 610_000); client.close() }
         }
         report("Local proxy stopped.")
     } catch (error: CancellationException) { throw error }
