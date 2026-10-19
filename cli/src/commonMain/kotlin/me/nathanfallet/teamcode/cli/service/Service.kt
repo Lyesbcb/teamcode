@@ -61,7 +61,7 @@ private class Install : SuspendingCliktCommand(name = "install") {
     }
 }
 
-private suspend fun manager(settings: ServiceSettings, action: String, checkResult: Boolean = true): Int {
+private suspend fun manager(settings: ServiceSettings, action: String, checkResult: Boolean = true, quiet: Boolean = false): Int {
     val command: String
     val args: List<String>
     if (settings.os == "windows") {
@@ -112,30 +112,30 @@ private suspend fun manager(settings: ServiceSettings, action: String, checkResu
             "TEAMCODE_SERVICE_TASK" to settings.label, "TEAMCODE_SERVICE_OPERATION" to action,
             // A caller running PowerShell 7 may export modules incompatible with Windows PowerShell 5.1.
             "PSModulePath" to "${requireNotNull(environment("SystemRoot"))}\\System32\\WindowsPowerShell\\v1.0\\Modules",
-        ) else emptyMap(), quiet = action in setOf("status", "active"))
+        ) else emptyMap(), quiet = quiet || action in setOf("status", "active"))
     }
     if (checkResult) check(result == 0) { "The OS service manager rejected the operation." }
     return result
 }
 
-private suspend fun start(settings: ServiceSettings) {
+private suspend fun start(settings: ServiceSettings, quiet: Boolean = false) {
     require(ownsRegistration(settings)) { "The service registration is missing. Run service install." }
     if (settings.os == "windows") {
         when (manager(settings, "status", false)) {
-            3 -> manager(settings, "load")
+            3 -> manager(settings, "load", quiet = quiet)
             0 -> Unit
             else -> error("Cannot query Windows Task Scheduler.")
         }
         FileSystem.SYSTEM.delete(serviceStopPath(settings.config).toPath(), mustExist = false)
-        manager(settings, "enable")
-        manager(settings, "start")
+        manager(settings, "enable", quiet = quiet)
+        manager(settings, "start", quiet = quiet)
         return
     }
-    if (settings.os == "macos" && manager(settings, "status", false) != 0) manager(settings, "load")
-    else manager(settings, "start")
+    if (settings.os == "macos" && manager(settings, "status", false) != 0) manager(settings, "load", quiet = quiet)
+    else manager(settings, "start", quiet = quiet)
 }
 
-private suspend fun stop(settings: ServiceSettings) {
+private suspend fun stop(settings: ServiceSettings, quiet: Boolean = false) {
     require(ownsRegistration(settings)) { "The service registration is missing; refusing to stop an unknown service." }
     if (settings.os == "windows") {
         when (manager(settings, "status", false)) {
@@ -143,7 +143,7 @@ private suspend fun stop(settings: ServiceSettings) {
             0 -> Unit
             else -> error("Cannot query Windows Task Scheduler.")
         }
-        manager(settings, "disable")
+        manager(settings, "disable", quiet = quiet)
         writePrivateFile(serviceStopPath(settings.config), settings.id)
         withTimeout(660_000) {
             while (true) when (manager(settings, "active", false)) {
@@ -154,7 +154,7 @@ private suspend fun stop(settings: ServiceSettings) {
         }
         return
     }
-    if (settings.os != "macos" || manager(settings, "status", false) == 0) manager(settings, "stop")
+    if (settings.os != "macos" || manager(settings, "status", false) == 0) manager(settings, "stop", quiet = quiet)
     // bootout can return while the old process is still draining. Do not race its replacement.
     if (settings.os == "macos") withTimeout(660_000) {
         while (manager(settings, "status", false) == 0) delay(250)
@@ -229,7 +229,8 @@ private class Serve : SuspendingCliktCommand(name = "serve") {
 }
 
 
-internal suspend fun startManagedService(settings: ServiceSettings) = start(settings)
-internal suspend fun stopManagedService(settings: ServiceSettings) = stop(settings)
+// Automatic installation recovery runs before arbitrary CLI commands, including JSON/version output.
+internal suspend fun startManagedService(settings: ServiceSettings) = start(settings, quiet = true)
+internal suspend fun stopManagedService(settings: ServiceSettings) = stop(settings, quiet = true)
 internal suspend fun managedServiceRunning(settings: ServiceSettings): Boolean =
     manager(settings, if (settings.os == "windows") "active" else "status", false) == 0

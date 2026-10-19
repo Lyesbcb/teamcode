@@ -249,15 +249,17 @@ def main():
                         assert not streaming.done(), 'Update interrupted the active response before its commit'
                         assert updater.poll() is None, 'Updater exited before the owned process interruption'
                         updater.kill()  # Exact PID created above; never find/stop a process by name.
-                        updater.communicate(timeout=10)
+                        # Wait for that PID, not pipe EOF: a draining manager child can inherit stdio.
+                        updater.wait(timeout=10)
                         assert updater.returncode != 0
                         if os.name != 'nt': assert updater.returncode == -signal.SIGKILL
                         assert (install_root / 'transaction.json').exists(), 'Interrupted update lost its journal'
                     finally:
                         stream_release.set()
                         if updater is not None and updater.poll() is None:
-                            updater.kill(); updater.communicate(timeout=10)
+                            updater.kill(); updater.wait(timeout=10)
                     assert b'"done":true' in streaming.result(timeout=15), 'Updater death lost the active response'
+                    updater.communicate(timeout=15)
                 selected(0); identity(manifests[0]['version'])
                 assert state() == before_interruption, 'Real interruption did not restore the exact selection'
                 first_start = start_marker(first_start)
