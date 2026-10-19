@@ -41,7 +41,7 @@ public class BootstrapFixtureHandler : HttpMessageHandler {
             response.Content = new StreamContent(new BootstrapNonSeekable(data));
             if (Mode == "length") response.Content.Headers.ContentLength = 9;
             if (Mode == "encoded") response.Content.Headers.ContentEncoding.Add("gzip");
-            if (Mode == "error") response.StatusCode = HttpStatusCode.TooManyRequests;
+            if (Mode == "error") response.StatusCode = (HttpStatusCode)429;
         }
         return Task.FromResult(response);
     }

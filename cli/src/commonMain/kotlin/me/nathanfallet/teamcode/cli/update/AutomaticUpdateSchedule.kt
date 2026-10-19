@@ -17,7 +17,11 @@ internal interface AutomaticUpdateSchedule {
 }
 
 /** Manage only exact recorded user-job definitions; never stop an in-flight update. */
-internal class AutomaticUpdateScheduleImpl : AutomaticUpdateSchedule {
+internal class AutomaticUpdateScheduleImpl(
+    private val execute: suspend (String, List<String>, Map<String, String?>) -> Int = { executable, arguments, overrides ->
+        runInteractiveProcess(executable, arguments, overrides, quiet = true)
+    },
+) : AutomaticUpdateSchedule {
     private val fs = FileSystem.SYSTEM
     override fun owns(settings: AutomaticUpdateSettings): Boolean = automaticUpdateDefinitions(settings).all { (path, bytes) ->
         val meta = fs.metadataOrNull(path) ?: return@all false
@@ -67,7 +71,13 @@ internal class AutomaticUpdateScheduleImpl : AutomaticUpdateSchedule {
         requireOwned(settings)
         when (settings.os) {
             "macos" -> launch(settings, "disable")
-            "linux" -> system(listOf("disable", "--now", "${settings.label}.timer"))
+            "linux" -> {
+                // disable removes links for definitions outside the manager's
+                // search path. Restore only our verified timer before repeated
+                // off/uninstall calls; linking does not enable or start it.
+                system(listOf("link", settings.registration))
+                system(listOf("disable", "--now", "${settings.label}.timer"))
+            }
             else -> when (windowsStatus(settings)) { 0 -> windows(settings, listOf("/Change", "/TN", settings.label, "/Disable")); 3 -> Unit; else -> throw CliOperationException("automatic_manager_unavailable") }
         }
     }
@@ -84,7 +94,7 @@ internal class AutomaticUpdateScheduleImpl : AutomaticUpdateSchedule {
     }
 
     private suspend fun command(executable: String, args: List<String>, check: Boolean = true, env: Map<String, String?> = emptyMap()): Int {
-        val result = withTimeout(15_000) { runInteractiveProcess(executable, args, env, quiet = true) }
+        val result = withTimeout(15_000) { execute(executable, args, env) }
         if (check && result != 0) throw CliOperationException("automatic_manager_rejected")
         return result
     }
