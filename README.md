@@ -103,7 +103,7 @@ python3 scripts/smoke-native.py \
   --jar app/build/libs/app-all.jar
 ```
 
-The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows. Native runtime checks pass on macOS, Linux and Windows, including configuration, TLS, streaming, agent launchers and user services. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. CI verifies the JVM and runs native transport and service checks on macOS/Linux/Windows; it does not use provider credentials. Each platform uploads its development binary only after its acceptance tests pass.
+The smoke test starts and stops only its own processes, uses an isolated configuration directory and synthetic credentials, and checks private file permissions, authentication and progressive SSE. Native targets are declared for desktop macOS/Linux/Windows. Native runtime checks pass on macOS, Linux and Windows, including configuration, TLS, streaming, agent launchers and user services. MySQL integration tests require Docker. `scripts/smoke-team.py` verifies the team server with its own isolated MySQL and the native CLI. Ordinary CI runs JVM/replica tests, Helm checks and Docker on Linux. Native transport/service and signed installation checks across macOS/Linux/Windows run only on version tags or explicit manual full validation; see [distribution and CI controls](docs/distribution.md). CI does not use provider credentials. Each native platform uploads its development binary only after its acceptance tests pass.
 
 ## Architecture
 

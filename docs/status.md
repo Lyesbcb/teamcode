@@ -1,5 +1,13 @@
 # Implementation status
 
+## CI cost controls and latest installation corrections
+
+The owner's reported CI spend reached about $50, with roughly 80% attributed to the macOS three-core runners. Ordinary push/PR checks now keep JVM/replica tests, Helm and Docker on Linux only. All native compiler/runtime, bundle/signing and signed installation jobs are skipped unless the ref is a version tag or a manual run explicitly selects `full_validation=true` (default false). Docker publication no longer waits on intentionally skipped native jobs during ordinary runs. Version tags and explicitly selected full runs still require successful signed installation acceptance before publication. No full native run was dispatched for this cost-control change.
+
+[Run 39290739147](https://github.com/nathanfallet/teamcode/actions/runs/39290739147) finished with successful JVM, Helm, five ordinary native runtimes, bundle/signing and both macOS signed installer jobs. Linux signed installers reached service startup successfully, accepting the special-path correction, but their interruption harness waited on inherited child pipes before releasing a draining response. It now waits for the exact owned updater PID first, releases the response and then collects output. Windows automatic journal recovery leaked service-manager output into CLI stdout; internal service start/stop now run quietly, preserving explicit service-command output and machine-readable command results. Linux/Windows runtime acceptance of these follow-up corrections awaits a deliberately requested full run.
+
+Local correction evidence: 52 CLI JVM tests, 39 actual macOS ARM64 native tests, optimized native linking and Windows/Linux source compilation pass (`/tmp/teamcode-silent-installation-recovery-build.log`). The fresh signed optimized macOS executable passes the real LaunchAgent installation/update/rollback, exact updater interruption, drained-response recovery, quiet-agent protection and preserved configuration smoke (`/tmp/teamcode-silent-recovery-native-e2e.log`). This is local runtime evidence, not five-platform acceptance or a completed V1.
+
 ## Quiesced database restoration acceptance
 
 `DatabaseRestoreTest` creates a real MySQL 8.4 source, seeds it through the production Exposed repositories, takes a vendor `mysqldump`, stops the original instance and loads the generated dump into a different temporary MySQL. A second canonical full-database dump must match byte for byte, covering schema, Flyway history and every fixture row. Dump/diagnostic files are owner-only and removed after the test. No hand-written SQL, operator database, real subscription or provider transport is used.

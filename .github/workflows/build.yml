@@ -5,6 +5,11 @@ on:
     tags: ['v[0-9]*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_validation:
+        description: 'Run all five native platforms and signed installation acceptance (paid macOS/Windows runners)'
+        type: boolean
+        default: false
 env:
   ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || '0.1.0-SNAPSHOT' }}
   TEAMCODE_INSTALLATION_VERSION: 0.0.0-installation.g${{ github.sha }}
@@ -51,12 +56,13 @@ jobs:
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
   image:
     timeout-minutes: 20
-    needs: [jvm, helm, native, windows, bundle, signed_installation]
+    needs: [jvm, helm, signed_installation]
     if: >-
       !cancelled() && needs.jvm.result == 'success' && needs.helm.result == 'success' &&
-      needs.bundle.result == 'success' &&
       (needs.signed_installation.result == 'success' ||
-      (github.event_name == 'pull_request' && needs.signed_installation.result == 'skipped'))
+      (needs.signed_installation.result == 'skipped' &&
+      !startsWith(github.ref, 'refs/tags/v') &&
+      !(github.event_name == 'workflow_dispatch' && inputs.full_validation)))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,6 +90,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/nathanfallet/teamcode
             org.opencontainers.image.licenses=Apache-2.0
   native:
+    # Keep paid native runners off ordinary pushes and pull requests.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -159,6 +167,7 @@ jobs:
           path: installation-dist/*
           retention-days: 7
   windows:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     runs-on: windows-latest
     steps:
@@ -206,6 +215,7 @@ jobs:
           retention-days: 7
 
   cross_build:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
     timeout-minutes: 30
     strategy:
       fail-fast: false
