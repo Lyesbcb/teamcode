@@ -273,3 +273,19 @@ Evidence:
 - `RouteDirectivePersistenceTest` now also proves that retiring a Claude cap releases forecast pressure after persisted recovery hysteresis; retained history does not recreate the pause.
 
 No provider credentials or subscription calls were used. Cross-platform CI and Docker publication await this push. More subscription-plan shapes, real reset-boundary behavior, complete agent tasks and the other V1 acceptance gates remain open.
+
+
+## Real Claude Code task through Codex (2026-10-19)
+
+The preceding Claude quota-retirement commit `e2b0f29` completed [CI 39226100498](https://github.com/nathanfallet/teamcode/actions/runs/39226100498) successfully, including JVM, native macOS/Linux/Windows, Helm and multi-architecture Docker publication. This also validates the Exposed conversion; its earlier standalone run was superseded before the macOS/image jobs completed.
+
+The real coding-task fixture found and fixed two conversion boundaries beyond the existing text/function smoke: Claude Code explicitly sends neutral temperature 1, and a tool execution error must remain actionable after translation. Neutral temperature/top-p defaults now use the Codex endpoint's defaults, while custom values remain rejected. Failed Messages tools become explicitly marked Responses tool outputs, retaining their original content and call IDs within the tool-result role. Claude's non-strict tool default is now explicit on Responses requests, so optional parameters are not implicitly normalized into required fields. Explicit strict mode is retained.
+
+Evidence:
+
+- **107 tests passed**, zero failures/errors/skips: API 2, client 4, domain 17, infrastructure 60, presentation 8 and CLI 16. New codec regressions cover default/custom sampling, strictness and optional arguments, failed tool results, IDs and original text/image preservation. Server packaging, module/query conventions, Python syntax and whitespace checks passed.
+- The actual **Claude Code 2.1.302** ran through the macOS ARM64 native `teamcode run claude`, a packaged server and a forced route from `claude-haiku-4-5-20251001` to the real Codex subscription model **`gpt-6-luna`**. It used Read/Edit/Bash, corrected a broken Python function on disk and produced a successful final response. Four independently rerun tests passed, and the test file remained byte-for-byte unchanged.
+- All **eight inference requests** used the intended Codex target and settled known usage. Six authorized accounts were imported in access-only mode; the source configuration hash remained unchanged. No refresh ran, and the fixture removed its own processes and disposable database. No raw prompts, agent output or subscription credentials were logged.
+- The harness uses isolated agent configuration, restricted task tools, an eight-turn/180-second bound, a real native launcher and actual file/test assertions. It is opt-in and excluded from CI.
+
+This closes one real coding-task case, not the entire portability gate: reasoning is explicitly disabled, tools are the selected built-in Read/Edit/Bash set, and the destination is forced from the first turn. Mid-conversation fallback, other reasoning modes and reverse coding-task acceptance remain open. A synthetic capture of installed Codex **0.163.0**, without any provider request, identified the next concrete reverse-route gap: `additional_tools` input items, namespaced/custom tools, reasoning context and verbosity controls. They must be mapped before claiming default Codex-to-Claude coding support. All other V1 release gates remain in scope. CI/Docker publication for this slice awaits its push.

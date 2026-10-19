@@ -29,7 +29,11 @@ HTTP 5xx, transport interruptions and any failure after committed output are not
 
 For a target using the incoming protocol, the request fields and response stream remain native; only an explicitly configured model replacement changes the model field. Native calls do not pass through the common conversation representation.
 
-A cross-protocol target decodes into an internal conversation and encodes into the target protocol. Text, supported image sources, function definitions, tool call IDs, JSON arguments and tool results have explicit mappings. The streaming adapter maps content blocks/items, argument deltas, stop reasons and usage. Cached input is accounted for according to each provider's definition rather than double-counted. Raw target-provider usage remains authoritative for team credit settlement.
+A cross-protocol target decodes into an internal conversation and encodes into the target protocol. Text, supported image sources, function definitions, tool call IDs, JSON arguments and tool results have explicit mappings. A failed Messages tool result becomes a Responses tool output with an explicit `is_error=true` text marker followed by every original content block; the error stays within the tool result and never becomes a system instruction. The streaming adapter maps content blocks/items, argument deltas, stop reasons and usage. Cached input is accounted for according to each provider's definition rather than double-counted. Raw target-provider usage remains authoritative for team credit settlement.
+
+Messages function tools default to `strict=false` when translated. This preserves optional arguments: leaving strictness unspecified in Responses can normalize the schema into strict mode and make those arguments required. Explicit `strict=true` is preserved. See [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling?strict-mode=disabled) and [Claude strict tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use).
+
+Explicit neutral sampling defaults (`temperature=1`, `top_p=1`) map to the target's defaults without forwarding unsupported Codex subscription parameters. Custom sampling values remain a compatibility error. Claude Code sends temperature 1 even for an otherwise default request; [Claude's Messages reference](https://platform.claude.com/docs/en/api/http/beta/messages/create) documents this default. This normalization is covered by the real subscription coding acceptance below, not inferred solely from public API compatibility.
 
 The currently verified cross-provider profile explicitly disables reasoning (`thinking.type=disabled` for Messages, `reasoning.effort=none` for Responses); administrators must permit the `none` effort. These two controls map to one another without substituting a different effort. Provider-default reasoning can produce opaque items and fail compatibility checks. Subscription transport metadata events are consumed without converting them into conversational content; terminal status and usage are still required.
 
@@ -38,3 +42,22 @@ Signed/encrypted reasoning replay, hosted tools, custom tool grammars, citations
 The stream decoder accepts split UTF-8/SSE framing, bounds individual events, content blocks and accumulated output, and rejects missing terminal usage. A downstream disconnect propagates without emitting a replacement response. Tests cover tool loops, empty arguments, usage/cache mapping, invalid/truncated streams, opaque reasoning, policy checks and safe versus ambiguous fallback.
 
 Protocol references: [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events). Subscription transport acceptance is checked separately because public API documentation does not guarantee that subscription endpoints accept every public API option.
+
+
+## Real coding-task acceptance
+
+`acceptance-provider.py --coding-task claude` runs the actual Claude Code client through the native launcher and central server, with a forced Messages-to-Codex route. It imports authorized subscriptions in access-only mode into its own disposable database, creates a small broken Python module and unchanged tests, and requires actual Read/Edit/Bash calls, corrected source, four independently rerun passing tests, multiple provider dispatches and settled usage. Only metadata and matched public error categories are printed; raw agent output and subscription credentials are withheld. Both process lifetime and agent turns are bounded. Test resources are removed afterward.
+
+Example from a local build (never run this in CI):
+
+```sh
+python3 scripts/acceptance-provider.py \
+  --binary cli/build/bin/macosArm64/debugExecutable/teamcode.kexe \
+  --jar app/build/libs/app-all.jar \
+  --source /path/to/authorized/teamclaude.json \
+  --coding-task claude --claude /path/to/actual/claude
+```
+
+Verified with Claude Code 2.1.302 requesting `claude-haiku-4-5-20251001`, routed to the Codex subscription model `gpt-6-luna`: eight requests settled and all four independent tests passed. This uses the portable reasoning-disabled profile and isolated built-in tools; it is not full-default-client acceptance or proof of a mid-conversation provider switch.
+
+The harness also has `--coding-task codex`/`both` and an explicit `--codex` executable, but reverse-direction acceptance remains open. The installed Codex 0.163.0 emits `additional_tools`, namespaced/custom tools, reasoning context and verbosity controls that the current cross-provider codec does not yet support. A synthetic local capture confirmed this request shape without provider calls. Completing these mappings and real coding/reasoning tasks in both directions remains a V1 requirement.

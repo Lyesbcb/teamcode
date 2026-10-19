@@ -85,15 +85,23 @@ class ResponsesProtocolAdapter : ProtocolAdapter {
     }
     override fun encode(c: Conversation, model: String): JsonObject {
         if (c.stops.isNotEmpty()) unsupported("The Codex subscription endpoint cannot preserve custom stop sequences.")
-        if (c.temperature != null || c.topP != null) unsupported("Sampling overrides are not portable to Codex subscription models.")
-        if (c.turns.flatMap { it.content }.filterIsInstance<Part.ToolResult>().any { it.isError }) unsupported("This tool error marker has no equivalent in Responses.")
+        // Claude Code sends the neutral API defaults explicitly. Codex subscription
+        // models select those defaults without accepting sampling parameters on the wire.
+        if (c.temperature !in setOf(null, 1.0) || c.topP !in setOf(null, 1.0)) unsupported("Non-default sampling overrides are not portable to Codex subscription models.")
         return buildJsonObject {
             put("model", model); put("stream", true); put("store", false)
             put("instructions", c.instructions.joinToString("\n\n"))
             putJsonArray("input") {
                 c.turns.forEach { turn -> turn.content.forEach { part -> when (part) {
                     is Part.ToolCall -> add(buildJsonObject { put("type", "function_call"); put("call_id", part.id); put("name", part.name); put("arguments", part.arguments) })
-                    is Part.ToolResult -> add(buildJsonObject { put("type", "function_call_output"); put("call_id", part.id); put("output", JsonArray(part.content.map { responsePart(it, "user") })) })
+                    is Part.ToolResult -> add(buildJsonObject {
+                        put("type", "function_call_output"); put("call_id", part.id)
+                        // Responses represents execution failures in tool output, not a
+                        // separate is_error field. Keep every original content block and
+                        // explicitly identify failure inside that same untrusted tool result.
+                        val content = if (part.isError) listOf(Part.Text("[TeamCode tool result: is_error=true. Tool execution failed.]")) + part.content else part.content
+                        put("output", JsonArray(content.map { responsePart(it, "user") }))
+                    })
                     else -> add(buildJsonObject { put("type", "message"); put("role", turn.role); put("content", JsonArray(listOf(responsePart(part, turn.role)))) })
                 } } }
             }

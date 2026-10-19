@@ -24,7 +24,9 @@ class MessagesProtocolAdapter : ProtocolAdapter {
         }
         val tools = (body["tools"] as? JsonArray).orEmpty().map { item ->
             val tool = item.obj(); fields(tool, setOf("name", "description", "input_schema", "strict", "cache_control"))
-            ToolDefinition(tool.text("name"), tool.optionalText("description"), tool["input_schema"]?.toString() ?: "{}", tool.bool("strict"))
+            // Responses attempts strict-schema normalization when omitted; Claude
+            // tools are best-effort by default. Keep optional arguments optional.
+            ToolDefinition(tool.text("name"), tool.optionalText("description"), tool["input_schema"]?.toString() ?: "{}", tool.bool("strict") ?: false)
         }
         val choice = body["tool_choice"] as? JsonObject
         choice?.let { fields(it, setOf("type", "name", "disable_parallel_tool_use")) }

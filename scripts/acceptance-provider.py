@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in real Claude acceptance: isolated server, native import/proxy and real Claude Code.
+"""Opt-in real provider acceptance: isolated server, native import/proxy and actual agents.
 
 Never run in CI. Uses existing access tokens only, never refreshes, and removes its
 own encrypted test database on exit. No source configuration is modified.
@@ -32,6 +32,9 @@ parser.add_argument('--translation-smoke', action='store_true', help='Run two sm
 parser.add_argument('--translation-direction', choices=('both','messages','responses'), default='both')
 parser.add_argument('--launcher', action='store_true', help='Use teamcode run to manage the agent proxy')
 parser.add_argument('--codex-model', help='Also run an isolated real Codex process using this model')
+parser.add_argument('--coding-task', choices=('claude', 'codex', 'both'), help='Run real agents through forced cross-provider routes on an isolated coding task')
+parser.add_argument('--claude', type=Path, help='Actual Claude executable, avoiding terminal integration shims')
+parser.add_argument('--codex', type=Path, help='Actual Codex executable, avoiding terminal integration shims')
 args = parser.parse_args()
 binary, jar = str(Path(args.binary).resolve()), str(Path(args.jar).resolve())
 name = 'teamcode-acceptance-' + secrets.token_hex(6)
@@ -172,7 +175,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
                      if not key.startswith(('ANTHROPIC_', 'CLAUDE_', 'CLAUDECODE', 'CMUX_'))}
         agent_env.update(ANTHROPIC_BASE_URL=f'http://127.0.0.1:{local_port}',
                          ANTHROPIC_API_KEY=local_token, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
-        if not args.skip_claude:
+        if not args.skip_claude and not args.coding_task:
             claude = shutil.which('claude')
             assert claude, 'Claude Code must be installed for this acceptance test.'
             launcher = [binary, 'run', 'claude', '--'] if args.launcher else [claude]
@@ -190,7 +193,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             assert any('settled' in line and 'units=unknown' not in line for line in events)
             assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest
             print('Real Claude Code acceptance passed; usage settled.', flush=True)
-        if args.codex_model:
+        if args.codex_model and not args.coding_task:
             codex = shutil.which('codex')
             assert codex, 'Codex CLI must be installed for this acceptance test.'
             provider_toml = ('model_providers.teamcode={name="TeamCode",base_url="http://127.0.0.1:'
@@ -224,6 +227,9 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             request_id = re.search(r'request=([a-zA-Z0-9-]+)', dispatch).group(1)
             assert any('settled request=' + request_id in line and 'units=unknown' not in line for line in metadata)
             print('Real Codex CLI acceptance passed through native proxy and subscription pool.', flush=True)
+        if args.coding_task:
+            from acceptance_coding import run_coding_tasks
+            run_coding_tasks(args, binary, root, env, request, token, log)
         if args.translation_smoke:
             # This portable profile explicitly disables reasoning. Opaque reasoning replay is tested separately.
             policy = json.loads(request('/api/v1/policy/models', token=token)[1])
@@ -294,7 +300,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-provider-acceptance-') as dire
             if dispatched <= settled: break
             assert time.monotonic() < deadline, 'An acceptance request did not settle'
             time.sleep(.05)
-        if not args.codex_model:
+        if not args.codex_model and not args.coding_task:
             for event in events:
                 print(event, flush=True)
         assert hashlib.sha256(args.source.read_bytes()).hexdigest() == source_digest

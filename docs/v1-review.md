@@ -16,7 +16,7 @@ This is a review of the working foundation, not a declaration that V1 release ac
 
 ## Decisions and evidence still needed for a full V1
 
-- **Full agent portability:** a completed two-turn function call is not a coding-task acceptance result. Exercise real Claude Code and Codex tools and reasoning in both directions. Opaque signed/encrypted reasoning and custom provider tools remain explicit limitations. Native passthrough retains their original fields; crossing protocols does not currently preserve every such feature.
+- **Full agent portability:** a complete Claude Code → Codex coding task is verified with reasoning disabled and built-in Read/Edit/Bash tools. Finish reverse Codex → Claude coding, full-default-client and reasoning acceptance, including Codex namespaced/custom tools and `additional_tools` input items. A portable-profile task does not prove all routes or a mid-conversation switch. Opaque signed/encrypted reasoning and custom provider tools remain explicit limitations. Native passthrough retains their original fields; crossing protocols does not currently preserve every such feature.
 - **Session behavior:** shared SQL affinity and model-specific failover are implemented and integration-tested; finish real-agent quota/reset-boundary acceptance without changing an active tool conversation incompatibly.
 - **Capacity control:** finish remaining provider-specific quota shapes and real quota/reset-boundary acceptance, real Codex Windows hook acceptance, subagent fan-out, real-load forecast replay stability, fair interactive scheduling and reconciliation. Percentages from different plans are not interchangeable team credits.
 - **Team administration:** finish groups, devices and scoped service credentials with revocation/audit acceptance.
