@@ -2,6 +2,10 @@
 
 Windows x64 native runtime acceptance passed in [CI run 39178163269](https://github.com/nathanfallet/teamcode/actions/runs/39178163269), including authentication, TLS, Unicode paths, agent launchers and Task Scheduler lifecycle. V1 release acceptance and actual workstation reboot/logon checks remain open; see [implementation status](status.md). TeamCode runs directly on Windows, without WSL, Java or Gradle at runtime.
 
+## Release installer
+
+The pipeline generates a [PowerShell installer](bootstrap.md) for the signed Windows x64 release. The public command will become available after the full V1 passes and release **0.1.0** is published. It targets Windows PowerShell 5.1 and PowerShell 7, prints a stable launcher path to add to user PATH and preserves saved authentication and personal agent configuration. All-platform bootstrap runtime acceptance remains separate from the earlier native transport/service evidence above.
+
 ## Install a tested development build
 
 Open a successful [Build workflow run](https://github.com/nathanfallet/teamcode/actions/workflows/build.yml) and download its `teamcode-windows-x64` artifact. It is uploaded only after that run's Windows acceptance test passes. Extract `teamcode.exe` and keep it at a stable location, for example `%LOCALAPPDATA%\TeamCode\bin\teamcode.exe`. These are development builds; versioned releases and automatic updates are still planned.

@@ -4,6 +4,20 @@ An open-source, self-hosted model gateway for teams: pooled provider accounts, f
 
 **Early development.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit native model routes and macOS/Linux user service installation are implemented. Cross-provider translation is experimental, disabled by default and outside V1 release acceptance; system services before login and versioned distribution remain in progress. Native Windows runtime and user service acceptance have passed. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
 
+## Install the native CLI
+
+The release pipeline includes [one-command installers for macOS, Linux and Windows](docs/bootstrap.md). The first release is pending; these URLs become available after the entire V1 passes and **0.1.0** is published:
+
+```sh
+curl -fsSL https://github.com/nathanfallet/teamcode/releases/download/0.1.0/install.sh | sh
+```
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/nathanfallet/teamcode/releases/download/0.1.0/install.ps1').Content))
+```
+
+No JVM is required. The installer prints the stable launcher directory to add to PATH and preserves login and personal agent configuration. See the guide for prerequisites, custom roots, offline installation and current platform evidence.
+
 ## Run the team server
 
 Use JDK 21 and MySQL 8.4. The server applies Flyway migrations at startup:

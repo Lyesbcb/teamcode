@@ -398,6 +398,8 @@ jobs:
         run: python3 scripts/release-signature.py sign --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Verify the published signature against the pinned public key
         run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - name: Generate version-pinned one-command installers from the signed bundle
+        run: python3 scripts/release-bootstrap.py --bundle dist --public-key release/trust/teamcode-release-2026.pem
       - uses: actions/download-artifact@v4
         with:
           name: teamcode-installation-bundle
@@ -483,6 +485,9 @@ jobs:
           if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
           binary="installation-fixtures/second/teamcode-${releaseVersion}-${INSTALLATION_TARGET}${suffix}"
           python scripts/smoke-installation.py --binary "$binary" --first-bundle installation-fixtures/first --second-bundle installation-fixtures/second --notification-bundle installation-fixtures/second --service
+      - name: Exercise the generated bootstrap on the actual native target
+        shell: bash
+        run: python scripts/smoke-bootstrap.py --bundle dist
   release:
     timeout-minutes: 10
     if: github.event_name == 'push' && github.ref_type == 'tag'
