@@ -1,5 +1,13 @@
 # Implementation status
 
+## Quiesced database restoration acceptance
+
+`DatabaseRestoreTest` creates a real MySQL 8.4 source, seeds it through the production Exposed repositories, takes a vendor `mysqldump`, stops the original instance and loads the generated dump into a different temporary MySQL. A second canonical full-database dump must match byte for byte, covering schema, Flyway history and every fixture row. Dump/diagnostic files are owner-only and removed after the test. No hand-written SQL, operator database, real subscription or provider transport is used.
+
+Semantic checks verify original-key credential decryption and wrong-key refusal, stable administrator/member/device identities, the 5:5:1 allocation, settled/uncertain/active usage, completion counters, pools, model/effort settings, routes, audit events and API-key scopes. Production management HTTP routes work against the restored database. Pre-checkpoint logout/API-key revocation remains effective, scoped keys cannot administer members, a restored active/uncertain charge cannot be refunded by restart, and an interrupted refresh remains fenced instead of dispatching a provider call. An existing team generates no new bootstrap credential.
+
+Local evidence (2026-10-19): the isolated restoration case passed in 19.088 seconds with a 39,647-byte fixture dump; the measured dump and load commands took 229 ms and 191 ms. Those are small-fixture diagnostics, not a production recovery-time/throughput claim. All **three app integration tests** then passed, including replica cancellation and queued-disconnect regressions (`/tmp/teamcode-database-restore-app-regression.log`). See [recovery procedure and limits](operations.md) for encryption-key custody, quiescence, stale provider credentials and post-checkpoint access changes. CI and target-cluster operational acceptance remain separate.
+
 ## Linux special-path service correction and real updater interruption
 
 Source run [39287174129](https://github.com/nathanfallet/teamcode/actions/runs/39287174129) is terminal **failure**: all five native runtime jobs, JVM, Helm, bundle assembly and trusted publisher signing succeeded. Signed installation/service acceptance succeeded on Windows, macOS ARM64 and macOS Intel. Both Linux signed installer jobs passed their installation/update/rollback steps but failed when starting the owned service from the apostrophe-containing application path. Image/release publication was skipped. This run does not accept full five-target installation.

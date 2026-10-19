@@ -78,6 +78,8 @@ HPA is optional. CPU/memory utilization is an infrastructure signal, separate fr
 
 Back up MySQL **and the exact encryption key**. Test restoration to an isolated installation before relying on backups. Provider refresh ownership must remain exclusive: do not activate a restored copy while the original still refreshes the same accounts.
 
+The [recovery guide and automated restoration acceptance](../../docs/operations.md) describe a quiesced logical checkpoint, credential/access reconciliation and current limits. The acceptance test restores into a new MySQL instance and checks full schema/row equality, encrypted credentials, management HTTP routes and quota/authentication continuity; it does not validate your cluster or backup system.
+
 Application pods have no persistent filesystem state. The MySQL StatefulSet's PVC is retained on uninstall by Kubernetes' default retention behavior; it is not a backup. Do not delete it to fix an application rollout.
 
 Flyway serializes concurrent migrations. Review schema compatibility before rolling application versions or using Helm rollback; Helm does not reverse database migrations. Rotate encryption keys only with an explicit credential re-encryption procedure, which is not implemented yet. Updating an external Secret does not restart pods automatically: roll the Deployment after intentional configuration changes.

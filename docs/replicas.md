@@ -36,3 +36,5 @@ Scheduled quota polling uses one database lease per account and persistent last-
 
 
 Conversation/account placement also lives in SQL. `conversation_affinities` stores bounded, expiring hashes scoped to the authenticated team/member, and its update shares the admission transaction. Replica restart does not erase a live hint; no local cache is required. See [session affinity](session-affinity.md) for eligibility, concurrency, route invalidation and remaining acceptance limits.
+
+`DatabaseRestoreTest` separately creates a quiesced vendor dump, stops its source MySQL and restores into a different instance. It compares full schema/data and verifies management HTTP access, encrypted account credentials, pre-checkpoint revocations and unchanged quota charges without relying on process memory. See [backup/recovery behavior and limits](operations.md); a restored historical checkpoint does not include subsequent writes or revocations.

@@ -16,6 +16,8 @@ dependencies {
     implementation(libs.logback)
     testImplementation(kotlin("test-junit5"))
     testImplementation(libs.testcontainers.mysql)
+    testImplementation(libs.exposed.core)
+    testImplementation(libs.exposed.jdbc)
     testRuntimeOnly(libs.junit)
 }
 tasks.test { useJUnitPlatform() }
