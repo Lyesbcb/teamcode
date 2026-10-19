@@ -14,6 +14,10 @@ Budgets and reservations persist in MySQL. Member requests are admitted under a 
 
 [Groups](groups.md) add cumulative daily and concurrency caps without changing weighted shares or pool eligibility. Every active membership applies. Scoped managers can pause/resume admission for their group members; only administrators change budgets, assignments and roles. Original group snapshots retain spend after a membership move/removal, while actual usage settles in the existing reservation ledger. Archiving is an explicit administrator release of that group's constraints; restoring preserves same-day charges. Group concurrency waits in the bounded queue, while group budget exhaustion and pauses are hard refusals. Own capacity responses include group limits and usage, without exposing rosters to service keys.
 
+## Agent launch limits
+
+[Agent sessions](agent-sessions.md) add administrator-controlled lifetime credit/concurrency caps and admission pauses for registered launches. These never replace member/group/pool limits. Original reservation links and idempotent settlement maintain lifetime totals across midnight and detail retention. Run concurrency uses the shared queue; closure, pause and insufficient run credits are hard refusals. Recent associated run policies also constrain native-session pacing, with incomplete metadata producing unknown guidance.
+
 ## Shared admission queue
 
 Temporary concurrency and forecast pacing restrictions wait before dispatch. MySQL stores pending metadata and the last served turn for each member, scoped by team, pool and provider. Ready members alternate turns; requests from the same member use FIFO order. Interactive requests have priority, while background requests join that priority class after 30 seconds to avoid indefinite starvation. This is fairness by request turns, not by tokens or runtime. The member's weight controls the daily credit share independently; weight five does not grant five scheduling turns.

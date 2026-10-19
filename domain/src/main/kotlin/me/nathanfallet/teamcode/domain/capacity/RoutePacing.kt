@@ -9,7 +9,7 @@ data class AccountPacing(val account: AccountRecord, val windows: List<WindowPac
 class RoutePacingUseCase(private val pacing: PacingUseCase = PacingUseCase()) {
     fun advise(targets: Set<RouteTarget>, accounts: List<AccountPacing>, maximum: Int, now: Long, allowanceAvailable: Boolean = true): PacingAdvice {
         if (!allowanceAvailable) return PacingAdvice(Pace.PAUSE, 1, 30_000,
-            "Your member, group or pool allowance is unavailable, or group admission is paused. Pause new work until capacity returns or a manager reviews access.")
+            "An applicable member, group, run or pool allowance is unavailable, or admission is paused. Pause new work until capacity returns or access is reviewed.")
         if (targets.isEmpty()) return pacing.advise(emptyList(), maximum)
         val advice = targets.map { target ->
             val candidates = accounts.filter { it.account.identity.provider == target.provider && !it.account.disabled && it.account.state.canServe }

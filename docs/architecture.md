@@ -123,3 +123,6 @@ See the [TeamClaude comparison](teamclaude-comparison.md) for behavioral differe
 
 
 Global `OWNER` authority is derived from `members.is_owner`, preserving the legacy base-role encoding during upgrades. `CheckMemberAccessUseCase` guards ownership/recovery, and `SqlTeamService` applies those rules under the team lock with current identity and credential revocation. Owners share the ordinary quota ledger. See [role and legacy-upgrade semantics](team-roles.md).
+
+
+`AgentRunService` / `AgentRunServiceImpl` persist local wrapper lifecycle and credential binding. The native launcher uses the narrow `RunLifecycleClient` dependency, a launch-specific loopback prefix and bounded heartbeat/completion tasks; inference still uses canonical central routes. Run-aware admission snapshots the optional run ID, updates durable counters atomically with reservation/settlement, and checks run caps alongside existing fairness. Recent launch policy constrains native-session advice. No process registry, credential cache or lifecycle coordination lives in server memory. See [agent sessions](agent-sessions.md).

@@ -23,7 +23,7 @@ class TeamCodeClient(
     serverUrl: String,
     private val token: suspend () -> String?,
     private val createHttpClient: (io.ktor.client.HttpClientConfig<*>.() -> Unit) -> HttpClient,
-) : AutoCloseable {
+) : AutoCloseable, RunLifecycleClient {
     private val origin = Url(serverUrl.also { require(it.isNotBlank()) { "A TeamCode server URL is required." } }).also {
         require(it.protocol == URLProtocol.HTTPS ||
             (it.protocol == URLProtocol.HTTP && it.host in setOf("localhost", "127.0.0.1", "::1"))) {
@@ -101,6 +101,22 @@ class TeamCodeClient(
         return request("/api/v1/audit" + (beforeId?.let { "?before=$it" } ?: ""), HttpMethod.Get)
     }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
+    /** Register one local wrapper launch. The UUID makes a repeated start idempotent. */
+    override suspend fun startRun(input: StartRunRequest): RunLeaseView { identifier(input.id); return request("/api/v1/runs", HttpMethod.Post, input) }
+    override suspend fun heartbeatRun(id: String): RunLeaseView { identifier(id); return request("/api/v1/runs/$id/heartbeat", HttpMethod.Post) }
+    override suspend fun endRun(id: String, exitCode: Int?): RunLeaseView { identifier(id); return request("/api/v1/runs/$id/end", HttpMethod.Post, EndRunRequest(exitCode)) }
+    suspend fun runs(memberId: String? = null, all: Boolean = false, beforeId: String? = null): RunPageView {
+        require(!all || memberId == null) { "Choose one member or all members." }
+        memberId?.let(::identifier); beforeId?.let(::identifier)
+        val query = buildList {
+            memberId?.let { add("member=$it") }; if (all) add("all=true"); beforeId?.let { add("before=$it") }
+        }.joinToString("&")
+        return request("/api/v1/runs" + if (query.isEmpty()) "" else "?$query", HttpMethod.Get)
+    }
+    suspend fun run(id: String): RunDetailView { identifier(id); return request("/api/v1/runs/$id", HttpMethod.Get) }
+    suspend fun saveRunPolicy(id: String, policy: RunPolicyView): AgentRunView {
+        identifier(id); return request("/api/v1/runs/$id/policy", HttpMethod.Put, policy)
+    }
     /** Group manager authority is scoped; budget and membership writes require a team administrator. */
     suspend fun groups(): List<GroupView> = request("/api/v1/groups", HttpMethod.Get)
     suspend fun group(id: String): GroupDetailView { identifier(id); return request("/api/v1/groups/$id", HttpMethod.Get) }

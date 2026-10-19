@@ -13,6 +13,7 @@ internal class SqlAdmissionQueue(private val database: Database) {
         actor.requireScope(ServiceScope.INFERENCE); lockTeam(actor.teamId); requireCurrent(this, actor)
         require(input.units in 1..100_000_000 && input.provider.length in 1..32)
         val now = nowMillis()
+        input.runId?.let { requireRunAdmission(actor, it, input.units, now, input.workload, checkConcurrency = false) }
         AdmissionWaiters.deleteWhere { (teamId eq actor.teamId) and (expiresAt lessEq now) }
         val policy = readMemberPolicy(this, actor.member.id)
         val memberCount = AdmissionWaiters.selectAll().where { AdmissionWaiters.memberId eq actor.member.id }.count()
@@ -23,6 +24,7 @@ internal class SqlAdmissionQueue(private val database: Database) {
             it[AdmissionWaiters.id] = id; it[teamId] = actor.teamId; it[memberId] = actor.member.id
             it[poolId] = policy.poolId.orEmpty(); it[provider] = input.provider; it[workload] = input.workload.name
             it[createdAt] = now; it[readyAt] = now; it[expiresAt] = now + AwaitAdmissionUseCase.LEASE_MILLIS
+            it[runId] = input.runId
         }
         AdmissionTicket(id)
     }
@@ -49,11 +51,11 @@ internal class SqlAdmissionQueue(private val database: Database) {
 }
 
 /** Runs inside the same team-locked transaction as reservation creation. */
-internal fun JdbcTransaction.consumeQueueTurn(actor: Principal, ticket: AdmissionTicket, policy: MemberPolicy, provider: String, now: Long) {
+internal fun JdbcTransaction.consumeQueueTurn(actor: Principal, ticket: AdmissionTicket, policy: MemberPolicy, provider: String, now: Long, runId: String? = null) {
     val waiter = AdmissionWaiters.selectAll().where {
         (AdmissionWaiters.id eq ticket.id) and (AdmissionWaiters.teamId eq actor.teamId) and (AdmissionWaiters.memberId eq actor.member.id) and (AdmissionWaiters.expiresAt greater now)
     }.singleOrNull() ?: throw TeamFailure("queue_expired", 503, "The pending admission lease expired. Retry the request.")
-    if (waiter[AdmissionWaiters.poolId] != policy.poolId.orEmpty() || waiter[AdmissionWaiters.provider] != provider) {
+    if (waiter[AdmissionWaiters.poolId] != policy.poolId.orEmpty() || waiter[AdmissionWaiters.provider] != provider || waiter[AdmissionWaiters.runId] != runId) {
         throw TeamFailure("queue_context_changed", 409, "Your assigned capacity changed while waiting. Submit the request again.")
     }
     val turnScope = (AdmissionTurns.teamId eq actor.teamId) and (AdmissionTurns.poolId eq policy.poolId.orEmpty()) and (AdmissionTurns.provider eq provider)

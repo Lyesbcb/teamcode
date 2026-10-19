@@ -10,6 +10,7 @@ object AdmissionWaiters : Table("admission_waiters") {
     val poolId = varchar("pool_id", 36)
     val provider = varchar("provider", 32)
     val workload = varchar("workload", 16)
+    val runId = reference("run_id", AgentRuns.id, onDelete = ReferenceOption.NO_ACTION).nullable()
     val createdAt = long("created_at")
     val readyAt = long("ready_at")
     val expiresAt = long("expires_at")
@@ -18,6 +19,7 @@ object AdmissionWaiters : Table("admission_waiters") {
         index("waiter_team_expiry", false, teamId, expiresAt)
         index("waiter_member_expiry", false, memberId, expiresAt)
         index("waiter_scope", false, teamId, poolId, provider, expiresAt)
+        index("waiter_run", false, runId, expiresAt)
     }
 }
 object AdmissionTurns : Table("admission_turns") {

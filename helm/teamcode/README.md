@@ -4,7 +4,7 @@ This chart follows the structure of the [pkg chart](https://github.com/guimauved
 
 ## Install
 
-The image job runs only after JVM/database tests, Helm checks and both native CI jobs succeed. Pushes to `main` publish to Docker Hub using the repository secret `DOCKER_HUB_PASSWORD` for the `nathanfallet` login; pull requests build without publishing. No registry token belongs in chart values.
+Ordinary main-branch image publication runs after Linux JVM/database and Helm checks succeed. Version tags additionally require the full five-target native and signed installation acceptance; paid native jobs are skipped on ordinary pushes. Pushes to `main` publish to Docker Hub using the repository secret `DOCKER_HUB_PASSWORD` for the `nathanfallet` login; pull requests build without publishing. No registry token belongs in chart values.
 
 The chart defaults to `nathanfallet/teamcode:latest` with `imagePullPolicy: Always`. The CI workflow builds and publishes this image for AMD64 and ARM64 after all verification jobs pass. New pods resolve the latest published image; publishing alone does not restart existing pods. Roll out the Deployment to pick up a new build. An immutable `sha-<commit>` tag can also be selected through `image.tag`. Configure an image pull secret if your Docker Hub repository is private.
 

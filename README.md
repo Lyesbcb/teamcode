@@ -38,7 +38,7 @@ The CLI prompts for username/password, handles required password changes, and sa
 
 ## Service and CI credentials
 
-Create a scoped, expiring key from **Dashboard → Service keys** or `teamcode keys create --name ci --scopes inference,guidance --days 30`. The secret is shown once; store it in your CI secret manager and use `teamcode configure --server ...` with the credential on stdin. Keys share the owner's quotas and cannot administer the server, even when the owner is an administrator. Use `teamcode keys list` and `teamcode keys revoke KEY_ID` from an interactive login. See [permissions, API and automation setup](docs/service-keys.md).
+Create a scoped, expiring key from **Dashboard → Service keys** or `teamcode keys create --name ci --scopes inference,guidance --days 30`. The secret is shown once; store it in your CI secret manager and use `teamcode configure --server ...` with the credential on stdin. Keys share the owner's quotas and cannot administer the server, even when the owner is an administrator. Use `teamcode keys list` and `teamcode keys revoke KEY_ID` from an interactive login. See [permissions, API and automation setup](docs/service-keys.md). Current native launchers also register [agent sessions](docs/agent-sessions.md): inspect them with `teamcode sessions list --json` or **Dashboard → Sessions**, including run budgets and gateway activity.
 
 ## Devices and authentication sessions
 

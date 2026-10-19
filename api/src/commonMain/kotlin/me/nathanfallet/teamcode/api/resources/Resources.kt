@@ -28,3 +28,13 @@ class GroupsResource {
         }
     }
 }
+
+@Serializable @Resource("/api/v1/runs")
+class RunsResource(val member: String? = null, val all: Boolean = false, val before: String? = null) {
+    @Serializable @Resource("{id}")
+    class Id(val parent: RunsResource = RunsResource(), val id: String) {
+        @Serializable @Resource("heartbeat") class Heartbeat(val parent: Id)
+        @Serializable @Resource("end") class End(val parent: Id)
+        @Serializable @Resource("policy") class Policy(val parent: Id)
+    }
+}

@@ -81,6 +81,7 @@ fun main() {
         }
     }
     val team = database?.let { SqlTeamService(it) }
+    val runs = database?.let { me.nathanfallet.teamcode.infrastructure.database.AgentRunServiceImpl(it) }
     val groups = database?.let { me.nathanfallet.teamcode.infrastructure.database.GroupServiceImpl(it) }
     val devices = database?.let { SqlDeviceService(it) }
     val serviceKeys = database?.let { me.nathanfallet.teamcode.infrastructure.database.SqlServiceKeyService(it) }
@@ -96,12 +97,13 @@ fun main() {
     val koin = koinApplication { modules(module {
         single<GatewayService> { gateway }
         if (team != null) single<TeamService> { team }
+        if (runs != null) single<me.nathanfallet.teamcode.domain.team.AgentRunService> { runs }
         if (groups != null) single<me.nathanfallet.teamcode.domain.team.GroupService> { groups }
     }) }
     try {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null) }.start(wait = true)
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null, runs = if (runs != null) koin.koin.get() else null) }.start(wait = true)
     } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); database?.close() }
 }

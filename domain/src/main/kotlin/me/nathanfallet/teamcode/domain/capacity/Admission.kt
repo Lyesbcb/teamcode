@@ -31,6 +31,11 @@ interface AdmissionStore {
     suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget?
     suspend fun statistics(): AdmissionStatistics
     suspend fun reserve(actor: Principal, units: Long, model: String, provider: String = "anthropic", excludedAccountIds: Set<String> = emptySet(), affinity: RequestAffinity? = null): Reservation
+    /** Older adapters cannot silently ignore a launch-specific budget or identity. */
+    suspend fun reserve(actor: Principal, input: AdmissionInput): Reservation {
+        if (input.runId != null) throw me.nathanfallet.teamcode.domain.team.TeamFailure("run_tracking_unavailable", 503, "Run-aware admission is unavailable.")
+        return reserve(actor, input.units, input.model, input.provider, input.excludedAccountIds, input.affinity)
+    }
     /** Missing usage conservatively retains the full reservation, including on disconnect/restart. */
     suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean = false)
     suspend fun capacity(actor: Principal, memberId: String = actor.member.id): MemberCapacity

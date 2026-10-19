@@ -14,6 +14,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--jar', required=True)
@@ -132,6 +133,12 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         status, body = request(origins[1], '/api/v1/auth/login', {'username': 'replica-member', 'password': member_password})
         assert status == 200
         member_token = json.loads(body)['accessToken']
+        run_id = str(uuid.uuid4())
+        run_path = '/api/v1/runs/' + run_id
+        status, body = request(origins[0], '/api/v1/runs', {'id': run_id, 'agent': 'claude', 'workload': 'background'}, member_token)
+        assert status == 201 and 'chargedAndReservedUnits' not in json.loads(body)
+        assert request(origins[1], run_path + '/heartbeat', {}, member_token)[0] == 200
+        assert request(origins[1], run_path + '/policy', {'budgetUnits': 12345, 'maxConcurrent': 1}, token, method='PUT')[0] == 200
         group_policy = {'name': 'Replica group <shared>', 'dailyUnits': 2000, 'maxConcurrent': 1}
         status, body = request(origins[0], '/api/v1/groups', group_policy, token)
         assert status == 201
@@ -170,6 +177,11 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         start(0)
         await_ready(origins[0])
         assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        status, body = request(origins[0], run_path, token=member_token)
+        assert status == 200 and json.loads(body)['run']['policy']['budgetUnits'] == 12345
+        assert request(origins[1], run_path + '/end', {'exitCode': 7}, member_token)[0] == 200
+        status, body = request(origins[0], run_path, token=member_token)
+        assert status == 200 and json.loads(body)['run']['state'] == 'ENDED' and json.loads(body)['run']['exitCode'] == 7
         status, body = request(origins[0], group_path, token=member_token)
         restored_group = json.loads(body)
         assert status == 200 and restored_group['group']['canManage'] and restored_group['members'][0]['paused']

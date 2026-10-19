@@ -8,6 +8,7 @@ Application replicas share one MySQL database and one credential encryption key.
 | Sessions, revocation and team roles | Hashed session tokens, effective ownership and current member state read from MySQL; ownership/recovery changes serialize under the team lock |
 | Global login budget | One shared database-clock fixed window, 120 attempts/minute across API/dashboard/replicas; per-member lockout also persists |
 | Admission, weighted budgets and concurrency | Team lock, fresh authorization, atomic reservation across member/group/account/pool constraints |
+| Agent launches | Shared credential-bound lifecycle, original reservation links, atomic lifetime accounting, run policy and current delivery metadata; no sticky sessions |
 | Groups and delegated managers | Shared scoped assignments, current authorization, cumulative caps and original reservation/group snapshots; no process cache |
 | Active requests | Unexpired SQL reservations, not per-pod counters |
 | Completed requests | Exactly-once settlement increments a durable team counter; counted after this migration, not reconstructed from historical traffic |

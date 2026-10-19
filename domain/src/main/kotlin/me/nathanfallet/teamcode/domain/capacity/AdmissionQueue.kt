@@ -7,7 +7,7 @@ import me.nathanfallet.teamcode.domain.team.Principal
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 
 enum class Workload { INTERACTIVE, BACKGROUND }
-data class AdmissionInput(val units: Long, val model: String, val provider: String, val excludedAccountIds: Set<String> = emptySet(), val affinity: RequestAffinity? = null, val workload: Workload = Workload.INTERACTIVE, val context: AdmissionContext? = null)
+data class AdmissionInput(val units: Long, val model: String, val provider: String, val excludedAccountIds: Set<String> = emptySet(), val affinity: RequestAffinity? = null, val workload: Workload = Workload.INTERACTIVE, val context: AdmissionContext? = null, val runId: String? = null)
 data class AdmissionContext(val requestedModel: String, val protocol: WireProtocol, val targets: List<RouteTarget>, val effort: String?, val thinkingTokens: Long?, val translated: Boolean, val targetEffort: String?)
 data class AdmissionTicket(val id: String)
 interface AdmissionQueueStore {
@@ -29,7 +29,7 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
                     try { return@withTimeoutOrNull queue.reserveQueued(actor, ticket, input).also { admitted = true } }
                     catch (error: TeamFailure) {
                         if (error.code !in WAITABLE) throw error
-                        queue.renew(actor, ticket, error.code in setOf("member_concurrency", "group_concurrency", "pacing_concurrency", "pacing_delay"))
+                        queue.renew(actor, ticket, error.code in setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay"))
                         delay(POLL_MILLIS)
                     }
                 }
@@ -49,7 +49,7 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
         const val MAX_WAIT_MILLIS = 90_000L
         const val POLL_MILLIS = 500L
         const val LEASE_MILLIS = 15_000L
-        val WAITABLE = setOf("member_concurrency", "group_concurrency", "pacing_concurrency", "pacing_delay", "pool_busy", "queue_turn")
+        val WAITABLE = setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay", "pool_busy", "queue_turn")
     }
 }
 

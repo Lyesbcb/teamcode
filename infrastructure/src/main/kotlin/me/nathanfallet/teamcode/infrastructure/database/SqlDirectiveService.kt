@@ -53,7 +53,10 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                 val poolSpent = poolSpent("default", pool.orEmpty(), now / 86_400_000)
                 val allowanceAvailable = capacity.dailyAllowanceUnits > capacity.chargedAndReservedUnits && capacity.poolDailyUnits > poolSpent && capacity.groups.all { it.budgetAvailable }
                 val groupMaximum = CheckGroupAdmissionUseCase().maximum(capacity.groups, maximum)
+                val runPolicies = readRunPacingPolicies("default", member, now)
                 scopes.forEach { (scopeKey, scoped) ->
+                    val runLimits = CheckRunPacingUseCase().limits(runPolicies.scopes[scopeKey].orEmpty(), groupMaximum)
+                    val scopedAllowanceAvailable = allowanceAvailable && runLimits.allowanceAvailable
                     val table = if (scopeKey.isEmpty()) Directives else SessionDirectives
                     val active = scoped.distinct()
                     val valid = active.all { context ->
@@ -70,10 +73,13 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                         }
                     }
                     val targets = if (valid) active.map { it.target }.toSet() else emptySet()
-                    val advice = pacing.advise(targets, accountPacing, groupMaximum, now, allowanceAvailable)
+                    val advice = if (runPolicies.truncated && scopedAllowanceAvailable) PacingAdvice(Pace.UNKNOWN, runLimits.maxConcurrent, 0,
+                        "Recent launch/session metadata is incomplete. Do not increase parallelism from this signal; server-side limits remain authoritative.")
+                        else pacing.advise(targets, accountPacing, runLimits.maxConcurrent, now, scopedAllowanceAvailable)
                     // A different route, policy, pool, priority or eligible account set must not
                     // inherit optimistic advice (or an old throttle) from another capacity context.
-                    val scope = listOf(groupMaximum.toString(), pool.orEmpty(), modelPolicy.toString(), valid.toString(), allowanceAvailable.toString(),
+                    val scope = listOf(runLimits.maxConcurrent.toString(), pool.orEmpty(), modelPolicy.toString(), valid.toString(), scopedAllowanceAvailable.toString(),
+                        runLimits.contextKey, runPolicies.truncated.toString(),
                         capacity.groups.map { "${it.group}:${it.paused}" }.sorted().joinToString("\n"),
                         active.map { it.toString() }.sorted().joinToString("\n"),
                         accessible.map { "${it.id}:${it.priority}" }.sorted().joinToString("\n")).joinToString("\n")
