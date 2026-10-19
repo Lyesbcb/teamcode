@@ -21,7 +21,7 @@ internal fun readMemberCapacity(c: JdbcTransaction, policy: MemberPolicy, now: L
     val share = if (totalWeight == 0L) 0 else budget * policy.weight / totalWeight
     val allowance = if (policy.dailyUnits == 0L) share else minOf(share, policy.dailyUnits)
     val queued = AdmissionWaiters.selectAll().where { (AdmissionWaiters.memberId eq policy.memberId) and (AdmissionWaiters.expiresAt greater now) }.count().toInt()
-    return MemberCapacity(policy, charged, active, (now / DAY + 1) * DAY, allowance, budget, totalWeight, queued)
+    return MemberCapacity(policy, charged, active, (now / DAY + 1) * DAY, allowance, budget, totalWeight, queued, readGroupAllowances(teamId, policy.memberId, now))
 }
 internal fun poolSpent(team: String, pool: String, day: Long): Long {
     val units = Reservations.units.sum()

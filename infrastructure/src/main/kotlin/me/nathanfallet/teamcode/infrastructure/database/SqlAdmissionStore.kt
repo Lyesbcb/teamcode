@@ -50,6 +50,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         }
         val policy = readMemberPolicy(this, actor.member.id)
         val current = readMemberCapacity(this, policy, now, actor.teamId)
+        CheckGroupAdmissionUseCase().check(current.groups, units)
         val scope = affinity?.sessionKey.orEmpty()
         val table = if (scope.isEmpty()) Directives else SessionDirectives
         val directive = table.selectAll().where { (table.memberId eq actor.member.id) and (table.scopeKey eq scope) and (table.expiresAt greater now) }.singleOrNull()
@@ -102,6 +103,9 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
             it[dayNumber] = now / DAY; it[Reservations.units] = units; it[state] = "ACTIVE"; it[expiresAt] = now + 15 * 60_000
             it[createdAt] = now; it[poolId] = policy.poolId.orEmpty(); it[sessionKey] = affinity?.sessionKey
         }
+        current.groups.forEach { group -> ReservationGroups.insert {
+            it[reservationId] = id; it[groupId] = group.group.id; it[dayNumber] = now / DAY; it[expiresAt] = now + 15 * 60_000
+        } }
         Reservation(id, chosen, units)
     }
     override suspend fun settle(reservation: Reservation, actualUnits: Long?, completed: Boolean) {

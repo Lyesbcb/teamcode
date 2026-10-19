@@ -51,7 +51,8 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                 val accountPacing = accessible.map { account -> AccountPacing(account, samples.filterKeys { it.first == account.id }.values.filterNotNull(), modelLimits[account.id].orEmpty()) }
                 val capacity = readMemberCapacity(c, readMemberPolicy(c, member), now, "default")
                 val poolSpent = poolSpent("default", pool.orEmpty(), now / 86_400_000)
-                val allowanceAvailable = capacity.dailyAllowanceUnits > capacity.chargedAndReservedUnits && capacity.poolDailyUnits > poolSpent
+                val allowanceAvailable = capacity.dailyAllowanceUnits > capacity.chargedAndReservedUnits && capacity.poolDailyUnits > poolSpent && capacity.groups.all { it.budgetAvailable }
+                val groupMaximum = CheckGroupAdmissionUseCase().maximum(capacity.groups, maximum)
                 scopes.forEach { (scopeKey, scoped) ->
                     val table = if (scopeKey.isEmpty()) Directives else SessionDirectives
                     val active = scoped.distinct()
@@ -69,10 +70,11 @@ class SqlDirectiveService(private val database: Database) : DirectiveService {
                         }
                     }
                     val targets = if (valid) active.map { it.target }.toSet() else emptySet()
-                    val advice = pacing.advise(targets, accountPacing, maximum, now, allowanceAvailable)
+                    val advice = pacing.advise(targets, accountPacing, groupMaximum, now, allowanceAvailable)
                     // A different route, policy, pool, priority or eligible account set must not
                     // inherit optimistic advice (or an old throttle) from another capacity context.
-                    val scope = listOf(maximum.toString(), pool.orEmpty(), modelPolicy.toString(), valid.toString(), allowanceAvailable.toString(),
+                    val scope = listOf(groupMaximum.toString(), pool.orEmpty(), modelPolicy.toString(), valid.toString(), allowanceAvailable.toString(),
+                        capacity.groups.map { "${it.group}:${it.paused}" }.sorted().joinToString("\n"),
                         active.map { it.toString() }.sorted().joinToString("\n"),
                         accessible.map { "${it.id}:${it.priority}" }.sorted().joinToString("\n")).joinToString("\n")
                     val key = MessageDigest.getInstance("SHA-256").digest(scope.toByteArray()).joinToString("") { "%02x".format(it) }

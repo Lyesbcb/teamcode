@@ -156,6 +156,11 @@ class DatabaseRestoreTest {
         admission.configure(admin.principal, MemberPolicy(admin.principal.member.id, maxConcurrent = 2, weight = 5))
         admission.configure(admin.principal, MemberPolicy(members[0].id, maxConcurrent = 2, weight = 5))
         admission.configure(admin.principal, MemberPolicy(members[1].id, maxConcurrent = 1, weight = 1))
+        val groups = GroupServiceImpl(database)
+        val group = groups.create(admin.principal, GroupPolicy("Restored group", 1000, 3)).summary.group.id
+        groups.assign(admin.principal, group, admin.principal.member.id, GroupRole.MEMBER)
+        groups.assign(admin.principal, group, members[0].id, GroupRole.MANAGER)
+        groups.assign(admin.principal, group, members[1].id, GroupRole.MEMBER, paused = true)
         admission.settle(admission.reserve(admin.principal, 100, "claude-test"), 30, true)
         admission.settle(admission.reserve(admin.principal, 70, "claude-test"), null)
         admission.reserve(admin.principal, 100, "claude-test")
@@ -181,6 +186,7 @@ class DatabaseRestoreTest {
             "statistics" to admission.statistics(), "accounts" to SqlAccountStore(database, CredentialCipher(key)).list("default"),
             "modelPolicy" to SqlModelPolicyStore(database).get("default"), "routes" to SqlRoutingStore(database).list("default"),
             "pacingSettings" to SqlPacingSettingsStore(database).get(actor),
+            "groups" to GroupServiceImpl(database).list(actor).map { GroupServiceImpl(database).get(actor, it.group.id) },
             "devices" to SqlDeviceService(database).devices(actor), "keys" to SqlServiceKeyService(database).list(actor),
             "audit" to SqlAuditService(database).list(actor),
             "envelopes" to database.query { Accounts.select(Accounts.id, Accounts.credentialEnvelope, Accounts.refreshPending, Accounts.refreshStartedAt).associate {
@@ -203,7 +209,7 @@ class DatabaseRestoreTest {
             configureGateway(gateway, team = team, accounts = accounts, admission = admission,
                 modelPolicies = SqlModelPolicyStore(database), routes = SqlRoutingStore(database),
                 devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() },
-                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database))
+                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database), groups = GroupServiceImpl(database))
         }
         server.start(wait = false)
         try {
@@ -211,7 +217,7 @@ class DatabaseRestoreTest {
             HttpClient(CIO) { install(HttpTimeout) { requestTimeoutMillis = 5_000 }; followRedirects = false }.use { http ->
                 suspend fun get(path: String, token: String = fixture.admin.token) = http.get(origin + path) { bearerAuth(token) }
                 assertEquals(HttpStatusCode.OK, get("/ready").status)
-                for (path in listOf("/api/v1/members", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/forecasts", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
+                for (path in listOf("/api/v1/members", "/api/v1/groups", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/forecasts", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
                     val response = get(path)
                     assertEquals(HttpStatusCode.OK, response.status, "Restored HTTP access failed: $path")
                     val body = response.bodyAsText()
@@ -225,6 +231,18 @@ class DatabaseRestoreTest {
                 val capacity = Json.parseToJsonElement(get("/api/v1/capacity", fixture.activeKey.accessToken).bodyAsText()).jsonObject
                 assertEquals(200, capacity.getValue("chargedAndReservedUnits").jsonPrimitive.long)
                 assertEquals(500, capacity.getValue("dailyUnits").jsonPrimitive.long)
+                val group = Json.parseToJsonElement(get("/api/v1/groups", fixture.memberToken).bodyAsText()).jsonArray.single().jsonObject
+                assertTrue(group.getValue("canManage").jsonPrimitive.boolean, "Scoped manager role must survive restore")
+                assertEquals(200, group.getValue("chargedAndReservedUnits").jsonPrimitive.long)
+                assertEquals(group.getValue("id"), capacity.getValue("groups").jsonArray.single().jsonObject.getValue("id"))
+                val groupPath = "/api/v1/groups/${group.getValue("id").jsonPrimitive.content}"
+                val roster = Json.parseToJsonElement(get(groupPath, fixture.memberToken).bodyAsText()).jsonObject.getValue("members").jsonArray
+                val support = roster.single { it.jsonObject.getValue("username").jsonPrimitive.content == "support" }.jsonObject
+                assertTrue(support.getValue("paused").jsonPrimitive.boolean, "Admission pause must survive restore")
+                assertEquals(HttpStatusCode.OK, http.patch(origin + groupPath + "/members/${support.getValue("memberId").jsonPrimitive.content}/pause") {
+                    bearerAuth(fixture.memberToken); contentType(ContentType.Application.Json); setBody("""{"paused":false}""")
+                }.status, "Restored manager must retain scoped control")
+                assertEquals(HttpStatusCode.Forbidden, get("/api/v1/groups", fixture.activeKey.accessToken).status)
                 assertEquals(HttpStatusCode.Forbidden, get("/api/v1/members", fixture.activeKey.accessToken).status)
                 assertEquals(HttpStatusCode.Unauthorized, get("/api/v1/auth/me", fixture.revokedToken).status)
                 assertEquals(HttpStatusCode.Unauthorized, get("/api/v1/auth/me", fixture.revokedKey).status)

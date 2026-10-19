@@ -117,3 +117,6 @@ A new provider speaking an existing format adds a transport and account verifier
 See the [TeamClaude comparison](teamclaude-comparison.md) for behavioral differences and remaining acceptance gaps.
 
 `AuditService` exposes bounded, team-scoped keyset reads through the dashboard and typed API/SDK. `AccountMutationActor` makes the author of persistence writes explicit; account mutations revalidate the current interactive administrator under the team lock and append metadata in the same transaction. Exposed generates the journal pagination index migration. See [coverage and limitations](audit.md).
+
+
+`GroupService` / `GroupServiceImpl` provide scoped manager administration and cumulative group budgets through Exposed. Admission snapshots original group IDs and shares the existing team transaction; settlement has one reservation-unit source, with no duplicate group counter. Group roles are independent of global member roles. The presentation exposes typed resources/API DTOs and escaped CSRF-protected forms, while the client depends only on API contracts. See [groups and upgrade semantics](groups.md).

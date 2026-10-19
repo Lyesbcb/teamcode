@@ -101,6 +101,22 @@ class TeamCodeClient(
         return request("/api/v1/audit" + (beforeId?.let { "?before=$it" } ?: ""), HttpMethod.Get)
     }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
+    /** Group manager authority is scoped; budget and membership writes require a team administrator. */
+    suspend fun groups(): List<GroupView> = request("/api/v1/groups", HttpMethod.Get)
+    suspend fun group(id: String): GroupDetailView { identifier(id); return request("/api/v1/groups/$id", HttpMethod.Get) }
+    suspend fun createGroup(policy: GroupPolicyRequest): GroupDetailView = request("/api/v1/groups", HttpMethod.Post, policy)
+    suspend fun saveGroup(id: String, policy: GroupPolicyRequest): GroupDetailView {
+        identifier(id); return request("/api/v1/groups/$id", HttpMethod.Put, policy)
+    }
+    suspend fun assignGroupMember(id: String, memberId: String, assignment: GroupAssignmentRequest): GroupDetailView {
+        identifier(id); identifier(memberId); return request("/api/v1/groups/$id/members/$memberId", HttpMethod.Put, assignment)
+    }
+    suspend fun removeGroupMember(id: String, memberId: String): SuccessResponse {
+        identifier(id); identifier(memberId); return request("/api/v1/groups/$id/members/$memberId", HttpMethod.Delete)
+    }
+    suspend fun pauseGroupMember(id: String, memberId: String, paused: Boolean): GroupDetailView {
+        identifier(id); identifier(memberId); return request("/api/v1/groups/$id/members/$memberId/pause", HttpMethod.Patch, GroupPauseRequest(paused))
+    }
     suspend fun serviceKeys(memberId: String? = null): List<ServiceKeyView> = request(memberPath(memberId) + "/service-keys", HttpMethod.Get)
     suspend fun createServiceKey(input: CreateServiceKeyRequest, memberId: String? = null): CreatedServiceKeyResponse =
         request(memberPath(memberId) + "/service-keys", HttpMethod.Post, input)

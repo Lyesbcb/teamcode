@@ -7,7 +7,8 @@ Application replicas share one MySQL database and one credential encryption key.
 | First administrator | Team row lock and committed creation; only the creator receives the temporary password |
 | Sessions, revocation and team roles | Hashed session tokens and current member state read from MySQL |
 | Global login budget | One shared database-clock fixed window, 120 attempts/minute across API/dashboard/replicas; per-member lockout also persists |
-| Admission, weighted budgets and concurrency | Team lock, fresh authorization, atomic reservation across member/account/pool constraints |
+| Admission, weighted budgets and concurrency | Team lock, fresh authorization, atomic reservation across member/group/account/pool constraints |
+| Groups and delegated managers | Shared scoped assignments, current authorization, cumulative caps and original reservation/group snapshots; no process cache |
 | Active requests | Unexpired SQL reservations, not per-pod counters |
 | Completed requests | Exactly-once settlement increments a durable team counter; counted after this migration, not reconstructed from historical traffic |
 | Quotas and forecasts | Database observations/history, stale-data handling and expiring directives |
@@ -32,7 +33,7 @@ Scheduled quota polling uses one database lease per account and persistent last-
 
 `ReplicaPersistenceTest` uses two independent Hikari pools against MySQL 8.4. It covers concurrent migrations/bootstrap, cross-replica session revocation, competing admissions, exactly-once completion/usage, abandoned reservations, single refresh ownership, interrupted-refresh recovery, import/refresh conflicts, worker lease reclamation, stale-owner fencing, persistent polling order and a shared login budget.
 
-`scripts/smoke-replicas.py --jar app/build/libs/app-all.jar` starts two actual server processes against its own isolated database. It checks concurrent startup, one bootstrap password, shared sessions and members, password revocation on the other replica, abrupt process termination/restart, readiness versus liveness during database outage, recovery and logout revocation. It stops only its own children and test database and never contacts real providers.
+`scripts/smoke-replicas.py --jar app/build/libs/app-all.jar` starts two actual server processes against its own isolated database. It checks concurrent startup, one bootstrap password, shared sessions, members and groups, scoped manager revocation and pause enforcement, password revocation on the other replica, abrupt process termination/restart, readiness versus liveness during database outage, recovery and logout revocation. It stops only its own children and test database and never contacts real providers.
 
 
 Conversation/account placement also lives in SQL. `conversation_affinities` stores bounded, expiring hashes scoped to the authenticated team/member, and its update shares the admission transaction. Replica restart does not erase a live hint; no local cache is required. See [session affinity](session-affinity.md) for eligibility, concurrency, route invalidation and remaining acceptance limits.

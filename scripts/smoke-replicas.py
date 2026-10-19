@@ -110,9 +110,41 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         assert status == 200 and 'new EventSource(url)' in body
         status, body = request(origins[1], '/dashboard/forecasts', token=token, dashboard=True)
         assert status == 200 and 'forecast-live-status' in body and '/dashboard/assets/forecasts.js' in body
-        assert request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)[0] == 201
+        status, body = request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)
+        assert status == 201
+        created_member = json.loads(body)
+        member_id = created_member['member']['id']
         status, body = request(origins[1], '/api/v1/members', token=token)
         assert status == 200 and len(json.loads(body)) == 2
+        # Group roles, caps and pauses are shared even when a replica is replaced.
+        member_password = secrets.token_urlsafe(32)
+        status, body = request(origins[1], '/api/v1/auth/login', {'username': 'replica-member', 'password': created_member['temporaryPassword']})
+        assert status == 200
+        pending_member = json.loads(body)['accessToken']
+        assert request(origins[0], '/api/v1/auth/password', {'currentPassword': created_member['temporaryPassword'], 'newPassword': member_password}, pending_member)[0] == 200
+        status, body = request(origins[1], '/api/v1/auth/login', {'username': 'replica-member', 'password': member_password})
+        assert status == 200
+        member_token = json.loads(body)['accessToken']
+        group_policy = {'name': 'Replica group <shared>', 'dailyUnits': 2000, 'maxConcurrent': 1}
+        status, body = request(origins[0], '/api/v1/groups', group_policy, token)
+        assert status == 201
+        group_path = '/api/v1/groups/' + json.loads(body)['group']['id']
+        assignment_path = group_path + '/members/' + member_id
+        assert request(origins[1], assignment_path, {'role': 'MANAGER'}, token, method='PUT')[0] == 200
+        status, body = request(origins[0], group_path, token=member_token)
+        assert status == 200 and json.loads(body)['group']['canManage'] is True
+        assert request(origins[0], group_path, group_policy, member_token, method='PUT')[0] == 403
+        assert request(origins[1], assignment_path + '/pause', {'paused': True}, member_token, method='PATCH')[0] == 200
+        status, body = request(origins[0], '/api/v1/capacity', token=member_token)
+        group_capacity = json.loads(body)['groups'][0]
+        assert status == 200 and group_capacity['paused'] and group_capacity['dailyUnits'] == 2000
+        status, body = request(origins[0], '/v1/messages', {'model': 'claude-test', 'stream': True, 'max_tokens': 1, 'messages': [{'role': 'user', 'content': 'synthetic'}]}, member_token)
+        assert status == 403 and json.loads(body)['error']['type'] == 'group_paused'
+        assert request(origins[1], assignment_path, {'role': 'MEMBER', 'paused': True}, token, method='PUT')[0] == 200
+        assert request(origins[0], assignment_path + '/pause', {'paused': False}, member_token, method='PATCH')[0] == 403
+        assert request(origins[1], assignment_path, {'role': 'MANAGER', 'paused': True}, token, method='PUT')[0] == 200
+        status, body = request(origins[0], '/dashboard/groups', token=token, dashboard=True)
+        assert status == 200 and 'Replica group &lt;shared&gt;' in body and 'Replica group <shared>' not in body
         # The real application wires durable controller configuration into both replicas.
         pacing_path = '/api/v1/policy/pacing'
         status, body = request(origins[0], pacing_path, token=token)
@@ -131,6 +163,10 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         start(0)
         await_ready(origins[0])
         assert request(origins[0], '/api/v1/members', token=token)[0] == 200
+        status, body = request(origins[0], group_path, token=member_token)
+        restored_group = json.loads(body)
+        assert status == 200 and restored_group['group']['canManage'] and restored_group['members'][0]['paused']
+        assert restored_group['group']['dailyUnits'] == 2000
         status, body = request(origins[0], pacing_path, token=token)
         assert status == 200 and json.loads(body)['observationOnly'] is True
         assert request(origins[1], pacing_path, {'observationOnly': False}, token, method='PUT')[0] == 200
@@ -148,8 +184,9 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         assert request(origins[1], '/api/v1/auth/logout', {}, token)[0] == 200
         assert request(origins[0], '/api/v1/auth/me', token=token)[0] == 401
         assert request(origins[0], pacing_path, {'observationOnly': True}, token, method='PUT')[0] == 401
-        assert all(password not in log.read_text() and db_password not in log.read_text() for log in logs)
-        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members/controller mode, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
+        assert request(origins[0], assignment_path + '/pause', {'paused': False}, token, method='PATCH')[0] == 401
+        assert all(all(value not in log.read_text() for value in (password, db_password, member_password, member_token, created_member['temporaryPassword'])) for log in logs)
+        print('Replica smoke passed: concurrent startup/migration, one admin, shared sessions/members/groups/controller mode, scoped manager revocation and pause enforcement, cross-replica revocation, killed-pod recovery, database readiness and recovery.')
     finally:
         for child in children:
             if child.poll() is None:
