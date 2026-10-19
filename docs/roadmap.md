@@ -55,3 +55,18 @@ TeamCode will extend team administration to agent tools and reusable skills. Thi
 - Acceptance: clean setup and subsequent launches install the assigned pinned versions, updates/rollback are reproducible, removed assignments stop being provisioned, and personal configuration is preserved.
 
 The dashboard, team identity, native launcher and shared persistence provide the integration points. The inference proxy alone does not configure an agent's MCP connections or install its skills; these require explicit gateway and CLI capabilities.
+
+
+## V2: Kubernetes cloud agent sessions
+
+Explore running agent sessions remotely on a connected Kubernetes cluster. This is V2 scope; the API contracts and interaction model remain to be discussed before implementation.
+
+- Administrators connect a Kubernetes cluster and configure the namespaces, execution templates and resources available to the team.
+- An authenticated API creates and manages agent sessions in pods, with automatic provisioning, lifecycle tracking and cleanup. Define pause/resume, persistence and failure recovery explicitly rather than assuming a pod restart preserves a session.
+- Cloud sessions use the same TeamCode inference proxy, member quotas, routing rules and predictive pacing as local sessions. They receive only their assigned MCP access and pinned skills through the planned V2 management capabilities.
+- Users can attach from their workstation through the native CLI to interact with a remote session and reconnect later. The precise terminal/control protocol remains open.
+- Provide API access to session transcripts and allow sending messages to a running session. Discuss transcript format, pagination/streaming, message delivery/acknowledgment and concurrent CLI/API interaction before fixing a contract.
+- Enforce member/group authorization for session creation, attachment, messages and transcripts. Scope pod credentials to the session, revoke them when it ends and keep cluster credentials on the server. Bound pod resources, concurrent sessions and idle retention.
+- Persist desired session state and lifecycle events so server replicas can coordinate provisioning without duplicate pods. Define transcript/workspace retention and cleanup policies separately from pod lifetime.
+
+Acceptance direction: create a session by API, observe its pod and status, attach from the CLI, send a message and retrieve the resulting transcript through the API; demonstrate shared quota/MCP authorization, reconnection, replica coordination and cleanup. These are proposed V2 acceptance scenarios, not implemented capabilities. Workspace provisioning, repository access, artifacts, scheduling across clusters and interactive session semantics require further product discussion.
