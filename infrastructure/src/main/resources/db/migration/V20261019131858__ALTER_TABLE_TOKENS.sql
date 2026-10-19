@@ -1,0 +1,1 @@
+ALTER TABLE tokens ADD service_scopes text NULL;

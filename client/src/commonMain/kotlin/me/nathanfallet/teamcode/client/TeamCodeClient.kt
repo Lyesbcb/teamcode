@@ -87,6 +87,10 @@ class TeamCodeClient(
         return request("/api/v1/routes/$id", HttpMethod.Delete, RouteDeleteRequest(version))
     }
     suspend fun members(): List<MemberView> = request("/api/v1/members", HttpMethod.Get)
+    suspend fun serviceKeys(memberId: String? = null): List<ServiceKeyView> = request(memberPath(memberId) + "/service-keys", HttpMethod.Get)
+    suspend fun createServiceKey(input: CreateServiceKeyRequest, memberId: String? = null): CreatedServiceKeyResponse =
+        request(memberPath(memberId) + "/service-keys", HttpMethod.Post, input)
+    suspend fun revokeServiceKey(id: String) = revoke("service-keys", id)
     suspend fun devices(memberId: String? = null): List<DeviceView> = request(memberPath(memberId) + "/devices", HttpMethod.Get)
     suspend fun authSessions(memberId: String? = null): List<AuthSessionView> = request(memberPath(memberId) + "/auth/sessions", HttpMethod.Get)
     suspend fun renameDevice(id: String, name: String): DeviceView {

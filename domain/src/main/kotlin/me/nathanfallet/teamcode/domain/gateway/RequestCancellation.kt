@@ -5,7 +5,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlin.uuid.Uuid
 import me.nathanfallet.teamcode.domain.team.Principal
 import me.nathanfallet.teamcode.domain.team.TeamFailure
-import me.nathanfallet.teamcode.domain.team.requireReady
+import me.nathanfallet.teamcode.domain.team.requireScope
+import me.nathanfallet.teamcode.domain.team.ServiceScope
 
 /** Bounded, expiring cancellation markers shared by all replicas; no request bodies. */
 interface RequestCancellationStore {
@@ -16,13 +17,13 @@ interface RequestCancellationStore {
 
 class RequestCancellationService(private val store: RequestCancellationStore) {
     suspend fun cancel(actor: Principal, requestId: String) {
-        actor.requireReady()
+        actor.requireScope(ServiceScope.INFERENCE)
         validateId(requestId)
         store.cancel(actor, requestId)
     }
 
     suspend fun <T> run(actor: Principal, requestId: String, block: suspend () -> T): T {
-        actor.requireReady()
+        actor.requireScope(ServiceScope.INFERENCE)
         validateId(requestId)
         if (store.isCancelled(actor, requestId)) throw CancellationException("The inference was cancelled.")
         return coroutineScope {

@@ -11,12 +11,12 @@ import org.jetbrains.exposed.v1.jdbc.*
 /** A short delivery lease avoids concurrent duplicates without claiming the agent obeyed advice. */
 internal class SqlDirectiveDelivery(private val database: Database) {
     suspend fun current(actor: Principal, sessionId: String?): AgentDirective? {
-        actor.requireReady()
+        actor.requireScope(ServiceScope.GUIDANCE)
         val scope = sessionId?.let(::sessionHash).orEmpty()
         return database.query { requireCurrent(this, actor); read(actor, scope, nowMillis()) }
     }
     suspend fun claim(actor: Principal, sessionId: String, stage: String): DirectiveDelivery? {
-        actor.requireReady(); validateStage(stage)
+        actor.requireScope(ServiceScope.GUIDANCE); validateStage(stage)
         val scope = sessionHash(sessionId)
         return database.query {
             lockTeam(actor.teamId); requireCurrent(this, actor)
@@ -38,7 +38,7 @@ internal class SqlDirectiveDelivery(private val database: Database) {
         }
     }
     suspend fun acknowledge(actor: Principal, id: String, stage: String, sessionId: String?, claimId: String?) {
-        actor.requireReady(); validateStage(stage)
+        actor.requireScope(ServiceScope.GUIDANCE); validateStage(stage)
         val scope = sessionId?.let(::sessionHash).orEmpty()
         if ((sessionId == null) != (claimId == null)) throw TeamFailure("invalid_claim", 400, "Session receipts require their delivery claim.")
         database.query {

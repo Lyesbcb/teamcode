@@ -31,6 +31,8 @@ def main():
     installation_ids = []
     tokens = {}
     issued_tokens = []
+    service_keys = {}
+    service_secrets = []
     device_name = 'Fixture workstation'
     legacy_active = True
     errors = []
@@ -68,6 +70,17 @@ def main():
                     tokens[token] = str(uuid.uuid4())
                     self.send_json({'accessToken': token, 'expiresAt': now + 3_600_000, 'member': {
                         'id': member, 'username': 'fixture', 'role': 'MEMBER', 'disabled': False, 'passwordChangeRequired': False}})
+                elif self.path == '/api/v1/service-keys':
+                    if not self.authorize():
+                        return
+                    body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    assert body['name'] == "CI's café runner" and body['scopes'] == ['inference', 'guidance'] and body['validDays'] == 7
+                    key_id = str(uuid.uuid4())
+                    secret = 'tcsk_' + secrets.token_urlsafe(32)
+                    service_secrets.append(secret)
+                    metadata = {'id': key_id, 'memberId': member, 'name': body['name'], 'scopes': body['scopes'], 'createdAt': now, 'expiresAt': now + 7 * 86_400_000}
+                    service_keys[key_id] = metadata
+                    self.send_json({'metadata': metadata, 'accessToken': secret}, 201)
                 elif self.path == '/api/v1/auth/logout':
                     if not self.authorize():
                         return
@@ -82,6 +95,8 @@ def main():
                     return
                 if self.path == '/api/v1/auth/me':
                     self.send_json({'id': member, 'username': 'fixture', 'role': 'MEMBER', 'disabled': False, 'passwordChangeRequired': False})
+                elif self.path == '/api/v1/service-keys':
+                    self.send_json(list(service_keys.values()))
                 elif self.path == '/api/v1/devices':
                     self.send_json([{'id': device, 'memberId': member, 'name': device_name, 'createdAt': now,
                                      'lastLoginAt': now, 'activeSessions': len(tokens), 'current': True}])
@@ -112,7 +127,9 @@ def main():
             with lock:
                 if not self.authorize():
                     return
-                if self.path == '/api/v1/auth/sessions/' + legacy_id:
+                if self.path.startswith('/api/v1/service-keys/'):
+                    del service_keys[self.path.rsplit('/', 1)[-1]]
+                elif self.path == '/api/v1/auth/sessions/' + legacy_id:
                     legacy_active = False
                 else:
                     assert self.path == '/api/v1/devices/' + device
@@ -133,7 +150,7 @@ def main():
             env = dict(os.environ, XDG_CONFIG_HOME=directory)
             origin = f'http://127.0.0.1:{server.server_port}'
 
-            def command(*arguments, stdin=None, check=True):
+            def command(*arguments, stdin=None, check=True, one_time_key=False):
                 result = subprocess.run([binary, *arguments], env=env, input=stdin, text=True, encoding='utf-8',
                                         capture_output=True, timeout=30)
                 if check:
@@ -142,6 +159,10 @@ def main():
                     private_values = [password, *issued_tokens]
                 for secret in private_values:
                     assert secret not in result.stdout + result.stderr, 'CLI exposed a synthetic credential'
+                for secret in service_secrets:
+                    assert secret not in result.stderr, 'CLI leaked a service credential in diagnostics'
+                    if not one_time_key:
+                        assert secret not in result.stdout, 'CLI leaked a service credential outside creation'
                 return result
 
             def login(_=None):
@@ -185,6 +206,14 @@ def main():
                     assert acl['owner'] == acl['user'] and acl['protected'], 'Identity ownership or protected DACL is incorrect'
                     assert len(acl['rules']) == 1, 'Unexpected users/groups can access the identity'
                     assert acl['rules'][0] == {'sid': acl['user'], 'inherited': False, 'type': 'Allow', 'full': True}, acl
+            created = json.loads(command('keys', 'create', '--name', "CI's café runner", '--scopes', 'inference,guidance', '--days', '7', '--json', one_time_key=True).stdout)
+            assert created['accessToken'] == service_secrets[-1]
+            key_id = created['metadata']['id']
+            listed = command('keys', 'list').stdout
+            assert key_id in listed and "CI's café runner" in listed
+            command('keys', 'revoke', key_id)
+            assert key_id not in command('keys', 'list').stdout
+            assert command('keys', 'list', '--member', str(uuid.uuid4()), check=False).returncode != 0
             assert 'fixture (member)' in command('whoami').stdout
             assert device in command('devices', 'list').stdout
             sessions = command('auth', 'sessions', 'list').stdout
@@ -205,7 +234,7 @@ def main():
             assert command('whoami', check=False).returncode != 0
             assert not errors, '\n'.join(errors)
             assert {p.name for p in identity.parent.iterdir()} == {'installation-id', 'config.json'}, 'Temporary file leaked'
-            print('Native devices passed: concurrent private identity creation, login/logout persistence, whoami, typed lists, rename and revocation.')
+            print('Native devices passed: concurrent private identity creation, login/logout persistence, whoami, typed lists, rename, service-key creation/list/revocation and device revocation.')
     finally:
         server.shutdown(); server.server_close(); worker.join(timeout=5)
 

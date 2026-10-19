@@ -23,7 +23,7 @@ const val VERSION = "0.1.0-SNAPSHOT"
 
 class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service(), WhoAmI(), Auth(), Devices()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Service(), WhoAmI(), Auth(), Devices(), ServiceKeys()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {

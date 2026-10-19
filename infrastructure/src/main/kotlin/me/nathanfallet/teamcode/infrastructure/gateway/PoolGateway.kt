@@ -24,7 +24,7 @@ class PoolGateway(private val admission: AdmissionStore, private val credentials
     }
     private suspend fun route(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) {
         val actor = request.principal ?: throw TeamFailure("authentication_required", 401, "Sign in to TeamCode.")
-        actor.requireReady()
+        actor.requireScope(ServiceScope.INFERENCE)
         val workload = when (request.headers["x-teamcode-workload"]) {
             null, "interactive" -> Workload.INTERACTIVE
             "background" -> Workload.BACKGROUND

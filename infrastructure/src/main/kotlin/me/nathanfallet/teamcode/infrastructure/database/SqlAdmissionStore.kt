@@ -19,7 +19,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
     override suspend fun renew(actor: Principal, ticket: AdmissionTicket, blocked: Boolean) = queue.renew(actor, ticket, blocked)
     override suspend fun release(actor: Principal, ticket: AdmissionTicket) = queue.release(actor, ticket)
     override suspend fun preferredTarget(actor: Principal, affinity: RequestAffinity): RouteTarget? = database.query {
-        actor.requireReady(); requireCurrent(this, actor)
+        actor.requireScope(ServiceScope.INFERENCE); requireCurrent(this, actor)
         affinities.target(this, actor, affinity, nowMillis())
     }
     override suspend fun statistics(): AdmissionStatistics = database.query {
@@ -32,7 +32,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
     override suspend fun reserve(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?): Reservation =
         reserveNow(actor, units, model, provider, excludedAccountIds, affinity, null)
     private suspend fun reserveNow(actor: Principal, units: Long, model: String, provider: String, excludedAccountIds: Set<String>, affinity: RequestAffinity?, ticket: AdmissionTicket?, context: AdmissionContext? = null): Reservation = database.query {
-        actor.requireReady()
+        actor.requireScope(ServiceScope.INFERENCE)
         require(units in 1..100_000_000 && excludedAccountIds.size <= 64)
         lockTeam(actor.teamId)
         val now = nowMillis()
@@ -115,7 +115,7 @@ class SqlAdmissionStore(private val database: Database) : AdmissionStore, Admiss
         }
     }
     override suspend fun capacity(actor: Principal, memberId: String): MemberCapacity = database.query {
-        actor.requireReady(); requireCurrent(this, actor)
+        actor.requireScope(ServiceScope.USAGE_READ); requireCurrent(this, actor)
         if (memberId != actor.member.id) actor.requireAdmin()
         ensureMember(actor.teamId, memberId)
         readMemberCapacity(this, readMemberPolicy(this, memberId), nowMillis(), actor.teamId)

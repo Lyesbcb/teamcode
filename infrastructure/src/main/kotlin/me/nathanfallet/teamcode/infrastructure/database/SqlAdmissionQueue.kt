@@ -10,7 +10,7 @@ import org.jetbrains.exposed.v1.jdbc.*
 /** Metadata only: bodies stay with their cancellable HTTP request, never in the database. */
 internal class SqlAdmissionQueue(private val database: Database) {
     suspend fun enqueue(actor: Principal, input: AdmissionInput): AdmissionTicket = database.query {
-        actor.requireReady(); lockTeam(actor.teamId); requireCurrent(this, actor)
+        actor.requireScope(ServiceScope.INFERENCE); lockTeam(actor.teamId); requireCurrent(this, actor)
         require(input.units in 1..100_000_000 && input.provider.length in 1..32)
         val now = nowMillis()
         AdmissionWaiters.deleteWhere { (teamId eq actor.teamId) and (expiresAt lessEq now) }

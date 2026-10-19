@@ -6,9 +6,9 @@ import org.jetbrains.exposed.v1.core.*
 import org.jetbrains.exposed.v1.jdbc.*
 
 internal fun requireCurrent(c: JdbcTransaction, actor: Principal, now: Long = c.nowMillis()) {
-    val role = (Tokens innerJoin Members).select(Members.role).where {
+    val row = (Tokens innerJoin Members).select(Members.role, Tokens.serviceScopes).where {
         (Tokens.id eq actor.tokenId) and (Members.id eq actor.member.id) and (Members.teamId eq actor.teamId) and
             (Members.disabled eq false) and (Members.mustChangePassword eq false) and (Tokens.expiresAt greater now)
-    }.singleOrNull()?.get(Members.role)
-    if (role == null || role != actor.member.role.name) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
+    }.singleOrNull()
+    if (row == null || row[Members.role] != actor.member.role.name || readServiceScopes(row[Tokens.serviceScopes]) != actor.serviceScopes) throw TeamFailure("authentication_required", 401, "Sign in to TeamCode again.")
 }

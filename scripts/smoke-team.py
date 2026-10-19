@@ -29,11 +29,7 @@ def command(arguments, **kwargs):
     try:
         return subprocess.run(arguments, check=True, text=True, capture_output=True, **kwargs)
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as error:
-        # This only reports CLI diagnostics; its secrets are read from stdin and never echoed.
-        if arguments[0] == binary:
-            print('Native CLI stdout:', getattr(error, 'stdout', None))
-            print('Native CLI stderr:', getattr(error, 'stderr', None))
-        raise
+        raise RuntimeError('Acceptance subprocess failed; output withheld to protect credentials.') from None
 
 def stop_own_process():
     global process
@@ -65,7 +61,19 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
                  '-e', f'MYSQL_PASSWORD={database_password}', '-e', f'MYSQL_ROOT_PASSWORD={database_password}',
                  'mysql:8.4'])
         container_created = True
-        db_port = command(['docker', 'port', name, '3306/tcp']).stdout.strip().rsplit(':', 1)[1]
+        # Docker can return before the owned container's host port is published.
+        port_deadline = time.monotonic() + 30
+        while True:
+            binding = command(['docker', 'port', name, '3306/tcp']).stdout.strip()
+            if binding and binding.rsplit(':', 1)[-1].isdigit():
+                db_port = binding.rsplit(':', 1)[-1]
+                break
+            state = json.loads(command(['docker', 'inspect', '--format', '{{json .State}}', name]).stdout)
+            if state.get('Status') in ('exited', 'dead'):
+                raise RuntimeError('Owned MySQL container exited before port publication: exit=' + str(state.get('ExitCode')) + ', oom=' + str(state.get('OOMKilled')))
+            if time.monotonic() >= port_deadline:
+                raise RuntimeError('Owned MySQL port was not published within 30 seconds')
+            time.sleep(.1)
         env['TEAMCODE_DATABASE_URL'] = f'jdbc:mysql://127.0.0.1:{db_port}/teamcode'
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -131,6 +139,20 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert device_id in command([binary, 'devices', 'list'], env=env, timeout=15).stdout
         assert 'current' in command([binary, 'auth', 'sessions', 'list'], env=env, timeout=15).stdout
         command([binary, 'devices', 'rename', device_id, '--name', 'Administrator workstation'], env=env, timeout=15)
+        key_result = command([binary, 'keys', 'create', '--name', "CI's native runner", '--scopes', 'inference,usage:read,guidance', '--days', '1', '--json'], env=env, timeout=15)
+        service_key = json.loads(key_result.stdout)
+        key_secret = service_key['accessToken']
+        key_id = service_key['metadata']['id']
+        assert key_secret.startswith('tcsk_') and key_secret not in key_result.stderr
+        key_list = command([binary, 'keys', 'list'], env=env, timeout=15).stdout
+        assert key_id in key_list and key_secret not in key_list
+        ci_env = dict(env, XDG_CONFIG_HOME=str(root / 'ci-config'))
+        command([binary, 'configure', '--server', origin], env=ci_env, input=key_secret + '\n', timeout=15)
+        assert 'admin (admin)' in command([binary, 'whoami'], env=ci_env, timeout=15).stdout
+        assert request('/api/v1/capacity', token=key_secret)[0] == 200
+        for denied in ('/api/v1/service-keys', '/api/v1/accounts', '/api/v1/members', '/api/v1/quotas', '/api/v1/status'):
+            assert request(denied, token=key_secret)[0] == 403, 'Service key escaped its owner/scopes'
+        assert request('/api/v1/members', {'username': 'forbidden', 'role': 'ADMIN'}, key_secret)[0] == 403
         cookies = http.cookiejar.CookieJar()
         browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
         assert request('/dashboard/login', {'username': 'admin', 'password': password}, opener=browser, form=True, csrf_origin=origin)[0] == 200
@@ -152,6 +174,12 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert 'temporary administrator password' not in log.read_text()
         assert request('/api/v1/members', token=token)[0] == 200
         command([binary, 'status'], env=env, timeout=15)
+        assert request('/api/v1/capacity', token=key_secret)[0] == 200, 'Service key was not persisted across restart'
+        command([binary, 'keys', 'revoke', key_id], env=env, timeout=15)
+        assert request('/api/v1/auth/me', token=key_secret)[0] == 401
+        rejected = subprocess.run([binary, 'whoami'], env=ci_env, capture_output=True, text=True, timeout=15)
+        assert rejected.returncode != 0 and key_secret not in rejected.stdout + rejected.stderr
+        assert key_secret not in log.read_text()
         command([binary, 'logout'], env=env, timeout=15)
         assert not (root / 'config/teamcode/config.json').exists()
         assert identity_file.read_text() == installation
@@ -169,7 +197,7 @@ with tempfile.TemporaryDirectory(prefix='teamcode-team-smoke-') as directory:
         assert request('/dashboard/devices', opener=browser)[0] == 200, 'Revoking a CLI device signed out the independent browser'
         assert 'Administrator workstation' not in request('/dashboard/devices', opener=browser)[1]
         assert password not in log.read_text() and temporary not in log.read_text()
-        print('Team smoke passed: bootstrap, password change, browser member creation, native identity/session commands, device rename, login/logout persistence and scoped multi-session revocation.')
+        print('Team smoke passed: bootstrap, password change, browser member creation, native identity/session commands, device rename, login/logout persistence, scoped CI key creation/persistence/revocation and scoped multi-session revocation.')
     finally:
         stop_own_process()
         if container_created:

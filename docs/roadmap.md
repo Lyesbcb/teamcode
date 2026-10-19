@@ -95,7 +95,7 @@ Acceptance direction: create sessions by API and CLI using a selected custom too
 - Member keys see only their own usage/allowances and pool capacity or account metadata they are allowed to inspect. Explicit administrator keys can inspect the team's permitted operational view. Never return provider credentials, other members' private session content or unrelated account details through a status response.
 - Acceptance: exercise personal and administrator keys against session creation, ownership transfer, transcripts and quota/status reads; demonstrate denied cross-member access for personal keys, administrator orchestration, immediate revocation and consistent CLI/API JSON values. Endpoint names, scopes and response schemas remain to be discussed.
 
-The cloud-specific operations and automation surface above are V2. This does not defer the already planned V1 scoped service/CI credentials or existing account/status API capabilities; V2 extends those foundations.
+The cloud-specific operations and automation surface above are V2. This does not defer the V1 scoped service/CI credentials or existing account/status API capabilities; V2 extends those foundations.
 
 
 ### Environment/MCP variants and per-user assignments

@@ -40,9 +40,9 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
                 return@query null
             }
             Members.update({ Members.id eq member.id }) { it[failedLogins] = 0; it[lockedUntil] = 0 }
-            Tokens.deleteWhere { (memberId eq member.id) and (expiresAt less now) }
-            if (Tokens.selectAll().where { Tokens.memberId eq member.id }.count() >= 50) {
-                val oldest = Tokens.select(Tokens.id).where { Tokens.memberId eq member.id }.orderBy(Tokens.expiresAt).limit(1).single()[Tokens.id]
+            Tokens.deleteWhere { (memberId eq member.id) and (expiresAt less now) and serviceScopes.isNull() }
+            if (Tokens.selectAll().where { (Tokens.memberId eq member.id) and Tokens.serviceScopes.isNull() }.count() >= 50) {
+                val oldest = Tokens.select(Tokens.id).where { (Tokens.memberId eq member.id) and Tokens.serviceScopes.isNull() }.orderBy(Tokens.expiresAt).limit(1).single()[Tokens.id]
                 Tokens.deleteWhere { id eq oldest }
             }
             val token = Passwords.secret()
@@ -67,7 +67,7 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
         if (replacement.length !in 14..1024 || replacement == current) throw TeamFailure("invalid_password", 400, "Choose a different password with at least 14 characters (up to 1024).")
         hashing.withPermit { database.query {
             lockTeam(principal.teamId)
-            val actor = fresh(this, principal)
+            val actor = fresh(this, principal).also { it.requireInteractive() }
             val hash = Members.select(Members.passwordHash).where { Members.id eq actor.member.id }.forUpdate().single()[Members.passwordHash]
             if (!passwords.verify(current, hash)) throw denied()
             Members.update({ Members.id eq actor.member.id }) { it[passwordHash] = passwords.hash(replacement); it[mustChangePassword] = false; it[failedLogins] = 0; it[lockedUntil] = 0 }
@@ -119,7 +119,7 @@ class SqlTeamService(private val database: Database, private val passwords: Pass
     private fun fresh(c: JdbcTransaction, actor: Principal): Principal = (Tokens innerJoin Members).selectAll().where {
         (Tokens.id eq actor.tokenId) and (Members.teamId eq actor.teamId) and (Tokens.expiresAt greater c.nowMillis()) and (Members.disabled eq false)
     }.singleOrNull()?.let(::principal) ?: throw denied()
-    private fun principal(row: ResultRow) = Principal(member(row), row[Tokens.id], row[Members.teamId])
+    private fun principal(row: ResultRow) = Principal(member(row), row[Tokens.id], row[Members.teamId], readServiceScopes(row[Tokens.serviceScopes]))
     private fun member(row: ResultRow) = Member(row[Members.id], row[Members.username], Role.valueOf(row[Members.role]), row[Members.disabled], row[Members.mustChangePassword])
     private fun denied() = TeamFailure("invalid_credentials", 401, "Invalid credentials or temporarily locked account.")
 }

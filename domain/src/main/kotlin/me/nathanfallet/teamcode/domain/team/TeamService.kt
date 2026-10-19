@@ -2,7 +2,7 @@ package me.nathanfallet.teamcode.domain.team
 
 enum class Role { ADMIN, MEMBER }
 data class Member(val id: String, val username: String, val role: Role, val disabled: Boolean, val passwordChangeRequired: Boolean)
-data class Principal(val member: Member, val tokenId: String, val teamId: String)
+data class Principal(val member: Member, val tokenId: String, val teamId: String, val serviceScopes: Set<ServiceScope>? = null)
 class LoginSession(val token: String, val principal: Principal, val expiresAt: Long) {
     override fun toString() = "LoginSession([REDACTED])"
 }
@@ -24,6 +24,7 @@ interface TeamService {
 }
 
 fun Principal.requireAdmin() {
+    requireInteractive()
     if (member.role != Role.ADMIN) throw TeamFailure("forbidden", 403, "Administrator access is required.")
     requireReady()
 }

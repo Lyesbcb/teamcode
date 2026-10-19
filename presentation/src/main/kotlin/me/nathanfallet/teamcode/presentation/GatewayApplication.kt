@@ -26,7 +26,7 @@ import me.nathanfallet.teamcode.domain.gateway.*
 
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null, serviceKeys: ServiceKeyService? = null) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     install(io.ktor.server.resources.Resources)
@@ -58,6 +58,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     else call.respond(HttpStatusCode.Unauthorized, ApiError(ErrorDetail("authentication_required", "Sign in to TeamCode.")))
                     finish()
                 } else {
+                    AuthorizeCredentialUseCase().check(principal, credentialAction(call.request.httpMethod.value, path, inboundProtocols.map { it.path }.toSet()))
                     call.attributes.put(PRINCIPAL, principal)
                     if (path !in setOf("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout", "/dashboard/password", "/dashboard/logout")) {
                         if (principal.member.passwordChangeRequired && path.startsWith("/dashboard")) {
@@ -83,6 +84,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (modelPolicies != null) modelPolicyRoutes(modelPolicies, publicOrigin)
         if (routes != null) routingRoutes(routes, publicOrigin)
         if (devices != null && team != null) deviceRoutes(devices, publicOrigin)
+        if (serviceKeys != null && team != null) serviceKeyRoutes(serviceKeys, publicOrigin)
         if (cancellation != null && team != null) {
             post("/api/v1/requests/{id}/cancel") {
                 cancellation.cancel(call.principal, call.parameters["id"].orEmpty())
@@ -100,7 +102,8 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                 features = listOf("status", if (mode == "fixture") "messages.fixture.streaming" else "subscriptions.streaming") +
                     (if (team != null) listOf("team.auth", "team.members", "dashboard") else emptyList()) +
                     (if (team != null && cancellation != null) listOf("requests.cancel.v1") else emptyList()) +
-                    (if (team != null && devices != null) listOf("team.devices") else emptyList())))
+                    (if (team != null && devices != null) listOf("team.devices") else emptyList()) +
+                    (if (team != null && serviceKeys != null) listOf("team.service-keys.v1") else emptyList())))
         }
         get<StatusResource> {
             val status = gateway.status()

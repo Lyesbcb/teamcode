@@ -77,7 +77,7 @@ class SqlDeviceService(private val database: Database) : DeviceService {
         memberId
     }
 
-    private fun requireActor(c: JdbcTransaction, actor: Principal) { actor.requireReady(); requireCurrent(c, actor) }
+    private fun requireActor(c: JdbcTransaction, actor: Principal) { actor.requireInteractive(); requireCurrent(c, actor) }
     private fun requireMember(actor: Principal, member: String, lock: Boolean = false) {
         if (actor.member.id != member) actor.requireAdmin()
         val query = Members.select(Members.id).where { (Members.id eq member) and (Members.teamId eq actor.teamId) }
@@ -89,7 +89,7 @@ class SqlDeviceService(private val database: Database) : DeviceService {
         (Devices.id eq id) and (Members.teamId eq actor.teamId) and visible(actor, Devices.memberId)
     }.singleOrNull() ?: throw missing()
     private fun sessionRows(member: String, now: Long) = Tokens.select(Tokens.id, Tokens.memberId, Tokens.device, Tokens.deviceId, Tokens.createdAt, Tokens.expiresAt)
-        .where { (Tokens.memberId eq member) and (Tokens.expiresAt greater now) }
+        .where { (Tokens.memberId eq member) and (Tokens.expiresAt greater now) and Tokens.serviceScopes.isNull() }
         .orderBy(Tokens.expiresAt to SortOrder.DESC, Tokens.id to SortOrder.ASC).limit(50).toList()
     private fun ResultRow.device(active: Int, current: Boolean) = Device(get(Devices.id), get(Devices.memberId), get(Devices.name), get(Devices.createdAt), get(Devices.lastLoginAt), active, current)
     private fun missing() = TeamFailure("not_found", 404, "Device or session not found.")
