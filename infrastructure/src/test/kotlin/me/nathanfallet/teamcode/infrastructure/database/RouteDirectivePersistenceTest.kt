@@ -12,6 +12,7 @@ import me.nathanfallet.teamcode.domain.gateway.WireProtocol
 import me.nathanfallet.teamcode.domain.policy.ModelPolicy
 import me.nathanfallet.teamcode.domain.routing.*
 import me.nathanfallet.teamcode.infrastructure.gateway.SessionAffinityKey
+import me.nathanfallet.teamcode.infrastructure.providers.ClaudeTransport
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
 import org.testcontainers.mysql.MySQLContainer
 import kotlin.test.*
@@ -118,6 +119,15 @@ class RouteDirectivePersistenceTest {
                 pace() // Start conservative recovery; retired history must not recreate the cap.
                 a.query { Directives.update({ Directives.memberId eq actor.member.id }) { it[recoveryStartedAt] = Directives.recoveryStartedAt - 120001 } }
                 assertEquals(Pace.CAN_INCREASE, pace(controllerA).advice.pace, "Retired model-cap history must not continue pausing guidance")
+                observations(claude, listOf(.1, .1, .1))
+                context(claude)
+                val claudeAt = a.query { nowMillis() }
+                admission.observe(claude.id, listOf(AccountQuota(claude.id, "model:opus", 1.0, claudeAt - 1, claudeAt + 3_600_000)))
+                assertEquals(Pace.PAUSE, pace().advice.pace)
+                SqlAdmissionStore(b).observe(claude.id, ClaudeTransport.usageSnapshot(claude.id, Json.parseToJsonElement("""{"limits":[]}""").jsonObject, claudeAt))
+                pace()
+                a.query { Directives.update({ Directives.memberId eq actor.member.id }) { it[recoveryStartedAt] = Directives.recoveryStartedAt - 120001 } }
+                assertEquals(Pace.CAN_INCREASE, pace(controllerA).advice.pace, "Claude cap retirement must also release forecast pressure after hysteresis")
                 a.query { ConversationAffinities.update { it[lastSeenAt] = 0 } }
                 assertEquals(Pace.UNKNOWN, pace().advice.pace, "Inactive hints do not advertise headroom")
                 context(codex, "gpt-6-astra")

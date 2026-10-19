@@ -257,3 +257,19 @@ Local verification passed:
 Cross-platform CI and Docker publication for this slice are pending its push; the previous green runs do not validate these changes.
 
 The first open-source model adapter is now explicitly V2 at the owner's request. Versioned CLI updates, signed release manifests, cooperative service updates and rollback are documented design targets in `services.md`, not implemented commands. The remaining V1 gates in `v1-review.md` are still required.
+
+
+## Claude model-cap retirement (2026-10-19)
+
+Claude usage probes now carry an authoritative model-cap snapshot only when the payload contains a valid explicit `limits` enumeration. Valid legacy `seven_day_<family>` readings retain precedence, and listed zero usage remains an observation with an optional reset. A null legacy slot, missing enumeration, malformed entry or failed request cannot prove removal. Model-family identifiers are normalized and bounded before persistence.
+
+This follows the sibling TeamClaude `src/oauth.js`, `test/quota-probe.test.js` and `test/scoped-weekly.test.js` behavior. TeamCode additionally validates completeness before retirement and shares snapshot ordering across replicas through Exposed transactions. The probe timestamp precedes the network request. A delayed or equal-time response cannot resurrect a retired model window, and a newer inference observation survives an older probe. Retirement is account-local, never clears a shared subscription window, preserves history and starts a new history interval when a cap reappears. Codex active-limit bindings remain Codex-only. No schema migration is required beyond the preceding Exposed milestone.
+
+Evidence:
+
+- **57 infrastructure tests passed**, zero failures/errors/skips, plus server packaging, module/query conventions and whitespace checks.
+- `ClaudeQuotaSnapshotTest` covers full/partial/malformed enumerations, null versus zero, legacy precedence, unknown families, expired windows, request timing and unsuccessful probes using the actual transport with a synthetic HTTP engine.
+- `ClaudeQuotaRetirementPersistenceTest` uses real MySQL and two independent pools to verify admission, account isolation, shared exhaustion, retained history, equal/late responses and concurrent header/probe ordering. The existing Codex binding and retirement tests remain green.
+- `RouteDirectivePersistenceTest` now also proves that retiring a Claude cap releases forecast pressure after persisted recovery hysteresis; retained history does not recreate the pause.
+
+No provider credentials or subscription calls were used. Cross-platform CI and Docker publication await this push. More subscription-plan shapes, real reset-boundary behavior, complete agent tasks and the other V1 acceptance gates remain open.

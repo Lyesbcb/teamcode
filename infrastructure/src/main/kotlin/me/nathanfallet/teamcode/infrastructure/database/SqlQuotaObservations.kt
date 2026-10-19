@@ -14,10 +14,10 @@ internal class SqlQuotaObservations(private val database: Database) {
         val now = nowMillis()
         if (update.observedAtMillis !in 0..now) return@query
         val codex = account[Accounts.provider] == "codex"
-        val previousSnapshot = if (codex) QuotaSnapshots.selectAll().where { QuotaSnapshots.accountId eq accountId }
-            .singleOrNull()?.get(QuotaSnapshots.modelWindowsObservedAt) else null
+        val previousSnapshot = QuotaSnapshots.selectAll().where { QuotaSnapshots.accountId eq accountId }
+            .singleOrNull()?.get(QuotaSnapshots.modelWindowsObservedAt)
         val valid = update.windows.filter { it.accountId == accountId && it.window.length in 1..80 && it.utilization.isFinite() && it.utilization in 0.0..1.0 && it.observedAtMillis in 0..now && (it.resetsAtMillis?.let { reset -> reset > it.observedAtMillis } != false) }
-        val replace = codex && update.replaceModelWindows && valid.size == update.windows.size &&
+        val replace = update.replaceModelWindows && valid.size == update.windows.size &&
             (previousSnapshot == null || update.observedAtMillis > previousSnapshot)
         if (replace) {
             val present = valid.map { it.window }.toSet()
@@ -35,7 +35,7 @@ internal class SqlQuotaObservations(private val database: Database) {
         val starts = valid.groupBy { it.window }.mapValues { (_, readings) -> readings.minOf { it.observedAtMillis } }
         val previous = QuotaWindows.selectAll().where { QuotaWindows.accountId eq accountId }
             .associate { it[QuotaWindows.windowName] to it[QuotaWindows.observedAt] }.toMutableMap()
-        valid.filterNot { codex && it.window.startsWith("model:") && previousSnapshot != null && it.observedAtMillis <= previousSnapshot }.forEach { q ->
+        valid.filterNot { it.window.startsWith("model:") && previousSnapshot != null && it.observedAtMillis <= previousSnapshot }.forEach { q ->
             if ((previous[q.window] ?: Long.MIN_VALUE) <= q.observedAtMillis) {
                 QuotaWindows.upsert(onUpdateExclude = listOf(QuotaWindows.windowStartedAt)) {
                     it[QuotaWindows.accountId] = accountId

@@ -10,6 +10,7 @@ import kotlinx.io.readByteArray
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.domain.accounts.*
 import me.nathanfallet.teamcode.domain.capacity.AccountQuota
+import me.nathanfallet.teamcode.domain.capacity.QuotaUpdate
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 import java.time.Instant
 
@@ -33,12 +34,18 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
         if (access.isNullOrBlank() || seconds == null || seconds !in 1..31_536_000) throw TeamFailure("refresh_failed", 503, "Provider refresh returned incomplete credentials.")
         ProviderCredentials(access, refresh, System.currentTimeMillis() + seconds * 1000)
     }
-    override suspend fun usage(account: AccountRecord, credentials: ProviderCredentials): List<AccountQuota> = http.prepareGet("https://api.anthropic.com/api/oauth/usage?cedar_ember=1") {
+    private suspend fun usageDocument(credentials: ProviderCredentials): JsonObject = http.prepareGet("https://api.anthropic.com/api/oauth/usage?cedar_ember=1") {
         bearerAuth(credentials.accessToken); header("anthropic-beta", "oauth-2025-04-20")
         timeout { requestTimeoutMillis = 15_000 }
     }.execute { response ->
         if (response.status.value != 200) throw TeamFailure("usage_unavailable", 503, "Provider usage is unavailable.")
-        parseUsage(account.id, response.boundedJson(), System.currentTimeMillis())
+        response.boundedJson()
+    }
+    override suspend fun usage(account: AccountRecord, credentials: ProviderCredentials) = usageUpdate(account, credentials).windows
+    override suspend fun usageUpdate(account: AccountRecord, credentials: ProviderCredentials): QuotaUpdate {
+        // A slow usage probe must not retire a quota learned from a newer inference response.
+        val started = System.currentTimeMillis()
+        return usageSnapshot(account.id, usageDocument(credentials), started)
     }
     override suspend fun send(account: AccountRecord, credentials: ProviderCredentials, body: JsonObject, headers: Map<String, String>, receive: suspend (HttpResponse) -> Unit) {
         val metadata = body["metadata"] as? JsonObject
@@ -56,6 +63,33 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
         }.execute { receive(it) }
     }
     companion object {
+        private fun family(value: String?): String? = value?.trim()?.lowercase()
+            ?.takeIf { Regex("[a-z0-9][a-z0-9_-]{0,63}").matches(it) }
+        private fun validPercent(value: JsonElement?): Boolean = (value as? JsonPrimitive)?.doubleOrNull
+            ?.let { it.isFinite() && it >= 0 } == true
+
+        /** Only an explicit, valid enumeration proves that an absent model cap was removed. */
+        fun usageSnapshot(accountId: String, value: JsonObject, started: Long): QuotaUpdate {
+            val limits = value["limits"] as? JsonArray
+            val seen = mutableSetOf<String>()
+            val complete = limits != null && limits.size <= 128 && limits.all { element ->
+                val limit = element as? JsonObject ?: return@all false
+                val group = (limit["group"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+                val scope = limit["scope"]
+                val model = ((scope as? JsonObject)?.get("model") as? JsonObject)
+                val name = family((model?.get("display_name") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull)
+                val scoped = (scope != null && scope != JsonNull) || (limit["kind"] as? JsonPrimitive)?.contentOrNull == "weekly_scoped"
+                !group.isNullOrBlank() && validPercent(limit["percent"]) &&
+                    (group != "weekly" || !scoped || (name != null && seen.add(name)))
+            } && value.filterKeys { it.startsWith("seven_day_") }.all { (key, bucket) ->
+                // Legacy fields still win where a subscription reports them. A malformed
+                // legacy field cannot turn its omitted parser result into proof of removal.
+                family(key.removePrefix("seven_day_")) != null && (bucket == JsonNull ||
+                    (bucket is JsonObject && validPercent(bucket.quotaField("used_percentage", "utilization", "usedPercentage"))))
+            }
+            return QuotaUpdate(parseUsage(accountId, value, started), started, replaceModelWindows = complete)
+        }
+
         fun parseUsage(accountId: String, value: JsonObject, now: Long): List<AccountQuota> = buildList {
             fun addBucket(name: String, utilization: JsonElement?, reset: JsonElement?) {
                 val percent = (utilization as? JsonPrimitive)?.doubleOrNull ?: return
@@ -71,7 +105,7 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
                 val window = when {
                     name == "five_hour" -> "five_hour"
                     name == "seven_day" -> "seven_day"
-                    name.startsWith("seven_day_") -> "model:" + name.removePrefix("seven_day_")
+                    name.startsWith("seven_day_") -> "model:" + (family(name.removePrefix("seven_day_")) ?: continue)
                     else -> continue
                 }
                 addBucket(window, bucket.quotaField("used_percentage", "utilization", "usedPercentage"),
@@ -79,7 +113,7 @@ class ClaudeTransport(private val http: HttpClient) : ProviderTransport {
             }
             (value["limits"] as? JsonArray)?.forEach { element ->
                 val limit = element as? JsonObject ?: return@forEach
-                val family = (((limit["scope"] as? JsonObject)?.get("model") as? JsonObject)?.get("display_name") as? JsonPrimitive)?.contentOrNull
+                val family = family((((limit["scope"] as? JsonObject)?.get("model") as? JsonObject)?.get("display_name") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull)
                 if ((limit["group"] as? JsonPrimitive)?.contentOrNull == "weekly" && !family.isNullOrBlank()) addBucket("model:${family.lowercase()}", limit["percent"], limit["resets_at"])
             }
         }.distinctBy { it.window }

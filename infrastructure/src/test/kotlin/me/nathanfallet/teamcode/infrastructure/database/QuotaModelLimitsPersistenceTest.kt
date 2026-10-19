@@ -97,7 +97,7 @@ class QuotaModelLimitsPersistenceTest {
 
                 val claudeCap = cap.copy(accountId = claude.id, window = "model:opus")
                 first.observe(claude.id, listOf(claudeCap))
-                second.observe(claude.id, QuotaUpdate(emptyList(), start + 80, replaceModelWindows = true, modelLimit = ModelLimitObservation("claude-opus", "premium")))
+                second.observe(claude.id, QuotaUpdate(emptyList(), start + 80, modelLimit = ModelLimitObservation("claude-opus", "premium")))
                 assertTrue(mapping(claude.id).isEmpty())
                 assertEquals(claudeCap, first.quotas(admin).single { it.accountId == claude.id })
 
