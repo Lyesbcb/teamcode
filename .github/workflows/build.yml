@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   jvm:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +34,7 @@ jobs:
           path: app/build/libs/app-all.jar
           retention-days: 1
   helm:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +49,7 @@ jobs:
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
           helm template teamcode helm/teamcode --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
   image:
+    timeout-minutes: 20
     needs: [jvm, helm, native, windows, bundle]
     runs-on: ubuntu-latest
     permissions:
@@ -75,10 +78,11 @@ jobs:
             org.opencontainers.image.source=https://github.com/nathanfallet/teamcode
             org.opencontainers.image.licenses=Apache-2.0
   native:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-24.04]
+        os: [macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -138,6 +142,7 @@ jobs:
           path: cli/build/bin/${{ env.NATIVE_DIRECTORY }}/releaseExecutable/teamcode.kexe
           retention-days: 7
   windows:
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,8 +175,23 @@ jobs:
           path: cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
           retention-days: 7
 
-  linux_arm64_build:
-    runs-on: ubuntu-24.04
+  cross_build:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: LinuxArm64
+            directory: linuxArm64
+            asset: linux-arm64
+          - os: macos-latest
+            target: MacosX64
+            directory: macosX64
+            asset: macos-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      NATIVE_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -179,42 +199,62 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
-      - run: ./gradlew :cli:linkReleaseExecutableLinuxArm64
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}"
       - uses: actions/upload-artifact@v4
         with:
-          name: candidate-linux-arm64
-          path: cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+          name: candidate-${{ matrix.asset }}
+          path: cli/build/bin/${{ matrix.directory }}/releaseExecutable/teamcode.kexe
           retention-days: 1
-  linux_arm64:
-    needs: [linux_arm64_build, jvm]
-    runs-on: ubuntu-24.04-arm
+  cross_native:
+    timeout-minutes: 20
+    needs: [cross_build, jvm]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            directory: linuxArm64
+            asset: linux-arm64
+            architecture: aarch64
+          - os: macos-15-intel
+            directory: macosX64
+            asset: macos-x64
+            architecture: x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      NATIVE_DIRECTORY: ${{ matrix.directory }}
+      NATIVE_ASSET: ${{ matrix.asset }}
+      EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: actions/download-artifact@v4
         with:
-          name: candidate-linux-arm64
-          path: cli/build/bin/linuxArm64/releaseExecutable
+          name: candidate-${{ matrix.asset }}
+          path: cli/build/bin/${{ matrix.directory }}/releaseExecutable
       - uses: actions/download-artifact@v4
         with:
           name: server-jar
           path: app/build/libs
-      - name: Select the real ARM64 runtime
+      - name: Select the actual target runtime
         run: |
-          test "$(uname -m)" = aarch64
-          chmod 755 cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+          chmod 755 "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
           echo "TEAMCODE_VERSION=${ORG_GRADLE_PROJECT_teamcodeVersion#v}" >> "$GITHUB_ENV"
-      - run: python3 scripts/smoke-native.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
-      - run: python3 scripts/smoke-devices.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
-      - run: python3 scripts/smoke-run.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
-      - run: python3 scripts/smoke-queued-cancel.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
-      - run: python3 scripts/smoke-hook.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
+      - run: python3 scripts/smoke-native.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar --expected-version "$TEAMCODE_VERSION"
+      - run: python3 scripts/smoke-devices.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+      - run: python3 scripts/smoke-run.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-queued-cancel.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+      - run: python3 scripts/smoke-hook.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
       - name: Start Linux user service manager
+        if: runner.os == 'Linux'
         run: |
           sudo loginctl enable-linger "$(id -un)"
           sudo systemctl start "user@$(id -u).service"
@@ -222,17 +262,19 @@ jobs:
             echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
             echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
           } >> "$GITHUB_ENV"
-      - run: python3 scripts/smoke-service.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe
-      - run: python3 scripts/smoke-team.py --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --jar app/build/libs/app-all.jar
+      - run: python3 scripts/smoke-service.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe"
+      - if: runner.os == 'Linux'
+        run: python3 scripts/smoke-team.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
       - name: Stage the tested native release asset
-        run: python3 scripts/release-bundle.py stage --binary cli/build/bin/linuxArm64/releaseExecutable/teamcode.kexe --target linux-arm64 --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
+        run: python3 scripts/release-bundle.py stage --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --target "$NATIVE_ASSET" --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-arm64
+          name: release-${{ matrix.asset }}
           path: dist/*
           retention-days: 7
   bundle:
-    needs: [native, windows, linux_arm64]
+    timeout-minutes: 5
+    needs: [native, windows, cross_native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -249,6 +291,7 @@ jobs:
           path: dist/*
           retention-days: 7
   release:
+    timeout-minutes: 10
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [image, bundle]
     runs-on: ubuntu-latest
@@ -260,6 +303,12 @@ jobs:
         with:
           name: teamcode-release-bundle
           path: dist
+      - name: Sign the exact release manifest with the independent publisher key
+        env:
+          TEAMCODE_RELEASE_SIGNING_KEY: ${{ secrets.TEAMCODE_RELEASE_SIGNING_KEY }}
+        run: python3 scripts/release-signature.py sign --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - name: Verify the published signature against the pinned public key
+        run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Publish the verified version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -267,4 +316,5 @@ jobs:
         run: |
           flags=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "TeamCode ${GITHUB_REF_NAME#v}" "${flags[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "TeamCode ${GITHUB_REF_NAME#v}" "${flags[@]}" --draft
+          gh release edit "$GITHUB_REF_NAME" --draft=false

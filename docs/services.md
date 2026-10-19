@@ -53,7 +53,7 @@ The built-in Windows PowerShell service query uses system module paths explicitl
 
 ## Planned versioned updates (not implemented)
 
-Native release artifacts will be published through GitHub Releases after the required platform checks. A signed manifest will bind each platform artifact to its version and digest; the updater must verify it before executing downloaded code. The release signing key must be separate from the self-hosted server and verified against a trust root shipped with the CLI. Release signing, key rotation and verification require acceptance tests.
+Native release artifacts will be published through GitHub Releases after the required platform checks. A signed manifest will bind each platform artifact to its version and digest; the updater must verify it before executing downloaded code. The release signing key must be separate from the self-hosted server and verified against a trust root shipped with the CLI. Publisher-side RSA-3072/PSS signing and verification are implemented in the [distribution pipeline](distribution.md); native verification, key rotation and updater acceptance remain required.
 
 Planned commands are `teamcode update --check`, `teamcode update`, `teamcode update --version VERSION` and `teamcode update --rollback`. These commands are design targets, not available commands. Automatic checks may notify users; unattended installation is opt-in and waits until the local proxy is idle. A failed check never prevents normal agent launch.
 
