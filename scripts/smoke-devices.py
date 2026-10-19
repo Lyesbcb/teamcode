@@ -177,7 +177,8 @@ def main():
                 '''
                 for path in (identity, identity.parent):
                     result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', acl_script],
-                                            env=dict(env, TEAMCODE_TEST_IDENTITY=str(path)),
+                                            env=dict(env, TEAMCODE_TEST_IDENTITY=str(path),
+                                                     PSModulePath=str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/Modules')),
                                             text=True, encoding='utf-8', capture_output=True, timeout=15)
                     assert result.returncode == 0, 'Windows identity ACL inspection failed: ' + result.stderr
                     acl = json.loads(result.stdout)
