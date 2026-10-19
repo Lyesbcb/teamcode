@@ -89,6 +89,16 @@ def main():
                     disconnected.set()
             except ConnectionResetError:
                 disconnected.set()
+            except BrokenPipeError as error:
+                # Winsock reports WSAESHUTDOWN after this fixture's authenticated
+                # control handler disables reception. This is a terminated operation,
+                # not a peer EOF; accept only that exact error for the cancelled UUID.
+                # https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-recv
+                if os.name != 'nt' or getattr(error, 'winerror', None) != 10058:
+                    raise
+                with lock:
+                    assert request_id in cancelled_ids, 'Unexpected shutdown without matching cancellation'
+                disconnected.set()
             except TimeoutError:
                 pass
 
@@ -135,7 +145,7 @@ def main():
                             downstream.sendall(headers + body)
                             assert entered.wait(5), 'The request never reached the synthetic upstream'
                             # Closing before any response must cancel only this request's transport.
-                        assert disconnected.wait(5), 'Client disconnect left an upstream admission request running'
+                        assert disconnected.wait(5), 'Client disconnect left an upstream admission request running\n' + '\n'.join(errors)
                         assert control_received.wait(3), 'SDK did not send the authenticated cancellation control call'
                         release_survivor.set()
                         response = survivor.getresponse()

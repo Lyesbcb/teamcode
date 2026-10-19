@@ -11,6 +11,35 @@ import kotlinx.coroutines.channels.Channel
 import kotlin.test.*
 
 class InferenceLifecycleTest {
+    @Test fun cancellationControlDoesNotWaitForInferenceTransportCleanup() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val remoteStopped = CompletableDeferred<Unit>()
+        var controls = 0
+        val sdk = TeamCodeClient("https://team.example", { "synthetic-token" }) { configure ->
+            HttpClient(MockEngine { request ->
+                if (request.url.encodedPath.startsWith("/api/v1/requests/")) {
+                    controls++
+                    remoteStopped.complete(Unit)
+                    respond("", HttpStatusCode.NoContent)
+                } else {
+                    entered.complete(Unit)
+                    try { awaitCancellation() }
+                    finally { withContext(NonCancellable) { remoteStopped.await() } }
+                }
+            }) { configure(this) }
+        }
+        try {
+            val pending = launch { sdk.forwardMessages("{}".toByteArray()) { fail("No response headers") } }
+            entered.await()
+            val completed = try {
+                pending.cancel()
+                withTimeoutOrNull(1_500) { pending.join(); true }
+            } finally { remoteStopped.complete(Unit); pending.join() }
+            assertEquals(true, completed, "Send control before waiting for a retained inference transport")
+            assertEquals(1, controls)
+        } finally { sdk.close() }
+    }
+
     @Test fun cancellationIsPerRequestAndClosingTheSdkCancelsRemainingInference() = runBlocking {
         withTimeout(5_000) {
             val entered = Channel<String>(Channel.UNLIMITED)
