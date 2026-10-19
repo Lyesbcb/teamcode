@@ -203,7 +203,7 @@ class DatabaseRestoreTest {
             configureGateway(gateway, team = team, accounts = accounts, admission = admission,
                 modelPolicies = SqlModelPolicyStore(database), routes = SqlRoutingStore(database),
                 devices = SqlDeviceService(database), serviceKeys = SqlServiceKeyService(database), audit = SqlAuditService(database), readiness = { database.ready() },
-                pacingSettings = SqlPacingSettingsStore(database))
+                pacingSettings = SqlPacingSettingsStore(database), forecasts = ForecastServiceImpl(database))
         }
         server.start(wait = false)
         try {
@@ -211,7 +211,7 @@ class DatabaseRestoreTest {
             HttpClient(CIO) { install(HttpTimeout) { requestTimeoutMillis = 5_000 }; followRedirects = false }.use { http ->
                 suspend fun get(path: String, token: String = fixture.admin.token) = http.get(origin + path) { bearerAuth(token) }
                 assertEquals(HttpStatusCode.OK, get("/ready").status)
-                for (path in listOf("/api/v1/members", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
+                for (path in listOf("/api/v1/members", "/api/v1/accounts", "/api/v1/capacity", "/api/v1/pools/budgets", "/api/v1/quotas", "/api/v1/forecasts", "/api/v1/routes", "/api/v1/policy/models", "/api/v1/policy/pacing", "/api/v1/devices", "/api/v1/audit")) {
                     val response = get(path)
                     assertEquals(HttpStatusCode.OK, response.status, "Restored HTTP access failed: $path")
                     val body = response.bodyAsText()
@@ -219,6 +219,9 @@ class DatabaseRestoreTest {
                 }
                 assertTrue(Json.parseToJsonElement(get("/api/v1/policy/pacing").bodyAsText()).jsonObject.getValue("observationOnly").jsonPrimitive.boolean,
                     "Restoration must retain observation mode instead of re-enabling enforcement")
+                val forecast = Json.parseToJsonElement(get("/api/v1/forecasts").bodyAsText()).jsonObject
+                assertEquals(fixture.accountId, forecast.getValue("account").jsonObject.getValue("id").jsonPrimitive.content)
+                assertEquals("seven_day", forecast.getValue("windows").jsonArray.single().jsonObject.getValue("window").jsonPrimitive.content)
                 val capacity = Json.parseToJsonElement(get("/api/v1/capacity", fixture.activeKey.accessToken).bodyAsText()).jsonObject
                 assertEquals(200, capacity.getValue("chargedAndReservedUnits").jsonPrimitive.long)
                 assertEquals(500, capacity.getValue("dailyUnits").jsonPrimitive.long)

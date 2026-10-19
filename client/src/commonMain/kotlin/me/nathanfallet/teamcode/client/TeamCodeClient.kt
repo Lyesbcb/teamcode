@@ -76,6 +76,11 @@ class TeamCodeClient(
     suspend fun savePacingSettings(settings: PacingSettingsView): PacingSettingsView = request("/api/v1/policy/pacing", HttpMethod.Put, settings)
     /** Read proposed advice for the current member, even when automatic delivery is disabled. */
     suspend fun pacingPreview(): PacingPreviewResponse = request("/api/v1/directives/preview", HttpMethod.Get)
+    /** Administrative per-account quota history and conditional forecasts, without provider credentials. */
+    suspend fun forecasts(accountId: String? = null): ForecastSnapshotView {
+        accountId?.let(::identifier)
+        return request("/api/v1/forecasts" + (accountId?.let { "?account=$it" } ?: ""), HttpMethod.Get)
+    }
     suspend fun accounts(): List<AccountView> = request("/api/v1/accounts", HttpMethod.Get)
     suspend fun enrollAccount(input: EnrollAccountRequest): EnrollAccountResponse = request("/api/v1/accounts", HttpMethod.Post, input)
     suspend fun handoverAccount(id: String, accessOnly: Boolean = false): AccountView {

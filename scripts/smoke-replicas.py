@@ -99,6 +99,10 @@ with tempfile.TemporaryDirectory(prefix='teamcode-replicas-') as directory:
         status, body = request(origins[0], '/api/v1/auth/login', {'username': 'admin', 'password': password})
         assert status == 200
         token = json.loads(body)['accessToken']
+        status, body = request(origins[1], '/api/v1/forecasts', token=token)
+        forecast = json.loads(body)
+        assert status == 200 and forecast['account'] is None and forecast['windows'] == []
+        assert forecast['pressureThreshold'] == .9 and not forecast['truncated']
         assert request(origins[0], '/api/v1/members', {'username': 'replica-member', 'role': 'MEMBER'}, token)[0] == 201
         status, body = request(origins[1], '/api/v1/members', token=token)
         assert status == 200 and len(json.loads(body)) == 2
