@@ -143,4 +143,50 @@ class PeriodicReleaseCheckTest {
             assertNull(checks.check { error("An absent stable release must be cached") })
         }
     }
+
+    @Test fun explicitInstallationChecksAreIndependentOfNotificationsButRequireASuccessfulObservation() = runTest {
+        scratch { paths ->
+            var instant = PeriodicReleaseCheck.DAY_MILLIS
+            val checks = PeriodicReleaseCheck(paths, "1.0.0", verifier) { instant }
+            checks.setNotifications(false)
+            assertNotNull(checks.check(forInstallation = true) { release() })
+            assertNull(checks.check { error("Notifications remain disabled") })
+            instant += PeriodicReleaseCheck.DAY_MILLIS
+            assertNull(checks.check(forInstallation = true) { error("DO_NOT_LOG_REMOTE_BODY") })
+            assertNull(checks.check(forInstallation = true) { error("Failed checks remain throttled") })
+            checks.setNotifications(true)
+            assertNotNull(checks.check { error("An informational notification may retain authenticated old metadata") })
+            instant += PeriodicReleaseCheck.DAY_MILLIS
+            assertNotNull(checks.check(forInstallation = true) { release() })
+        }
+    }
+
+    @Test fun legacyCacheWithoutSuccessfulObservationCannotAuthorizeAutomaticInstallation() = runTest {
+        scratch { paths ->
+            val checks = PeriodicReleaseCheck(paths, "1.0.0", verifier)
+            assertNotNull(checks.check { release() })
+            val path = paths.root / "update-check.json"
+            val value = Json.parseToJsonElement(fs.read(path) { readUtf8() }).jsonObject
+            writePrivateFile(path.toString(), JsonObject(value - "successfulObservation").toString())
+            assertNull(checks.check(forInstallation = true) { error("Legacy observations are throttled, not promoted") })
+            assertNotNull(checks.check { error("Signature-authenticated notifications remain supported") })
+        }
+    }
+
+    @Test fun aConcurrentRefreshCannotAuthorizeInstallationFromExpiredOrFutureDatedMetadata() = runTest {
+        scratch { paths ->
+            var instant = 2 * PeriodicReleaseCheck.DAY_MILLIS
+            val checks = PeriodicReleaseCheck(paths, "1.0.0", verifier) { instant }
+            assertNotNull(checks.check(forInstallation = true) { release() })
+            assertNotNull(acquireInstallationLock((paths.root / "update-check.lock").toString(), exclusive = true)).use {
+                assertNotNull(checks.check(forInstallation = true) { error("Another refresher owns the lock") })
+                instant += PeriodicReleaseCheck.DAY_MILLIS
+                assertNull(checks.check(forInstallation = true) { error("Do not install an expired observation while refresh is busy") })
+                assertNotNull(checks.check { error("Old signed metadata remains informational") })
+                instant = PeriodicReleaseCheck.DAY_MILLIS
+                assertNull(checks.check(forInstallation = true) { error("A backwards clock does not make a future observation fresh") })
+            }
+            assertNotNull(checks.check(forInstallation = true) { release() })
+        }
+    }
 }

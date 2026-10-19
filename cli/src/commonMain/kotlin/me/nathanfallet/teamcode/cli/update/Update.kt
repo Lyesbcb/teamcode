@@ -29,9 +29,20 @@ internal class Update : SuspendingCliktCommand(name = "update") {
     private val bundle by option("--bundle", help = "Use an offline signed release directory.")
     private val root by option("--root", help = "Explicit managed installation directory; ordinary launches discover their own installation.")
     private val notifications by option("--notifications", help = "Configure background signed release notifications for this managed installation.").choice("on", "off", "status")
+    private val automatic by option("--automatic", help = "Opt into an hourly user update job, disable it, inspect it or remove its registration.").choice("on", "off", "status", "uninstall")
+    private val automaticRun by option("--automatic-run", help = "Run one enabled automatic update attempt; supplied by the OS scheduler.").flag()
     override fun help(context: Context) = "Check or update a managed native installation; preserve login and drain its owned service."
 
     override suspend fun run() = releaseOperation {
+        if (listOf(notifications != null, automatic != null, automaticRun).count { it } > 1)
+            throw UsageError("Choose notifications, automatic configuration or one automatic attempt.")
+        if (automatic != null || automaticRun) {
+            if (check || rollback || version != null || bundle != null) throw UsageError("Automatic updates cannot be combined with a check, version, bundle or rollback.")
+            val store = root?.let { InstallationStore(defaultInstallationPaths(it)) } ?: managedInstallation()
+                ?: throw CliOperationException("release_not_managed")
+            automaticUpdateCommand(store, automatic, automaticRun) { echo(it) }
+            return@releaseOperation
+        }
         if (notifications != null) {
             if (check || rollback || version != null || bundle != null) throw UsageError("--notifications cannot be combined with a check, installation or rollback.")
             val store = root?.let { InstallationStore(defaultInstallationPaths(it)) } ?: managedInstallation()

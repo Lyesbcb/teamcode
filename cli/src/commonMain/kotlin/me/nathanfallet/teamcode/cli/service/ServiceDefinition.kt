@@ -36,6 +36,15 @@ internal fun serviceLogPath(config: String) = config.toPath().parent!!.resolve("
 internal fun serviceStopPath(config: String) = config.toPath().parent!!.resolve("service.stop").toString()
 internal fun randomHex(bytes: Int) = secureRandomBytes(bytes).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
 
+internal fun serviceXml(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
+
+/** systemd's executable token has stricter escaping rules than subsequent arguments. */
+internal fun systemdCommand(arguments: List<String>): String {
+    fun quote(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%").replace("$", "$$") + "\""
+    val values = if (arguments.first().any { it in setOf('\'', '"', '\\', '$') }) listOf("/usr/bin/env", "--") + arguments else arguments
+    return values.joinToString(" ", transform = ::quote)
+}
+
 internal fun loadService(config: String): ServiceSettings? {
     val path = servicePath(config).toPath()
     val meta = FileSystem.SYSTEM.metadataOrNull(path) ?: return null
@@ -46,14 +55,11 @@ internal fun loadService(config: String): ServiceSettings? {
 }
 
 internal fun serviceDefinition(settings: ServiceSettings): String {
-    fun xml(value: String) = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
-    fun unit(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%").replace("$", "$$") + "\""
+    fun xml(value: String) = serviceXml(value)
     val arguments = listOf(settings.executable, "service", "serve", "--config", settings.config)
     // systemd rejects quotes/backslashes in the executable token even after unquoting.
     // env execs the absolute path as an argument, preserving PID and literal $ expansion.
     // Keep existing ordinary registrations byte-compatible with ownsRegistration().
-    val linuxArguments = if (settings.os == "linux" && settings.executable.any { it in setOf('\'', '"', '\\', '$') })
-        listOf("/usr/bin/env", "--") + arguments else arguments
     return if (settings.os == "windows") """
         <?xml version="1.0" encoding="UTF-16"?>
         <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -95,7 +101,7 @@ internal fun serviceDefinition(settings: ServiceSettings): String {
 
         [Service]
         Type=exec
-        ExecStart=${linuxArguments.joinToString(" ", transform = ::unit)}
+        ExecStart=${systemdCommand(arguments)}
         Restart=on-failure
         RestartSec=30
         TimeoutStopSec=660

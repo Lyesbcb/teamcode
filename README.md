@@ -81,6 +81,10 @@ Administrators can configure ordered model replacements and fallbacks in **Dashb
 
 After login, `teamcode service install` starts a local proxy automatically at user login on macOS, Linux and Windows. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Native Windows Task Scheduler acceptance has passed; actual workstation reboot/logon checks and startup before login remain planned. See the [Windows workstation guide](docs/windows.md).
 
+## Native updates
+
+Managed installations support signed `teamcode update` and offline `teamcode update --rollback`. Automatic installation is off by default; opt in with `teamcode update --automatic on`, inspect it with `--automatic status`, or disable it with `--automatic off`. A separate current-user job uses the existing installer and defers activation while an agent holds its activity lease. Notifications are configured independently with `--notifications on/off/status`. See [automatic behavior and platform evidence](docs/automatic-updates.md). Public versioned releases remain pending until V1 acceptance.
+
 ## Try the transport fixture
 
 Build with JDK 21 using the checked-in Gradle wrapper:

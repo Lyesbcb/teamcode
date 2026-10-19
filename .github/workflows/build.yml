@@ -10,8 +10,12 @@ on:
         description: 'Run all five native platforms and signed installation acceptance (paid macOS/Windows runners)'
         type: boolean
         default: false
+      validation_version:
+        description: 'Optional exact unprefixed version for full pre-tag validation; no tag/release is created'
+        type: string
+        default: ''
 env:
-  ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || '0.1.0-SNAPSHOT' }}
+  ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.full_validation && inputs.validation_version) || '0.1.0-SNAPSHOT' }}
   TEAMCODE_INSTALLATION_VERSION: 0.0.0-installation.g${{ github.sha }}
 permissions:
   contents: read
@@ -488,6 +492,15 @@ jobs:
       - name: Exercise the generated bootstrap on the actual native target
         shell: bash
         run: python scripts/smoke-bootstrap.py --bundle dist
+      - name: Exercise the independent automatic update job
+        shell: bash
+        env:
+          INSTALLATION_TARGET: ${{ matrix.target }}
+        run: |
+          suffix=""
+          if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
+          binary="installation-fixtures/second/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}-${INSTALLATION_TARGET}${suffix}"
+          python scripts/smoke-automatic-updates.py --binary "$binary" --first-bundle installation-fixtures/first --second-bundle installation-fixtures/second
   release:
     timeout-minutes: 10
     if: github.event_name == 'push' && github.ref_type == 'tag'

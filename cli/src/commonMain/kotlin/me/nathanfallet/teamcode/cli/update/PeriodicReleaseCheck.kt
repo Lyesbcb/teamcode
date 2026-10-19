@@ -24,7 +24,7 @@ private data class ReleaseNotifications(val schemaVersion: Int = 1, val enabled:
 
 @Serializable
 private data class CachedReleaseCheck(val schemaVersion: Int = 1, val checkedAtMillis: Long,
-    val manifest: String? = null, val signature: String? = null) {
+    val manifest: String? = null, val signature: String? = null, val successfulObservation: Boolean = false) {
     init {
         require(schemaVersion == 1 && checkedAtMillis >= 0)
         require((manifest == null) == (signature == null))
@@ -54,37 +54,42 @@ internal class PeriodicReleaseCheck(
         writePrivateFile(policy.toString(), Serialization.json.encodeToString(ReleaseNotifications.serializer(), ReleaseNotifications(enabled = enabled)))
     }
 
-    suspend fun check(report: (String) -> Unit = {}, fetch: suspend () -> ReleaseCheck?): ReleaseCheck? {
-        if (!notificationsEnabled()) return null
+    suspend fun check(report: (String) -> Unit = {}, forInstallation: Boolean = false, fetch: suspend () -> ReleaseCheck?): ReleaseCheck? {
+        if (!forInstallation && !notificationsEnabled()) return null
         validatePrivateInstallationPath(paths.root.toString(), directory = true)
         val acquired = acquireInstallationLock(lock.toString(), exclusive = true)
-        if (acquired == null) return readCache()?.let(::verified)
+        if (acquired == null) {
+            val previous = readCache() ?: return null
+            val instant = now()
+            return previous.takeIf { !forInstallation || (it.successfulObservation && instant >= it.checkedAtMillis &&
+                instant - it.checkedAtMillis < DAY_MILLIS) }?.let(::verified)
+        }
         acquired.use {
             val previous = readCache()
             val instant = now()
             require(instant >= 0)
             // A backwards wall clock is stale, rather than suppressing checks indefinitely.
             if (previous != null && instant >= previous.checkedAtMillis && instant - previous.checkedAtMillis < DAY_MILLIS)
-                return verified(previous)
+                return previous.takeIf { !forInstallation || it.successfulObservation }?.let(::verified)
             val updated = try {
                 // Only our own deadline becomes an unavailable check; caller cancellation propagates.
                 val fetched = withTimeoutOrNull(5_000) { Fetched(fetch()) }
                     ?: throw CliOperationException("release_check_timeout")
                 val metadata = fetched.value?.metadata
-                if (metadata == null) CachedReleaseCheck(checkedAtMillis = instant) else {
+                if (metadata == null) CachedReleaseCheck(checkedAtMillis = instant, successfulObservation = true) else {
                     val snapshot = DownloadedReleaseMetadata(metadata.manifest.copyOf(), metadata.signature.copyOf())
                     val release = verifier.verify(snapshot.manifest, snapshot.signature)
                     if (release.manifest.version != fetched.value.release.manifest.version) throw CliOperationException("release_version_mismatch")
                     CachedReleaseCheck(checkedAtMillis = instant,
-                        manifest = snapshot.manifest.toByteString().base64(), signature = snapshot.signature.toByteString().base64())
+                        manifest = snapshot.manifest.toByteString().base64(), signature = snapshot.signature.toByteString().base64(), successfulObservation = true)
                 }
             } catch (error: CancellationException) { throw error }
             catch (_: Exception) {
                 report("Release check unavailable; continuing with the current installation.")
-                previous?.copy(checkedAtMillis = instant) ?: CachedReleaseCheck(checkedAtMillis = instant)
+                previous?.copy(checkedAtMillis = instant, successfulObservation = false) ?: CachedReleaseCheck(checkedAtMillis = instant)
             }
             writePrivateFile(cache.toString(), Serialization.json.encodeToString(CachedReleaseCheck.serializer(), updated))
-            return verified(updated)
+            return updated.takeIf { !forInstallation || it.successfulObservation }?.let(::verified)
         }
     }
 

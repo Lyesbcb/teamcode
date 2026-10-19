@@ -8,7 +8,7 @@ The pipeline generates a [PowerShell installer](bootstrap.md) for the signed Win
 
 ## Install a tested development build
 
-Open a successful [Build workflow run](https://github.com/nathanfallet/teamcode/actions/workflows/build.yml) and download its `teamcode-windows-x64` artifact. It is uploaded only after that run's Windows acceptance test passes. Extract `teamcode.exe` and keep it at a stable location, for example `%LOCALAPPDATA%\TeamCode\bin\teamcode.exe`. These are development builds; versioned releases and automatic updates are still planned.
+Open a successful [Build workflow run](https://github.com/nathanfallet/teamcode/actions/workflows/build.yml) and download its `teamcode-windows-x64` artifact. It is uploaded only after that run's Windows acceptance test passes. Extract `teamcode.exe` and keep it at a stable location, for example `%LOCALAPPDATA%\TeamCode\bin\teamcode.exe`. These are development builds; versioned publication remains pending. Managed signed updates and the new [opt-in user update job](automatic-updates.md) have separate acceptance requirements; actual Windows automatic-job/runtime evidence is still required.
 
 In a regular PowerShell session:
 
