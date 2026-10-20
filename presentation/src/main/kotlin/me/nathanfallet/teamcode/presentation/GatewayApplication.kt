@@ -134,6 +134,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     (if (team != null && skills != null) listOf("team.skills.v1") else emptyList()) +
                     (if (team != null && variants != null) listOf("team.variants.v1") else emptyList()) +
                     (if (team != null && cloudSessions != null && cloudAdmin != null) listOf("cloud.sessions.v1") else emptyList()) +
+                    (if (team != null && cloudSessions != null && cloudAdmin != null && cloudRunner != null) listOf("cloud.environment.v1") else emptyList()) +
                     (if (team != null && mcp != null) listOf("mcp.gateway.v1") else emptyList())))
         }
         get<StatusResource> {
