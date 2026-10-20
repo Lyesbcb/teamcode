@@ -90,6 +90,8 @@ class McpGatewayAcceptanceTest {
                 adminVariants.assign(admin, bob.principal.member.id, readOnly.id)
                 val inferenceKey = SqlServiceKeyService(a).create(admin, bob.principal.member.id, "Inference only", setOf(ServiceScope.INFERENCE), 1)
                 val mcpKey = SqlServiceKeyService(a).create(admin, bob.principal.member.id, "MCP agent", setOf(ServiceScope.MCP), 1)
+                // The scopes of a cloud execution's `tcex_` credential: its owner's inference, MCP servers and skills, nothing else.
+                val executionKey = SqlServiceKeyService(a).create(admin, bob.principal.member.id, "Execution", EXECUTION_SCOPES.toSet(), 1)
 
                 val trackerCalls = ConcurrentLinkedQueue<String>(); val wikiCalls = ConcurrentLinkedQueue<String>()
                 testApplication {
@@ -104,7 +106,7 @@ class McpGatewayAcceptanceTest {
                         override suspend fun status() = GatewaySnapshot("test", 0, 0)
                         override suspend fun forward(request: GenerationRequest, receive: suspend (GenerationHead, kotlinx.coroutines.flow.Flow<ByteArray>) -> Unit) = error("unused")
                     }
-                    application { configureGateway(inference, team = team, publicOrigin = "http://localhost", variants = SqlVariantService(a, cipher), mcp = gateway, mcpAccess = SqlMcpAccessStore(a)) }
+                    application { configureGateway(inference, team = team, publicOrigin = "http://localhost", variants = SqlVariantService(a, cipher), mcp = gateway, mcpAccess = SqlMcpAccessStore(a), skills = me.nathanfallet.teamcode.domain.skills.SkillCatalog(me.nathanfallet.teamcode.infrastructure.database.SqlSkillStore(a))) }
                     val bodies = mutableListOf<String>()
                     var nextId = 1
                     suspend fun rpc(token: String, server: String, method: String, params: JsonObject? = null): Pair<HttpStatusCode, JsonObject?> {
@@ -146,6 +148,9 @@ class McpGatewayAcceptanceTest {
                     assertEquals(listOf("tracker" to "/mcp/tracker", "wiki" to "/mcp/wiki"), servers(alice.token))
                     assertEquals(listOf("tracker" to "/mcp/tracker"), servers(bob.token))
                     assertEquals(listOf("tracker" to "/mcp/tracker"), servers(mcpKey.accessToken), "An mcp-scoped key lists its owner's servers")
+                    assertEquals(listOf("tracker" to "/mcp/tracker"), servers(executionKey.accessToken), "A cloud execution reaches its owner's servers")
+                    assertEquals(HttpStatusCode.OK, client.get("/api/v1/skill-delivery") { bearerAuth(executionKey.accessToken) }.status, "and the owner's delivered skills")
+                    for (path in listOf("/api/v1/mcp/usage", "/api/v1/skills")) assertEquals(HttpStatusCode.Forbidden, client.get(path) { bearerAuth(executionKey.accessToken) }.status, path)
                     assertEquals(emptyList(), servers(carol.token))
                     assertEquals(listOf("delete_issue", "search", "whoami"), tools(alice.token, "tracker"))
                     assertEquals(listOf("page"), tools(alice.token, "wiki"), "Each source keeps its own endpoint and upstream tool names")
