@@ -1,5 +1,11 @@
 # Implementation status
 
+## 0.1.0 published
+
+[Release 0.1.0](https://github.com/nathanfallet/teamcode/releases/tag/0.1.0) is public, stable and not a draft. Its exact unprefixed tag resolves to `b191c0475f9dcb999c8782ba882558dcfc73b211`. [Publication workflow 39344895836](https://github.com/nathanfallet/teamcode/actions/runs/39344895836) completed successfully: JVM/replica/Helm checks, actual native runtimes and signed installation/bootstrap/automatic-update acceptance on all five targets, multi-architecture image and release publication. Eleven assets include the five executables, both installers, signed metadata/checksums and `teamcode-0.1.0.tgz`. Docker image `nathanfallet/teamcode:0.1.0` has Linux amd64/arm64; ordinary CI 39344892445 also passed and published `latest`.
+
+Post-publication acceptance passes (`/tmp/teamcode-0.1.0-public-install.log`): anonymous downloads, exact manifest/source/publisher signature, actual isolated macOS ARM64 bootstrap, native version and signature verification, public release check, no authentication created, exact chart version and bundled/external database rendering. The temporary installation was removed. No user configuration, service or Kubernetes cluster was changed. Broader workstation/load/provider validations remain the explicitly deferred [unfinished V1 brief](v2-validation-handoff.md); the [testing playbook](testing.md) describes reproduction.
+
 ## Release acceptance follow-up
 
 Full candidate [39342715797](https://github.com/nathanfallet/teamcode/actions/runs/39342715797) passed JVM/replica/Helm checks, all five native runtime suites, bundle/signature verification and native signed installation/service switching. Publication remained blocked: the Windows bootstrap HTTP fixture used a .NET enum member unavailable in Windows PowerShell 5.1, and repeated Linux automatic-update disablement lost the link to a custom-path timer. The fixture now uses numeric HTTP 429. The scheduler relinks its byte-verified owned timer before disabling it, without enabling it or stopping the running update worker; [systemctl documents that disable removes links](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#disable%20UNIT%E2%80%A6).

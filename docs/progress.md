@@ -2,7 +2,7 @@
 
 Execution scope is **V1 only**. On 2026-10-20 the owner explicitly finalized V1 as boot-startup implementation followed by tag/release `0.1.0`; remaining extended validations and operational follow-through move to V2 for another agent. See the [post-release validation handoff](v2-validation-handoff.md). Existing V2 product features remain separately owned.
 
-The end-to-end foundation works, including real Claude Max and Codex subscription requests. **V1 release delivery is being finalized.** Successful individual smoke tests do not imply that every client, fallback route or operating-system lifecycle is supported.
+The end-to-end foundation works, including real Claude Max and Codex subscription requests. **V1 release 0.1.0 is published** with native installers, a multi-architecture image and deployable chart. The [full publication workflow](https://github.com/nathanfallet/teamcode/actions/runs/39344895836) passed, followed by public-download/native-install and chart-render checks. Successful individual smoke tests do not imply that every client, fallback route or operating-system lifecycle is supported.
 
 The release delivers documented one-command native installation for every advertised macOS/Linux/Windows target, the accepted server image and a versioned Helm chart that users deploy on their own infrastructure. Built-in release workflow checks still gate publication. The owner explicitly deferred the additional real-client/load/workstation and operational acceptance below to V2; it is not represented as passed. No agent-operated cluster deployment is requested.
 

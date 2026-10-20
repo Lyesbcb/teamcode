@@ -6,6 +6,8 @@ On 2026-10-20 the owner finalized V1: finish startup before login, then publish 
 
 This brief covers only unfinished implementation or validation from the original V1 scope. It is not the V2 product plan and does not assign new V2 features. Cloud sessions, centralized MCP, skills and open-source providers remain in the separate [product roadmap](roadmap.md).
 
+Baseline is now published: [0.1.0](https://github.com/nathanfallet/teamcode/releases/tag/0.1.0), source `b191c0475f9dcb999c8782ba882558dcfc73b211`. [Full publication acceptance](https://github.com/nathanfallet/teamcode/actions/runs/39344895836) passed, including five-target native runtimes and signed installation/bootstrap/automatic updates. Anonymous public-download installation was additionally verified on macOS ARM64, and the released chart renders with bundled/external MySQL. These results do not close the extended scenarios below.
+
 Start from `0.1.0`, fetch current `origin/main` and rebase the working branch before review. Other V2 agents already own separate branches/worktrees; preserve them and coordinate overlaps. Squash-merge PRs. Repository content stays English. Keep provider credentials, prompts and response bodies out of git/logs. Never stop another person's processes or Gradle daemons. Do not deploy an operator/user cluster.
 
 Use [progress](progress.md), [detailed evidence](status.md) and the [TeamClaude comparison](teamclaude-comparison.md). Exact logs in `/tmp` are local reproduction evidence, not portable release assets; reproduce assertions on your machine/runner. Successful CI proves only the scenarios its scripts execute.
