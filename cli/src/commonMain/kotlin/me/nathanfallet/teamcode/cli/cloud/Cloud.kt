@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.cli.cloud
 
 import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.command.SuspendingNoOpCliktCommand
+import com.github.ajalt.clikt.core.CliktError
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
@@ -69,6 +70,7 @@ private class CloudCreate : SuspendingCliktCommand(name = "create") {
     private val effort by option("--effort")
     private val labels by option("--label", help = "key=value; repeatable.").multiple()
     private val idle by option("--idle-minutes", help = "Idle timeout, clamped to the profile bounds.").int()
+    private val message by option("--message", help = "First message for the agent, delivered once the session is ready; - reads standard input.")
     private val onBehalfOf by option("--member", help = "Create for this member (TeamCode-On-Behalf-Of); administrators only.")
     private val idempotencyKey by option("--idempotency-key", help = "Defaults to a random key.")
     private val repositories by option("--repo", help = "[PATH=]URL[#REF]; repeatable. Replaces the profile's repositories.").multiple()
@@ -78,15 +80,22 @@ private class CloudCreate : SuspendingCliktCommand(name = "create") {
     override suspend fun run() {
         val parsed = parseLabels(labels)
         val agent = if (model != null || effort != null) CloudAgentRequest(model, effort) else null
+        val initial = message?.let { if (it == "-") generateSequence(::readlnOrNull).joinToString("\n") else it }
+        if (initial != null && initial.isBlank()) throw CliktError("The --message text is empty.")
         require(branch == null || repositories.isNotEmpty()) { "Use --branch with --repo." }
         val environment = if (repositories.isNotEmpty() || workdir != null)
             CloudEnvironmentRequest(repositories.map { parseRepository(it).copy(branch = branch) }.takeIf { it.isNotEmpty() }, workdir) else null
         val session = sdk(loadConfig()).use {
-            it.createCloudSession(CreateCloudSessionRequest(name, profile, image, agent, parsed, idle, environment), idempotencyKey ?: Uuid.random().toString(), onBehalfOf)
+            // An older server ignores unknown fields: never let it drop the message silently.
+            if (initial != null && INITIAL_MESSAGE_CAPABILITY !in it.capabilities().features)
+                throw CliktError("This server does not accept --message; create the session, then use teamcode cloud send.")
+            it.createCloudSession(CreateCloudSessionRequest(name, profile, image, agent, parsed, idle, environment, initial), idempotencyKey ?: Uuid.random().toString(), onBehalfOf)
         }
         echo(if (json) Serialization.json.encodeToString(session) else session.line())
     }
 }
+
+private const val INITIAL_MESSAGE_CAPABILITY = "cloud.sessions.initial-message.v1"
 
 private class CloudList : SuspendingCliktCommand(name = "list") {
     override fun help(context: Context) = "List your sessions, newest first (at most $MAX_LISTED)."

@@ -14,7 +14,7 @@ import org.jetbrains.exposed.v1.jdbc.*
  * Transcript, inputs, attachments and the access policy in MySQL. Writes that number events or count pending
  * inputs lock the session row first, so concurrent replicas and retried runner batches agree.
  */
-class SqlCloudConversationStore(private val database: Database) : CloudConversationStore {
+class SqlCloudConversationStore(private val database: Database) : CloudConversationStore, CloudActivitySource {
     override suspend fun now(): Long = database.query { nowMillis() }
 
     override suspend fun appendRunnerEvents(sessionId: String, epoch: Int, events: List<RunnerEvent>): RunnerEventsAck = database.query {
@@ -199,8 +199,21 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     override suspend fun detach(sessionId: String, id: String, memberId: String) = database.query {
-        CloudSessionAttachments.deleteWhere { (CloudSessionAttachments.id eq id) and (CloudSessionAttachments.sessionId eq sessionId) and (CloudSessionAttachments.memberId eq memberId) }
+        val now = nowMillis()
+        CloudSessionAttachments.update({ (CloudSessionAttachments.id eq id) and (CloudSessionAttachments.sessionId eq sessionId) and
+            (CloudSessionAttachments.memberId eq memberId) and (CloudSessionAttachments.leaseUntil greater now) }) { it[leaseUntil] = now }
         Unit
+    }
+
+    override suspend fun lastActivity(sessionId: String, now: Long): Long? = database.query {
+        // At most MAX_PENDING_INPUTS rows, on the (session_id, status, created_at) index.
+        val queued = CloudSessionInputs.createdAt.max(); val delivered = CloudSessionInputs.deliveredAt.max()
+        val inputs = CloudSessionInputs.select(queued, delivered).where {
+            (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
+        }.singleOrNull()
+        val lease = CloudSessionAttachments.leaseUntil.max()
+        val leaseEnd = CloudSessionAttachments.select(lease).where { CloudSessionAttachments.sessionId eq sessionId }.singleOrNull()?.get(lease)
+        listOfNotNull(inputs?.get(queued), inputs?.get(delivered), leaseEnd).maxOrNull()?.coerceAtMost(now)
     }
 
     override suspend fun attachments(sessionId: String, now: Long): List<CloudAttachment> = database.query {
@@ -241,7 +254,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             after = teams.lastOrNull() ?: break
             if (teams.size < 100) break
         }
-        CloudSessionAttachments.deleteWhere(limit = limit) { CloudSessionAttachments.leaseUntil less (now - DAY_MILLIS) }
+        // Ended leases are kept as long as the longest idle timeout, so idle detection still sees a recent detach.
+        CloudSessionAttachments.deleteWhere(limit = limit) { CloudSessionAttachments.leaseUntil less (now - maxOf(DAY_MILLIS, CloudIdleRules.MAX_TIMEOUT_MINUTES * 60_000L)) }
         deleted
     }
 

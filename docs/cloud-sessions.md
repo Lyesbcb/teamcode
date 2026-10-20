@@ -23,6 +23,7 @@ This page is the contract and the record of what is implemented. It follows the 
 | Opt-in `kind` smoke (`scripts/smoke-cloud-kind.py`) | Implemented (PR 2), not part of pull-request CI |
 | Ownership transfer: offers and administrator transfers, recipient rechecks, owner change at a paused boundary, revocation, settings (`cloud.transfer.v1`) | Implemented, see [transfer](#transfer) |
 | `tcex_` inference credential per execution, the runner's loopback inference proxy (`cloud.inference.v1`) | Implemented, see [inference](#inference-from-the-pod) |
+| Idle pause (turns, waiting messages and attachment leases), `initialMessage` on create (`cloud.sessions.initial-message.v1`) | Implemented, see [idle pause](#idle-pause) and [create](#create-request-and-view) |
 | Environment preparation: recipe on the profile version and the session, repositories, working directory, Git identity, setup commands, progress and failures in the lifecycle, `cloud.environment.v1` | Implemented (PR 3) |
 | Environment variables from environment variants | Interface and delivery implemented (PR 3); source planned (variants work) |
 | [GitHub access](#github-access): team GitHub App configuration, member linking (`teamcode github link`, dashboard), encrypted user-token store, serialized refresh, unlink, `GitHubAccessSource` on that store, `github.link.v1` | Implemented (PR 3b) |
@@ -78,7 +79,7 @@ Other fields: `desiredState` (`running`, `paused`, `terminated`), `failure` and 
 | `creating` | `preparing` | The runner registered for the current epoch |
 | `creating`, `preparing` | `failed` | Missing or retaining storage class, namespace no longer allowed on the cluster, image or start failure, 15-minute start timeout, failed environment preparation (`preparation_failed`), 30-minute preparation timeout, or execution lost during the first execution. The workspace is deleted right away. |
 | `preparing`, `resuming` | `ready` | The runner reported ready on a heartbeat. The agent is never reported ready earlier. |
-| `ready`, `active` | `pausing` | Desired state `paused` (explicit pause, or an accepted [transfer](#transfer); idle timeout is planned), or the runner's checkpoint arriving before the reconciler's own move |
+| `ready`, `active` | `pausing` | Desired state `paused` (explicit pause, an accepted [transfer](#transfer), or the [idle pause](#idle-pause)), or the runner's checkpoint arriving before the reconciler's own move |
 | `pausing` | `paused` | Checkpoint completed (`consistent`), or failed, missed heartbeats or 15-minute pausing deadline (`crash_consistent`) |
 | `ready`, `active`, `pausing` | `paused` | Execution lost: no heartbeat for 90 s, the pod disappeared or stopped, or the execution row is missing (`execution_missing`, after deleting any pod of the session). `crash_consistent`, and the desired state becomes `paused`, so a lost execution never restarts by itself. |
 | `paused` | `resuming` | Desired state `running` (explicit resume, or a [message](cloud-conversations.md#messages-and-interrupts) with `wake`) |
@@ -183,16 +184,18 @@ TeamCode-On-Behalf-Of: 6f1c...member-uuid
   "environment": {
     "repositories": [{ "url": "https://github.com/example/api.git", "path": "api", "ref": "main", "branch": "task-1234" }],
     "workingDirectory": "api"
-  }
+  },
+  "initialMessage": "Fix the relist retry, see task 1234."
 }
 ```
 
 - `image` must equal the profile image or match one of its `allowedImageOverrides` (`*` matches any run of characters, everything else is literal); otherwise `403 image_not_allowed`.
 - `labels`: at most 16 pairs, lowercase keys up to 63 characters, values up to 256, not secret, filterable.
-- `idleTimeoutMinutes` is clamped to the profile bounds (stored; automatic idle pause is planned with activity signals).
+- `idleTimeoutMinutes` is clamped to the profile bounds set by the administrator (`minIdleTimeoutMinutes`..`maxIdleTimeoutMinutes`, at most 1,440); the profile's `idleTimeoutMinutes` applies when it is omitted. See [idle pause](#idle-pause).
 - `agent.model` and `agent.effort` are recorded; they are checked against the member's model policy on every inference, as for local sessions.
 - `environment` (with `cloud.environment.v1`) replaces the profile's `repositories` and `workingDirectory` for this session; setup commands, required variables and the other recipe fields come from the profile only. Null fields keep the profile's values.
-- `initialMessage` is planned with messages. The server ignores unknown fields, so do not send them before the matching capability is advertised.
+- `initialMessage` (capability `cloud.sessions.initial-message.v1`): the first message for the agent, same rules as `POST .../messages` (1 to 32,000 characters, no control characters except newlines and tabs). It is queued with the session and delivered once the session is `ready`, written by the caller: an administrator creating on behalf of a member is its author, and needs the `message` permission on that member's sessions. It is part of the request digest, so a replay with the same `Idempotency-Key` queues nothing more, and a failure between the session and the message is repaired by that replay (the message wakes the session like any message, so a session paused meanwhile resumes for it; a replay whose rechecks now fail, for example a revoked `message` permission, leaves the session without it). A server with cloud sessions but without conversations refuses it with `400 initial_message_unsupported`. The creation body may be up to 256 KB.
+- The server ignores unknown fields, so do not send `environment` or `initialMessage` before the matching capability is advertised.
 
 The response is the session view: `id`, `name`, `ownerId`, `createdBy`, `state`, `phase`, `desiredState`, `generation`, `currentEpoch`, `profile {id, version}`, `image {reference, digest}`, `agent {kind, version, model, effort}`, `labels`, `activity {lastActivityAt, idleTimeoutMinutes}`, `resume`, `failure`, `resumeBlocked`, `workspaceDeletion`, `createdAt`, `updatedAt`, `pausedAt`, `expiresAt`, `terminatedReason`, `environment` (the resolved recipe). The image digest is recorded from the first running container; every later execution uses `reference@digest`, so a moved tag does not change a resumed session.
 
@@ -243,7 +246,19 @@ Each session has one PersistentVolumeClaim, `tc-ws-<session>`, created before it
 4. A failed checkpoint, missed heartbeats or the 15-minute pausing deadline force-delete the pod: `paused` with `crash_consistent`. It is never advertised as `consistent`.
 5. `POST /resume` rechecks the owner and assignment, then sets `desiredState = running`. The reconciler moves the session to `resuming`, waits for capacity, starts epoch n+1 on the same workspace with the pinned digest, and the runner's ready heartbeat makes it `ready`.
 
-Inactivity only pauses; it never deletes. Idle detection (turns, pending inputs, preparation), the idle warning and `maxTurnMinutes` are planned.
+### Idle pause
+
+A session that wants to run is paused after `idleTimeoutMinutes` without activity. Activity is:
+
+- the last turn start or end, and the moment the session became `ready` (`activity.lastActivityAt`);
+- a message or interrupt waiting for the agent (queued or delivered, not yet acknowledged), from when it was queued or last delivered: it counts once, not forever, so an input stuck on a broken runner does not keep a session running;
+- an attachment lease: a member attached with `teamcode cloud attach` (or any client holding a lease) keeps the session running, and the end of the lease (detach or expiry) counts as the last activity.
+
+Only a `ready` session is a candidate: a turn in progress (`active`), a preparation, a resume or a transfer never is. The reconciler checks on its monitoring pass (every 15 s), reads leases and inputs only when the session row already looks idle, and commits an ordinary, non-forced pause (`desiredState = paused`, audit action `cloud.session.idle_paused`), so the session checkpoints and keeps its workspace. A message with `wake` (the default) resumes it.
+
+The administrator sets the timeout per profile: the default `idleTimeoutMinutes` and the bounds a member may choose within (`minIdleTimeoutMinutes`, `maxIdleTimeoutMinutes`, 5 to 1,440 minutes). Ended attachment rows are kept as long as the longest timeout (a day), then purged with the transcripts.
+
+Inactivity only pauses; it never deletes. The idle warning and `maxTurnMinutes` are planned.
 
 ## Transfer
 
@@ -476,7 +491,7 @@ See [transcript, messages and attach](cloud-conversations.md#the-agent-in-the-po
 ## CLI
 
 ```sh
-teamcode cloud create --name TEXT --profile ID [--label K=V]... [--image REF] [--repo [PATH=]URL[#REF]]... [--branch NAME] [--workdir PATH] [--model M] [--effort E] [--idle-minutes N] [--member MEMBER_ID] [--idempotency-key KEY] [--json]
+teamcode cloud create --name TEXT --profile ID [--label K=V]... [--image REF] [--repo [PATH=]URL[#REF]]... [--branch NAME] [--workdir PATH] [--model M] [--effort E] [--idle-minutes N] [--message TEXT|-] [--member MEMBER_ID] [--idempotency-key KEY] [--json]
 teamcode cloud list [--all|--member ID] [--state STATE]... [--label K=V]... [--json]
 teamcode cloud show SESSION [--executions] [--json]
 teamcode cloud pause SESSION [--force] [--member ID]
@@ -493,7 +508,7 @@ teamcode github status [--member ID] [--json]
 teamcode github unlink [--member ID]
 ```
 
-`--member` sends `TeamCode-On-Behalf-Of` (and, for `list`, filters by owner), `--json` prints the API DTOs unchanged, and `create` sends a random idempotency key unless one is given, so a script can retry with its own. `list` follows pages up to 500 sessions. `delete` refuses without `--yes`. `--repo` (repeatable) replaces the profile's repositories, the path defaulting to the repository name; `--branch` creates that local branch in each of them. `teamcode github link` prints the verification URL and code, then waits until GitHub authorizes, the code expires or the member cancels; it points to the dashboard when the App is not configured or device flow is disabled. `--member` on `github status` and `github unlink` is for administrators. The GitHub App itself is configured on the dashboard or through the API, which keeps the client secret and private key off command lines. `logs`, `send`, `attach`, `interrupt` and the administration commands come with their features.
+`--member` sends `TeamCode-On-Behalf-Of` (and, for `list`, filters by owner), `--json` prints the API DTOs unchanged, and `create` sends a random idempotency key unless one is given, so a script can retry with its own. `list` follows pages up to 500 sessions. `delete` refuses without `--yes`. `--repo` (repeatable) replaces the profile's repositories, the path defaulting to the repository name; `--branch` creates that local branch in each of them. `create --message -` reads the message from standard input; `--message` is refused before any request when the server does not advertise `cloud.sessions.initial-message.v1`, so an older server never drops it silently. `teamcode github link` prints the verification URL and code, then waits until GitHub authorizes, the code expires or the member cancels; it points to the dashboard when the App is not configured or device flow is disabled. `--member` on `github status` and `github unlink` is for administrators. The GitHub App itself is configured on the dashboard or through the API, which keeps the client secret and private key off command lines. `logs`, `send`, `attach`, `interrupt` and the administration commands come with their features.
 
 ## Pull request sequence
 
@@ -508,7 +523,7 @@ teamcode github unlink [--member ID]
 | 5 | Messages, interrupt, idle pause, attach | `cloud.messages.v1`, `cloud.attach.v1` |
 | 6 | Transfer and its settings (implemented) | `cloud.transfer.v1` |
 | 7 | `tcex_` inference credentials and the runner's loopback proxy (implemented) | `cloud.inference.v1` |
-| 8 | Idle pause with attachment leases, `initialMessage` on creation | - |
+| 8 | Idle pause with attachment leases, `initialMessage` on creation (implemented) | `cloud.sessions.initial-message.v1` |
 | 9 | The agent in its own container and UID; credentials over a tmpfs socket | - |
 | Cross-cutting | V2 keys (`cloud:*`, `admin:cloud`), MCP gateway and skills in the runner | - |
 
@@ -531,6 +546,8 @@ teamcode github unlink [--member ID]
 - `CloudInferencePersistenceTest` (real MySQL 8.4, two pools): migration drift; no credential before the runner registered or for another epoch; a `tcex_` token for the session owner with the `inference` scope only, accepted by the gateway's revalidation and refused for interactive and usage actions; only its digest stored; absent from service keys; two renewals drop the oldest; a draining execution still gets one; all of them revoked when the pause ends the execution, and by a lost execution; the purge of expired credentials; none for a disabled member, whose credentials stop authenticating; revoked at once by deletion. Removing the revocation from the session store makes it fail (checked).
 - `CloudTransferPersistenceTest` (inference): epoch 1's credential authenticates as the former owner and is gone after the boundary; epoch 2's authenticates as the recipient.
 - `CloudRoutesTest` (inference): `cloud.inference.v1`; no credential without the pod token, for a member credential, for another epoch or before registration; `no-store`; refused once the session is paused.
+- `CloudIdlePersistenceTest` (real MySQL 8.4, two pools): an invalid initial message creates nothing; the initial message is queued once with the session, a replayed creation queues nothing more, an administrator creating on behalf of a member is its author; nothing is delivered while preparing, then it is delivered once ready; a delivered, unacknowledged message, then a live attachment lease, then a recent detach each keep the session running past its timeout, while an input queued longer ago than the timeout does not; once idle, an ordinary non-forced pause with its `cloud.session.idle_paused` journal entry, a consistent checkpoint, and a message that wakes it; ended leases kept, then purged.
+- `CloudRoutesTest` and `CloudConversationRoutesTest` (initial message): the capability only with conversations; `initial_message_unsupported` without them, creating nothing; a 32,000-character message (64 KB of UTF-8) accepted and queued; a longer one refused with no session.
 - `CloudAgentTest` (inference): the agent starts with the proxy's origin and local token, without provider variables, the runner's token path or any `tcex_` value, for Claude Code and Codex; the runner renews its credential before expiry, keeps it through a network failure while usable, and drops it when refused.
 
 - `GitHubLinkPersistenceTest` (real MySQL 8.4, two pools): the reviewed migration matches the Exposed tables; App configuration for administrators only, with optimistic versions and the client secret and key encrypted at rest (kept when omitted); a device link started on one replica and completed on the other, with the device code and the user tokens encrypted; one GitHub account per team, the unstored token revoked; access resolved for the owner only; four concurrent resolutions on two replicas spend the refresh token exactly once (removing the wait on a pending refresh makes it fail: four refreshes); a stalled refresh owner taken over after a minute, never before; a relink fencing a slower refresh owner; `bad_refresh_token` ending the link without further refreshes; unlink deleting the link and attempts and revoking the token; the journal entries.

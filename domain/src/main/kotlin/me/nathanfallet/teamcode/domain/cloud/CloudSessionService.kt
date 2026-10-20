@@ -12,7 +12,12 @@ class CloudSessionService(
     private val transition: TransitionCloudSessionUseCase = TransitionCloudSessionUseCase(store),
     /** The team access policy; null (tests of the lifecycle alone) lets every member create their own sessions. */
     private val access: CloudAccessService? = null,
+    /** Queues `initialMessage`; null where the server has no conversations (creation then refuses one). */
+    private val initialMessages: CloudInitialMessages? = null,
 ) {
+    /** Whether creation accepts `initialMessage`; the server advertises `cloud.sessions.initial-message.v1` from it. */
+    val acceptsInitialMessage: Boolean get() = initialMessages != null
+
     /** Resolves `TeamCode-On-Behalf-Of`. Only an interactive administrator may name another member. */
     suspend fun actor(principal: Principal, onBehalfOf: String?): CloudActor {
         principal.requireReady()
@@ -34,6 +39,12 @@ class CloudSessionService(
         if (!owner.role.isAdministrator && owner.id !in profile.assignedMemberIds) throw missingProfile()
         // The owner must hold `create` under the access policy, also when an administrator creates on their behalf.
         access?.require(principal.teamId, owner, owner.id, CloudPermission.CREATE)
+        draft.initialMessage?.let { text ->
+            if (initialMessages == null) throw TeamFailure("initial_message_unsupported", 400, "This server does not accept an initial message.")
+            CloudConversationRules.validateMessage(text)
+            // The caller writes the message, as on the messages route: they need `message` on the owner's sessions.
+            access?.require(principal.teamId, principal.member, owner.id, CloudPermission.MESSAGE)
+        }
         val spec = profile.spec
         val image = draft.image?.also { requested ->
             if (requested != spec.image && spec.allowedImageOverrides.none { matchesImagePattern(it, requested) })
@@ -58,7 +69,14 @@ class CloudSessionService(
             createdAt = now, updatedAt = now,
             environment = CloudEnvironmentRules.merge(spec.environment, draft.environment).also(CloudEnvironmentRules::validate),
         )
-        return store.insert(session, actor, idempotency, settings.maxRetainedSessionsPerMember)
+        val outcome = store.insert(session, actor, idempotency, settings.maxRetainedSessionsPerMember)
+        // Queued after the session commits, idempotently: if this step fails, the client's retry with the same
+        // Idempotency-Key replays the creation and queues the message then.
+        draft.initialMessage?.let { text ->
+            val created = when (outcome) { is CloudCreateOutcome.Created -> outcome.session; is CloudCreateOutcome.Replayed -> outcome.session }
+            initialMessages?.queue(principal, created, text)
+        }
+        return outcome
     }
 
     suspend fun list(principal: Principal, query: CloudSessionQuery): CloudSessionPage {

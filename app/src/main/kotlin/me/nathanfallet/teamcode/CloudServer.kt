@@ -45,7 +45,8 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     private val conversationStore = SqlCloudConversationStore(database)
     // Groups do not exist in TeamCode yet; a group directory plugs in here when they land.
     private val access = CloudAccessService(conversationStore, store, CloudGroupDirectory.NONE)
-    val sessions = CloudSessionService(store, access = access)
+    private val conversationService = CloudConversationService(conversationStore, store, access)
+    val sessions = CloudSessionService(store, access = access, initialMessages = conversationService)
 
     // Transfers recheck the recipient with the same rules as creation, plus model policy and quota. Environment
     // variables, MCP servers and skills reach cloud sessions in other branches; their assignment checks join this list.
@@ -56,7 +57,7 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     private val reconciler = ReconcileCloudSessionsUseCase(store, cluster, onError = { session, error ->
         // Class and HTTP status only: messages from the cluster or the driver may echo request content.
         System.err.println("TeamCode cloud reconciliation failed for session $session (${describe(error)}); retrying.")
-    }, transfers = CompleteCloudTransferUseCase(store, transferStore, cluster, recipients))
+    }, transfers = CompleteCloudTransferUseCase(store, transferStore, cluster, recipients), activity = conversationStore)
     private val garbage = CollectCloudGarbageUseCase(store, cluster)
     val admin = CloudAdministrationService(adminStore, cluster)
     private val inferenceCredentials = SqlCloudInferenceCredentialStore(database)
@@ -66,7 +67,6 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     val runner = CloudRunnerChannel(RunnerChannelUseCase(store, variables = CloudVariableSource.NONE, github = ResolveGitHubAccessUseCase(githubStore, githubStore, githubClient)),
         AuthenticateRunnerUseCase(store, cluster), RunnerInferenceUseCase(store, inferenceCredentials))
 
-    private val conversationService = CloudConversationService(conversationStore, store, access)
     val conversation = CloudConversation(conversationService, access, RunnerConversationUseCase(store, conversationStore))
 
     fun launch(scope: CoroutineScope) {

@@ -141,6 +141,7 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     (if (team != null && forecasts != null) listOf("capacity.forecasts.v1", "capacity.forecasts.live.v1") else emptyList()) +
                     (if (team != null && skills != null) listOf("team.skills.v1") else emptyList()) +
                     (if (team != null && variants != null) listOf("team.variants.v1") else emptyList()) +
+                    (if (team != null && cloudSessions?.acceptsInitialMessage == true) listOf("cloud.sessions.initial-message.v1") else emptyList()) +
                     (if (team != null && cloudSessions != null && cloudAdmin != null) listOf("cloud.sessions.v1") else emptyList()) +
                     (if (team != null && cloudSessions != null && cloudAdmin != null && cloudRunner != null) listOf("cloud.environment.v1") else emptyList()) +
                     (if (team != null && cloudSessions != null && cloudRunner != null && cloudConversation != null) listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1") else emptyList()) +
