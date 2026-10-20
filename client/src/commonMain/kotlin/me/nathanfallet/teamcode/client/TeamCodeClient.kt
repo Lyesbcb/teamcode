@@ -13,6 +13,7 @@ import io.ktor.client.plugins.resources.get
 import io.ktor.client.request.*
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.readRemaining
 import kotlinx.io.readByteArray
 import io.ktor.http.*
@@ -287,6 +288,104 @@ class TeamCodeClient(
         return response
     }
 
+    // Transcript, messages and attachments (`cloud.transcript.v1`, `cloud.messages.v1`, `cloud.attach.v1`).
+    suspend fun cloudEvents(id: String, after: Long? = null, before: Long? = null, limit: Int = 100): CloudEventPageView {
+        identifier(id)
+        require(limit in 1..200 && (after == null || before == null))
+        return coded(HttpMethod.Get, "/api/v1/cloud/sessions/$id/events", null as Unit?) {
+            url { after?.let { parameters.append("after", it.toString()) }; before?.let { parameters.append("before", it.toString()) }; parameters.append("limit", limit.toString()) }
+        }
+    }
+    /**
+     * Follows the session's event stream after [after], calling [onEvent] for each event in order. Returns
+     * [CloudStreamEnd.ENDED] when the session ended and every event was sent, [CloudStreamEnd.DENIED] when the server
+     * revoked access mid-stream; throws on a network failure, so the caller reconnects from its last sequence.
+     */
+    suspend fun followCloudEvents(id: String, after: Long, onEvent: suspend (CloudEventView) -> Unit): CloudStreamEnd {
+        identifier(id)
+        require(after >= 0)
+        return http.prepareGet("$origin/api/v1/cloud/sessions/$id/events/stream") {
+            authenticate()
+            header("Last-Event-ID", after.toString())
+            header(HttpHeaders.Accept, "text/event-stream")
+            // Keep-alives arrive every 15 s; a silent connection for 60 s is dead.
+            timeout { requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS; socketTimeoutMillis = 60_000 }
+        }.execute { response ->
+            if (!response.status.isSuccess()) throw TeamCodeException(response.status.value, "TeamCode returned HTTP ${response.status.value}.", errorCode(response))
+            readEventStream(response, onEvent)
+        }
+    }
+    private suspend fun readEventStream(response: HttpResponse, onEvent: suspend (CloudEventView) -> Unit): CloudStreamEnd {
+        val channel = response.bodyAsChannel()
+        var event: String? = null
+        val data = StringBuilder()
+        while (true) {
+            val line = channel.readUTF8Line(MAX_SSE_LINE) ?: throw TeamCodeException(0, "The event stream closed.")
+            when {
+                line.isEmpty() -> {
+                    when (event) {
+                        "end" -> return CloudStreamEnd.ENDED
+                        "denied" -> return CloudStreamEnd.DENIED
+                        null -> Unit
+                        else -> if (data.isNotEmpty()) onEvent(Serialization.json.decodeFromString<CloudEventView>(data.toString()))
+                    }
+                    event = null; data.clear()
+                }
+                line.startsWith(":") -> Unit
+                line.startsWith("event:") -> event = line.removePrefix("event:").trim()
+                line.startsWith("data:") -> { if (data.isNotEmpty()) data.append('\n'); data.append(line.removePrefix("data:").removePrefix(" ")) }
+            }
+        }
+    }
+    /** [idempotencyKey] makes a retry return the first acknowledgement instead of sending the message twice. */
+    suspend fun sendCloudMessage(id: String, input: SendCloudMessageRequest, idempotencyKey: String? = null): CloudInputView {
+        identifier(id)
+        idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
+        return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/messages", input) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
+    }
+    suspend fun interruptCloudSession(id: String, idempotencyKey: String? = null): CloudInputView {
+        identifier(id)
+        idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
+        return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/interrupt", null as Unit?) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
+    }
+    suspend fun cloudInputs(id: String, before: String? = null, limit: Int = 50): CloudInputPageView {
+        identifier(id); before?.let(::identifier); require(limit in 1..200)
+        return coded(HttpMethod.Get, "/api/v1/cloud/sessions/$id/messages", null as Unit?) { url { before?.let { parameters.append("before", it) }; parameters.append("limit", limit.toString()) } }
+    }
+    suspend fun cloudInput(id: String, inputId: String): CloudInputView { identifier(id); identifier(inputId); return coded(HttpMethod.Get, "/api/v1/cloud/sessions/$id/messages/$inputId", null as Unit?) }
+    suspend fun attachCloudSession(id: String): CloudAttachmentView { identifier(id); return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/attachments", null as Unit?) }
+    suspend fun renewCloudAttachment(id: String, attachmentId: String): CloudAttachmentView {
+        identifier(id); identifier(attachmentId)
+        return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/attachments/$attachmentId/renew", null as Unit?)
+    }
+    suspend fun detachCloudSession(id: String, attachmentId: String) {
+        identifier(id); identifier(attachmentId)
+        val response = http.delete("$origin/api/v1/cloud/sessions/$id/attachments/$attachmentId") { authenticate(); timeout { requestTimeoutMillis = 10_000 } }
+        if (!response.status.isSuccess()) throw TeamCodeException(response.status.value, "TeamCode returned HTTP ${response.status.value}.", errorCode(response))
+    }
+    suspend fun cloudAccessPolicy(): CloudAccessPolicyView = coded(HttpMethod.Get, "/api/v1/cloud/access", null as Unit?)
+    suspend fun saveCloudAccessPolicy(policy: CloudAccessPolicyView): CloudAccessPolicyView = coded(HttpMethod.Put, "/api/v1/cloud/access", policy)
+    /** Agent side of the runner channel; construct the client with the pod's projected token. */
+    suspend fun runnerAgent(input: RunnerAgentRequest): RunnerAgentView = coded(HttpMethod.Post, "/api/v1/cloud/runner/agent", input)
+    suspend fun runnerEvents(input: RunnerEventsRequest): RunnerEventsAckView = coded(HttpMethod.Post, "/api/v1/cloud/runner/events", input)
+    suspend fun runnerInputs(input: RunnerInputsRequest): RunnerInputsView =
+        coded(HttpMethod.Post, "/api/v1/cloud/runner/inputs", input) { timeout { requestTimeoutMillis = input.waitMillis + 30_000 } }
+    suspend fun runnerAcknowledge(input: RunnerInputAckRequest) { coded<Unit, RunnerInputAckRequest>(HttpMethod.Post, "/api/v1/cloud/runner/inputs/ack", input) }
+
+    /** Failures carry the server's error code (for example `cloud_permission_denied`), never its message. */
+    private suspend inline fun <reified R, reified B> coded(method: HttpMethod, path: String, body: B?, crossinline configure: HttpRequestBuilder.() -> Unit = {}): R {
+        val response = http.request("$origin$path") {
+            this.method = method; authenticate(); timeout { requestTimeoutMillis = 30_000 }
+            if (body != null) { contentType(ContentType.Application.Json); setBody(body) }
+            configure()
+        }
+        if (!response.status.isSuccess()) throw TeamCodeException(response.status.value, "TeamCode returned HTTP ${response.status.value}.", errorCode(response))
+        return if (R::class == Unit::class) Unit as R else response.body()
+    }
+    private suspend fun errorCode(response: HttpResponse): String? =
+        try { response.body<ApiError>().error.type.takeIf { Regex("[a-z_]{1,64}").matches(it) } }
+        catch (error: CancellationException) { throw error } catch (_: Exception) { null }
+
     private suspend inline fun <reified R> request(path: String, method: HttpMethod, timeoutMillis: Long = 10_000): R {
         val response = http.request("$origin$path") { this.method = method; authenticate(); timeout { requestTimeoutMillis = timeoutMillis } }
         checkResponse(response)
@@ -415,6 +514,7 @@ class TeamCodeClient(
 
     companion object {
         val FORWARDED_HEADERS: Set<String> = me.nathanfallet.teamcode.api.InferenceHeaders.names
+        private const val MAX_SSE_LINE = 256 * 1024
         /** MCP variant target names, which are also the last segment of the gateway's `/mcp/<server>` endpoints. */
         val MCP_SERVER_NAME = Regex("[a-z0-9][a-z0-9._-]{0,63}")
         private const val MCP_RESPONSE_LIMIT = 65 * 1024 * 1024 // The largest gateway response limit plus its JSON-RPC envelope.
@@ -423,5 +523,7 @@ class TeamCodeClient(
 
 class TeamCodeException(val statusCode: Int, message: String, val code: String? = null) : Exception(message)
 
+/** How a followed event stream ended without a network failure. */
+enum class CloudStreamEnd { ENDED, DENIED }
 /** A gateway MCP response relayed as is: HTTP status and JSON body (empty for an accepted notification). */
 class McpRelayResponse(val status: Int, val body: ByteArray)

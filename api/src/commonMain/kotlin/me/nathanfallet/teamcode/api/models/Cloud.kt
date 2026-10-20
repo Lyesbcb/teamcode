@@ -176,6 +176,8 @@ data class CloudSettingsView(
     val failedWorkspaceRetentionDays: Int,
     val maxRunningSessionsPerMember: Int,
     val maxRetainedSessionsPerMember: Int,
+    /** Days transcript events and finished messages are kept; null keeps them indefinitely. */
+    val transcriptRetentionDays: Int?,
 )
 
 object CloudHeaders {

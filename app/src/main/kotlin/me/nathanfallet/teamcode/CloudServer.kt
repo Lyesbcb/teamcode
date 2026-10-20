@@ -10,11 +10,13 @@ import me.nathanfallet.teamcode.infrastructure.cloud.KubernetesClusterPort
 import me.nathanfallet.teamcode.infrastructure.cloud.KubernetesPodOptions
 import me.nathanfallet.teamcode.infrastructure.database.Database
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudAdminStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlCloudConversationStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudSessionStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlGitHubStore
 import me.nathanfallet.teamcode.infrastructure.github.GitHubAppClient
 import me.nathanfallet.teamcode.infrastructure.database.SqlScheduledWork
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
+import me.nathanfallet.teamcode.presentation.CloudConversation
 import me.nathanfallet.teamcode.presentation.CloudRunnerChannel
 
 /**
@@ -41,7 +43,10 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     private val githubStore = SqlGitHubStore(database, cipher)
     private val githubClient = GitHubAppClient()
 
-    val sessions = CloudSessionService(store)
+    private val conversationStore = SqlCloudConversationStore(database)
+    // Groups do not exist in TeamCode yet; a group directory plugs in here when they land.
+    private val access = CloudAccessService(conversationStore, store, CloudGroupDirectory.NONE)
+    val sessions = CloudSessionService(store, access = access)
     val admin = CloudAdministrationService(adminStore, cluster)
     /** Members' GitHub App links; their tokens are used only by the members' own cloud sessions. */
     val github = GitHubLinkService(githubStore, githubStore, githubClient)
@@ -49,7 +54,28 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     val runner = CloudRunnerChannel(RunnerChannelUseCase(store, variables = CloudVariableSource.NONE, github = ResolveGitHubAccessUseCase(githubStore, githubStore, githubClient)),
         AuthenticateRunnerUseCase(store, cluster))
 
+    private val conversationService = CloudConversationService(conversationStore, store, access)
+    val conversation = CloudConversation(conversationService, access, RunnerConversationUseCase(store, conversationStore))
+
     fun launch(scope: CoroutineScope) {
+        scope.launch {
+            // Messages sent while a session was pausing wake it once paused; inputs of ended sessions are cancelled.
+            while (isActive) {
+                try { conversationService.wakePending(); conversationStore.cancelEnded(50) }
+                catch (error: CancellationException) { throw error }
+                catch (error: Exception) { System.err.println("TeamCode cloud message delivery is temporarily unavailable (${describe(error)}).") }
+                delay(5_000)
+            }
+        }
+        scope.launch {
+            while (isActive) {
+                try { work.runDue("cloud-transcript-retention", intervalMillis = 10 * 60_000, timeoutMillis = 120_000) { conversationStore.purgeTranscripts(1_000) } }
+                catch (_: TimeoutCancellationException) { System.err.println("TeamCode cloud transcript retention deadline exceeded.") }
+                catch (error: CancellationException) { throw error }
+                catch (error: Exception) { System.err.println("TeamCode cloud transcript retention is temporarily unavailable (${describe(error)}).") }
+                delay(60_000)
+            }
+        }
         scope.launch {
             while (isActive) {
                 val claimed = try { reconciler(replica) }
