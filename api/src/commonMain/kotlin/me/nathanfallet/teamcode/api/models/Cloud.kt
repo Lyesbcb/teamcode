@@ -79,6 +79,8 @@ data class CloudSessionView(
     /** When a paused session's workspace will be deleted, or when a failed session's workspace is deleted. */
     val expiresAt: Long? = null,
     val terminatedReason: String? = null,
+    /** The accepted transfer the session is moving toward (`cloud.transfer.v1`); null otherwise. */
+    val transferId: String? = null,
     val environment: CloudEnvironmentView = CloudEnvironmentView(),
 )
 @Serializable
@@ -112,6 +114,8 @@ data class CloudExecutionView(
     val endedAt: Long? = null,
     val exitReason: String? = null,
     val checkpoint: String? = null,
+    /** The member this execution ran (and was charged) for; absent for executions recorded before transfers existed. */
+    val ownerId: String? = null,
 )
 
 @Serializable
@@ -169,7 +173,11 @@ class SaveCloudClusterRequest(
     override fun toString() = "SaveCloudClusterRequest(name=$name, apiUrl=$apiUrl, serviceAccountToken=[REDACTED])"
 }
 
-/** Persistent administrator settings; every field is required so a partial update cannot reset the others. `pausedRetentionDays = null` keeps paused workspaces indefinitely. */
+/**
+ * Persistent administrator settings; the retention and limit fields are required so a partial update cannot reset the others.
+ * `pausedRetentionDays = null` keeps paused workspaces indefinitely. The transfer fields are always present in responses;
+ * in a `PUT`, an absent (null) transfer field keeps the stored value, so a client written before transfers existed does not reset the policy.
+ */
 @Serializable
 data class CloudSettingsView(
     val pausedRetentionDays: Int?,
@@ -178,6 +186,12 @@ data class CloudSettingsView(
     val maxRetainedSessionsPerMember: Int,
     /** Days transcript events and finished messages are kept; null keeps them indefinitely. */
     val transcriptRetentionDays: Int?,
+    /** `offer` (owners may offer their sessions; the recipient accepts) or `disabled` (administrators only). */
+    val memberTransfers: String? = null,
+    /** Days a recipient has to accept an offer (1 to 30). */
+    val transferOfferDays: Int? = null,
+    /** `cancel` or `keep`: unconsumed messages when a session changes owner. */
+    val transferPendingInputs: String? = null,
 )
 
 object CloudHeaders {
