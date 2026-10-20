@@ -76,6 +76,13 @@ class CloudAdministrationService(private val store: CloudAdminStore, private val
             return true
         }
 
+        /** The address a cluster API host resolved to: the same rules as [allowedApiHost] applied to the connection itself. */
+        fun allowedResolvedAddress(address: ByteArray): Boolean = when (address.size) {
+            4 -> allowedIpv4(IntArray(4) { address[it].toInt() and 0xff })
+            16 -> allowedIpv6(IntArray(16) { address[it].toInt() and 0xff })
+            else -> false
+        }
+
         /** The names of a DNS host are checked again against their resolved addresses by the cluster adapter when it connects. */
         private fun allowedIpv4(octets: IntArray) = !(octets[0] == 0 || (octets[0] == 169 && octets[1] == 254))
 

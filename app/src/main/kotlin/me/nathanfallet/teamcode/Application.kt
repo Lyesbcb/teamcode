@@ -81,6 +81,8 @@ fun main() {
             }
         }
     }
+    val cloud = System.getenv("TEAMCODE_CLOUD_RUNNER_IMAGE")?.takeIf { it.isNotBlank() && database != null }
+        ?.let { image -> CloudServer(database!!, cipher!!, origin, image).also { it.launch(workers) } }
     val team = database?.let { SqlTeamService(it) }
     val runs = database?.let { me.nathanfallet.teamcode.infrastructure.database.AgentRunServiceImpl(it) }
     val reconciliation = database?.let { me.nathanfallet.teamcode.infrastructure.database.UsageReconciliationServiceImpl(it) }
@@ -120,8 +122,9 @@ fun main() {
         embeddedServer(Netty, configure = {
             connectors.add(EngineConnectorBuilder().also { it.host = host; it.port = port })
             shutdownGracePeriod = shutdownGrace; shutdownTimeout = 620_000
-        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null, runs = if (runs != null) koin.koin.get() else null, budgetOverrides = if (budgetOverrides != null) koin.koin.get() else null, reconciliation = if (reconciliation != null) koin.koin.get() else null, variants = variants, skills = skills, mcp = mcp, mcpAccess = mcpAccess) }.start(wait = true)
-    } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); providerHttp.close(); mcpHttp.close(); database?.close() }
+        }) { configureGateway(koin.koin.get(), token, team, origin, accounts, admission, directives, modelPolicies, readiness = { database?.ready() ?: true }, routes = routes, cancellation = cancellation, devices = devices, serviceKeys = serviceKeys, audit = audit, pacingSettings = pacingSettings, forecasts = forecasts, groups = if (groups != null) koin.koin.get() else null, runs = if (runs != null) koin.koin.get() else null, budgetOverrides = if (budgetOverrides != null) koin.koin.get() else null, reconciliation = if (reconciliation != null) koin.koin.get() else null, variants = variants, skills = skills, mcp = mcp, mcpAccess = mcpAccess,
+            cloudSessions = cloud?.sessions, cloudAdmin = cloud?.admin, cloudRunner = cloud?.runner) }.start(wait = true)
+    } finally { runBlocking { workers.coroutineContext[Job]?.cancelAndJoin() }; koin.close(); cloud?.close(); providerHttp.close(); mcpHttp.close(); database?.close() }
 }
 
 /** Gateway bounds from `TEAMCODE_MCP_*` variables; unset values keep the defaults documented in docs/mcp-gateway.md. */
