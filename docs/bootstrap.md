@@ -1,22 +1,30 @@
 # One-command native installation
 
-The release pipeline generates `install.sh` and `install.ps1` from the exact publisher-signed five-target bundle. The commands below install the version-pinned **0.1.0** release assets after its built-in publication checks pass. The owner moved additional clean-machine and operational validation to V2. Source implementation, local acceptance and public-download acceptance are separate; consult [current evidence](status.md).
+The release pipeline generates `install.sh` and `install.ps1` from the exact publisher-signed five-target bundle. The commands below install the assets of the latest stable release after the script's built-in publication checks pass. The owner moved additional clean-machine and operational validation to V2. Source implementation, local acceptance and public-download acceptance are separate; consult [current evidence](status.md).
 
 ## Install a release
 
 macOS Apple Silicon/Intel or glibc Linux ARM64/x64, as your own user:
 
 ```sh
-curl -fsSL https://github.com/nathanfallet/teamcode/releases/download/0.2.0/install.sh | sh
+curl -fsSL https://github.com/nathanfallet/teamcode/releases/latest/download/install.sh | sh
 ```
 
 Windows x64, in Windows PowerShell 5.1 or PowerShell 7:
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/nathanfallet/teamcode/releases/download/0.2.0/install.ps1').Content))
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/nathanfallet/teamcode/releases/latest/download/install.ps1').Content))
 ```
 
-For the latest stable release, replace `releases/download/0.2.0/` with `releases/latest/download/`. This downloads a version-pinned script: subsequent asset downloads use its exact version, never a moving latest-version alias. Explicit prereleases use their version-specific URL.
+These URLs install the latest stable release. The script itself is version-pinned: subsequent asset downloads use its exact version, never a moving latest-version alias. To install a specific version, or an explicit prerelease, use its version-specific URL instead, for example:
+
+```sh
+curl -fsSL https://github.com/nathanfallet/teamcode/releases/download/0.3.0/install.sh | sh
+```
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/nathanfallet/teamcode/releases/download/0.3.0/install.ps1').Content))
+```
 
 The installer makes `teamcode` available by name, without administrator rights (see [Command on PATH](#command-on-path)). Shell profiles, personal Claude/Codex configuration and saved TeamCode authentication are not rewritten. Then connect to your own deployment:
 
