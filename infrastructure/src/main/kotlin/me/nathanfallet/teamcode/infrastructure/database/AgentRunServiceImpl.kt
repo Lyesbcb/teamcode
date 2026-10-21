@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.infrastructure.database
 
+import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.domain.team.*
 import me.nathanfallet.teamcode.infrastructure.database.tables.*
 import org.jetbrains.exposed.v1.core.*
@@ -27,6 +28,7 @@ class AgentRunServiceImpl(private val database: Database) : AgentRunService {
         }
         for ((key, value) in labels) AgentRunLabels.insert { it[runId] = id; it[AgentRunLabels.key] = key; it[AgentRunLabels.value] = value }
         audit(actor.teamId, actor.member.id, "run.started", id)
+        publishTeamEvent(actor.teamId, TeamEventType.RUN_STARTED, id, actor.member.id, buildJsonObject { put("runId", id); put("agent", agent); put("workload", workload) }, now)
         RunLease(id, now, now, null, RunState.RUNNING)
     }
 
@@ -44,6 +46,9 @@ class AgentRunServiceImpl(private val database: Database) : AgentRunService {
         if (row[AgentRuns.endedAt] == null) {
             AgentRuns.update({ AgentRuns.id eq id }) { it[endedAt] = now; it[AgentRuns.exitCode] = exitCode }
             audit(actor.teamId, actor.member.id, "run.ended", id)
+            publishTeamEvent(actor.teamId, TeamEventType.RUN_ENDED, id, row[AgentRuns.memberId], buildJsonObject {
+                put("runId", id); put("agent", row[AgentRuns.agent]); put("workload", row[AgentRuns.workload]); put("exitCode", exitCode)
+            }, now)
         }
         RunLease(id, row[AgentRuns.startedAt], row[AgentRuns.heartbeatAt], row[AgentRuns.endedAt] ?: now, RunState.ENDED)
     }
