@@ -19,7 +19,7 @@ class KubernetesClusterPortTest {
     private fun address(vararg octets: Int) = java.net.InetAddress.getByAddress(ByteArray(octets.size) { octets[it].toByte() })
     private fun port(resolver: (String) -> List<java.net.InetAddress> = { listOf(address(10, 0, 0, 1)) }, handler: MockRequestHandleScope.(HttpRequestData) -> HttpResponseData) = KubernetesClusterPort(
         { ClusterConnection("https://k8s.example.test:6443", "unused-with-mock", token) },
-        KubernetesPodOptions("https://teamcode.example.test", "registry.example/teamcode-runner:1.0"),
+        { KubernetesPodOptions("https://teamcode.example.test", "registry.example/teamcode-runner:1.0") },
         MockEngine { request ->
             requests += request
             bodies += (request.body as? TextContent)?.text?.let { Json.parseToJsonElement(it).jsonObject }
@@ -154,6 +154,17 @@ class KubernetesClusterPortTest {
         val error = assertFailsWith<ClusterApiException> { port.volume("c1", "pv-1") }
         assertEquals(403, error.status)
         assertFalse(error.message!!.contains(token), "The API body is never surfaced")
+    }
+
+    @Test fun podOptionsAreReadForEveryPodSoADashboardChangeNeedsNoRestart() {
+        var options = KubernetesPodOptions("https://teamcode.example.test", "registry.example/teamcode-runner:1.0")
+        val port = KubernetesClusterPort({ null }, { options })
+        val request = PodRequest("teamcode", "tc-1-e1", "registry.example/toolchain:1", "tc-ws-1", emptyMap(), CloudResources(1000, 1024), emptyList(), emptyMap())
+        fun runnerImage() = port.podManifest(request)["spec"]!!.jsonObject["initContainers"]!!.jsonArray.single().jsonObject["image"]!!.jsonPrimitive.content
+        assertEquals("registry.example/teamcode-runner:1.0", runnerImage())
+        options = options.copy(runnerImage = "registry.example/teamcode-runner:2.0")
+        assertEquals("registry.example/teamcode-runner:2.0", runnerImage())
+        port.close()
     }
 
     @Test fun partialListsAndRunnerOriginsAreRefused(): Unit = runBlocking {

@@ -49,11 +49,11 @@ data class KubernetesPodOptions(
 ) {
     init {
         // The runner refuses plain HTTP except on loopback, and a pod's loopback is not the server.
-        require(Regex("https://[^/?#@\\s]+/?").matches(serverUrl) && !Regex("https://(localhost|127\\.[0-9.]+|\\[::1])(:[0-9]+)?/?").matches(serverUrl)) {
-            "Set TEAMCODE_CLOUD_SERVER_URL (or TEAMCODE_PUBLIC_URL) to the HTTPS origin session pods reach."
+        require(CloudRuntimeService.usableOrigin(serverUrl)) {
+            "Set the server URL for pods (Dashboard → Cloud sessions) to the HTTPS origin session pods reach."
         }
         require(runAsUser > 0 && agentRunAsUser > 0 && runAsUser != agentRunAsUser) { "The runner and the agent run as different non-root UIDs." }
-        require(workspaceAccessMode in setOf("ReadWriteOncePod", "ReadWriteOnce")) { "Use ReadWriteOncePod or ReadWriteOnce." }
+        require(workspaceAccessMode in CloudRuntime.ACCESS_MODES) { "Use ReadWriteOncePod or ReadWriteOnce." }
     }
 }
 
@@ -66,12 +66,16 @@ data class KubernetesPodOptions(
  */
 class KubernetesClusterPort(
     private val connections: suspend (clusterId: String) -> ClusterConnection?,
-    private val pods: KubernetesPodOptions,
+    /** Read for every pod, so a runtime saved on the dashboard applies to the next pod without a restart. */
+    private val options: () -> KubernetesPodOptions,
     /** Tests pass a mock engine; production builds one CIO client per cluster. */
     private val engine: HttpClientEngine? = null,
     /** Tests pass a fixed resolver; production resolves the API host with the system resolver. */
     private val resolver: (String) -> List<java.net.InetAddress> = { host -> java.net.InetAddress.getAllByName(host).toList() },
+    /** Read for every claim; a claim needs neither the runner image nor the callback origin. */
+    private val workspaceAccessMode: () -> String = { options().workspaceAccessMode },
 ) : ClusterPort, AutoCloseable {
+
     private class Client(val fingerprint: String, val connection: ClusterConnection, val http: HttpClient, val loadedAt: Long)
     private val clients = ConcurrentHashMap<String, Client>()
     /** Clients replaced after a rotation stay open until [close]: requests in flight may still use them. */
@@ -88,11 +92,13 @@ class KubernetesClusterPort(
     }
 
     override suspend fun ensureClaim(clusterId: String, request: WorkspaceRequest) {
+        val accessMode = workspaceAccessMode()
+        require(accessMode in CloudRuntime.ACCESS_MODES) { "Use ReadWriteOncePod or ReadWriteOnce." }
         val body = buildJsonObject {
             put("apiVersion", "v1"); put("kind", "PersistentVolumeClaim")
             putJsonObject("metadata") { put("name", request.claimName); putLabels(request.labels) }
             putJsonObject("spec") {
-                putJsonArray("accessModes") { add(pods.workspaceAccessMode) }
+                putJsonArray("accessModes") { add(accessMode) }
                 request.storageClass?.let { put("storageClassName", it) }
                 putJsonObject("resources") { putJsonObject("requests") { put("storage", "${request.sizeGibibytes}Gi") } }
             }
@@ -162,7 +168,9 @@ class KubernetesClusterPort(
      *
      * The containers do not share a process namespace, so the agent cannot read the runner's memory or environment.
      */
-    internal fun podManifest(request: PodRequest): JsonObject = buildJsonObject {
+    internal fun podManifest(request: PodRequest): JsonObject = podManifest(request, options())
+
+    private fun podManifest(request: PodRequest, pods: KubernetesPodOptions): JsonObject = buildJsonObject {
         put("apiVersion", "v1"); put("kind", "Pod")
         putJsonObject("metadata") { put("name", request.name); putLabels(request.labels) }
         putJsonObject("spec") {

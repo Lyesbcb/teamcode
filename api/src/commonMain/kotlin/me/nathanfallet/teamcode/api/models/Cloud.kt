@@ -196,6 +196,25 @@ data class CloudSettingsView(
     val transferPendingInputs: String? = null,
 )
 
+/**
+ * Whether cloud sessions run on the server and how their pods are built (`GET/PUT /api/v1/cloud/runtime`, administrators).
+ * Stored in the database; no field is a credential. `serverUrl = null` makes pods call the server's public URL, shown
+ * as `effectiveServerUrl`, which a `PUT` ignores. A `PUT` must carry the `updatedAt` it read (null when nothing was stored yet):
+ * a runtime changed meanwhile answers `409 cloud_runtime_conflict`.
+ */
+@Serializable
+data class CloudRuntimeView(
+    val enabled: Boolean,
+    val runnerImage: String?,
+    /** Required in a `PUT`, like every field but the two below: a `PUT` replaces the whole runtime. */
+    val runnerBinary: String,
+    val serverUrl: String?,
+    /** `ReadWriteOncePod`, or `ReadWriteOnce` for storage drivers without it. */
+    val workspaceAccessMode: String,
+    val effectiveServerUrl: String? = null,
+    val updatedAt: Long? = null,
+)
+
 object CloudHeaders {
     const val ON_BEHALF_OF = "TeamCode-On-Behalf-Of"
     const val IDEMPOTENCY_KEY = "Idempotency-Key"

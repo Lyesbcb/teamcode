@@ -14,6 +14,7 @@ import me.nathanfallet.teamcode.infrastructure.database.SqlCloudAdminStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudConversationStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudInferenceCredentialStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudSessionStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlCloudRuntimeStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudTransferStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlGitHubStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlMemberAllowance
@@ -26,18 +27,23 @@ import me.nathanfallet.teamcode.presentation.CloudConversation
 import me.nathanfallet.teamcode.presentation.CloudRunnerChannel
 
 /**
- * Cloud sessions, enabled when `TEAMCODE_CLOUD_RUNNER_IMAGE` is set: without a runner image no session pod could
- * start, so the routes stay unmounted and `cloud.sessions.v1` is not advertised.
+ * Cloud sessions. Built whenever the server has a database, so administrators can configure them from the dashboard;
+ * [runtime] (stored in the database) says whether members can use them: while it is off the member-facing routes answer
+ * `404` and `cloud.*` capabilities are not advertised. The runner channel and the workers keep serving the sessions that
+ * already exist, so turning cloud sessions off never kills a running agent; they stay idle until a runtime is stored.
  */
-class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: String, runnerImage: String) : AutoCloseable {
+class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: String) : AutoCloseable {
+    val runtime = CloudRuntimeService(SqlCloudRuntimeStore(database), publicOrigin)
     private val store = SqlCloudSessionStore(database)
     private val adminStore = SqlCloudAdminStore(database, cipher)
-    private val cluster = KubernetesClusterPort({ adminStore.connection(it) }, KubernetesPodOptions(
-        serverUrl = System.getenv("TEAMCODE_CLOUD_SERVER_URL") ?: publicOrigin,
-        runnerImage = runnerImage,
-        runnerBinary = System.getenv("TEAMCODE_CLOUD_RUNNER_BINARY") ?: "/usr/local/bin/teamcode",
-        workspaceAccessMode = System.getenv("TEAMCODE_CLOUD_WORKSPACE_ACCESS_MODE") ?: "ReadWriteOncePod",
-    ))
+    private val cluster = KubernetesClusterPort({ adminStore.connection(it) }, {
+        val current = runtime.current
+        // Off: no new pod starts. A session already queued waits (and can be deleted) until cloud sessions are on.
+        if (!current.enabled) throw CloudConfigurationException("cloud sessions are turned off; queued sessions start once they are on again")
+        val image = current.runnerImage ?: throw CloudConfigurationException("no runner image is set; set it on Dashboard → Cloud sessions")
+        if (!CloudRuntimeService.usableOrigin(runtime.serverUrl(current))) throw CloudConfigurationException("the callback origin for pods is not HTTPS or is loopback; set the server URL for pods on Dashboard → Cloud sessions")
+        KubernetesPodOptions(serverUrl = runtime.serverUrl(current), runnerImage = image, runnerBinary = current.runnerBinary, workspaceAccessMode = current.workspaceAccessMode)
+    }, workspaceAccessMode = { runtime.current.workspaceAccessMode })
     private val work = SqlScheduledWork(database)
     private val replica = UUID.randomUUID().toString()
 
@@ -56,7 +62,7 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     private val recipients = CloudRecipientPolicy(store, access, listOf(ModelPolicyRecipientCheck(SqlModelPolicyStore(database)), QuotaRecipientCheck(SqlMemberAllowance(database))))
     val transfers = CloudTransferService(store, transferStore, sessions, recipients)
 
-    private val reconciler = ReconcileCloudSessionsUseCase(store, cluster, onError = { session, error ->
+    private val reconciler = ReconcileCloudSessionsUseCase(store, cluster, startAllowed = { runtime.enabled }, onError = { session, error ->
         // Class and HTTP status only: messages from the cluster or the driver may echo request content.
         System.err.println("TeamCode cloud reconciliation failed for session $session (${describe(error)}); retrying.")
     }, transfers = CompleteCloudTransferUseCase(store, transferStore, cluster, recipients), activity = conversationStore)
@@ -73,11 +79,36 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
 
     val conversation = CloudConversation(conversationService, access, RunnerConversationUseCase(store, conversationStore))
 
+    /**
+     * Seeds the runtime from the former deployment variables, only if nothing is stored yet; the database stays the
+     * source of truth afterwards.
+     */
+    /** The former variables, kept until a runtime is stored so a seed that failed at startup is retried. */
+    @Volatile private var seedCandidate: CloudRuntime? = null
+
+    suspend fun start(initial: CloudRuntime?): CloudRuntime { seedCandidate = initial; return seed() }
+
+    private suspend fun seed() = runtime.seed(seedCandidate) { reason -> System.err.println("TeamCode cloud runtime from the environment was stored disabled: $reason") }
+
+    /** Workers run once a runtime is stored, on or off: sessions created while it was on keep being reconciled. */
+    private fun managing() = runtime.current.updatedAt != null
+
     fun launch(scope: CoroutineScope) {
+        scope.launch {
+            // Another replica's dashboard save reaches this one within one interval.
+            while (isActive) {
+                delay(RUNTIME_REFRESH_MILLIS)
+                try { if (runtime.current.updatedAt == null && seedCandidate != null) seed() else runtime.refresh() }
+                catch (error: CancellationException) { throw error }
+                catch (error: Exception) { System.err.println("TeamCode cloud runtime could not be reread (${describe(error)}); keeping the last one.") }
+            }
+        }
         scope.launch {
             // Messages sent while a session was pausing wake it once paused; inputs of ended sessions are cancelled.
             while (isActive) {
-                try { conversationService.wakePending(); conversationStore.cancelEnded(50) }
+                if (!managing()) { delay(RUNTIME_REFRESH_MILLIS); continue }
+                // Waking a paused session for a queued message is a resume: not while cloud sessions are off.
+                try { if (runtime.enabled) conversationService.wakePending(); conversationStore.cancelEnded(50) }
                 catch (error: CancellationException) { throw error }
                 catch (error: Exception) { System.err.println("TeamCode cloud message delivery is temporarily unavailable (${describe(error)}).") }
                 delay(5_000)
@@ -85,6 +116,7 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
         }
         scope.launch {
             while (isActive) {
+                if (!managing()) { delay(RUNTIME_REFRESH_MILLIS); continue }
                 try { work.runDue("cloud-transcript-retention", intervalMillis = 10 * 60_000, timeoutMillis = 120_000) { conversationStore.purgeTranscripts(1_000) } }
                 catch (_: TimeoutCancellationException) { System.err.println("TeamCode cloud transcript retention deadline exceeded.") }
                 catch (error: CancellationException) { throw error }
@@ -94,6 +126,7 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
         }
         scope.launch {
             while (isActive) {
+                if (!managing()) { delay(RUNTIME_REFRESH_MILLIS); continue }
                 val claimed = try { reconciler(replica) }
                     catch (error: TimeoutCancellationException) { System.err.println("TeamCode cloud reconciler pass timed out."); 0 }
                     catch (error: CancellationException) { throw error }
@@ -103,6 +136,7 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
         }
         scope.launch {
             while (isActive) {
+                if (!managing()) { delay(RUNTIME_REFRESH_MILLIS); continue }
                 try {
                     work.runDue("cloud-maintenance", intervalMillis = 60_000) { store.maintain(); transferStore.maintain(); transfers.expireOffers(); inferenceCredentials.purge(500) }
                     work.runDue("cloud-gc", intervalMillis = 10 * 60_000, timeoutMillis = 240_000) { collectGarbage() }
@@ -132,6 +166,15 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     override fun close() { cluster.close(); githubClient.close() }
 
     private companion object {
-        fun describe(error: Exception) = if (error is ClusterApiException) "Kubernetes HTTP ${error.status}" else error::class.simpleName ?: "error"
+        const val RUNTIME_REFRESH_MILLIS = 5_000L
+        /** Our own configuration refusals (missing runner image, unusable origin) carry their fix; other messages are never logged. */
+        fun describe(error: Exception) = when (error) {
+            is ClusterApiException -> "Kubernetes HTTP ${error.status}"
+            is CloudConfigurationException -> error.message ?: "cloud runtime incomplete"
+            else -> error::class.simpleName ?: "error"
+        }
     }
 }
+
+/** The stored runtime cannot build a pod yet; the message says what an administrator must set. */
+private class CloudConfigurationException(message: String) : Exception(message)

@@ -101,7 +101,7 @@ internal fun settingsContent(actor: Principal, features: Set<DashboardFeature>):
         if (on(DashboardFeature.MODEL_POLICY)) add(Triple("/dashboard/models", "Model policy", "Allowed and denied models, efforts and thinking budget."))
         if (on(DashboardFeature.ROUTES)) add(Triple("/dashboard/routes", "Model routes", "Provider and model fallback order per requested model."))
         if (on(DashboardFeature.GUIDANCE)) add(Triple("/dashboard/agent-guidance", "Pacing mode", "Predictive pacing or observation only."))
-        if (on(DashboardFeature.CLOUD)) add(Triple("/dashboard/cloud", "Cloud sessions", "Retention, per-member limits and transfers."))
+        if (on(DashboardFeature.CLOUD)) add(Triple("/dashboard/cloud", "Cloud sessions", "On or off, runner image, Kubernetes clusters, retention, per-member limits and transfers."))
         if (on(DashboardFeature.VARIANTS)) add(Triple("/dashboard/variants", "Variants", "Environment variables and MCP servers given to members."))
         if (on(DashboardFeature.MCP)) add(Triple("/dashboard/mcp", "MCP tool policies", "Which tools each MCP server exposes."))
         if (on(DashboardFeature.SKILLS)) add(Triple("/dashboard/skills", "Skills", "Pinned versions and assignments."))
