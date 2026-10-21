@@ -65,6 +65,7 @@ class ApiDocsTest {
                 RunnerConversationUseCase(sessionStore, conversationStore), me.nathanfallet.teamcode.domain.team.TeamEventService(stub<me.nathanfallet.teamcode.domain.team.TeamEventStore>())),
             cloudTransfers = CloudTransferService(sessionStore, stub(), sessions, CloudRecipientPolicy(sessionStore)),
             webhooks = me.nathanfallet.teamcode.domain.webhooks.WebhookService(stub(), stub()),
+            apiPrices = stub(), poolSizing = stub(),
         )
     }
 
