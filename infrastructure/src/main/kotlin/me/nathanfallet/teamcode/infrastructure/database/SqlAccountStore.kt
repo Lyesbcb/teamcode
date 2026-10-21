@@ -18,7 +18,7 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
     override suspend fun find(identity: AccountIdentity): AccountRecord? = database.query {
         Accounts.selectAll().where { identityFilter(identity) }.singleOrNull()?.let(::accountRecord)
     }
-    override suspend fun upsert(author: AccountMutationActor, verified: VerifiedProviderAccount, credentials: ProviderCredentials, expectedVersion: Long?, operationId: String): EnrollmentResult = database.query {
+    override suspend fun upsert(author: AccountMutationActor, verified: VerifiedProviderAccount, credentials: ProviderCredentials, expectedVersion: Long?, operationId: String, origin: EnrollmentOrigin): EnrollmentResult = database.query {
         val identity = verified.identity
         val actorId = authorizeMutation(this, author, identity.teamId)
         val payload = Json.encodeToString(CredentialPayload(credentials.accessToken, credentials.refreshToken, credentials.expiresAtMillis))
@@ -33,13 +33,13 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
         val existing = row?.let(::accountRecord)
         if (row != null && row[Accounts.refreshPending] && existing!!.state != AccountState.RECONNECT_REQUIRED && row[Accounts.refreshStartedAt] + 60_000 > nowMillis()) return@query EnrollmentResult.Conflict
         if (existing?.credentialVersion != expectedVersion) return@query EnrollmentResult.Conflict
-        val account = existing?.let { merge.merge(it, verified, expectedVersion!!) } ?: AccountRecord(UUID.randomUUID().toString(), identity, verified.displayName.take(120), 1, false, null, 0, AccountState.PENDING_HANDOVER)
+        val account = existing?.let { merge.merge(it, verified, expectedVersion!!, origin) } ?: AccountRecord(UUID.randomUUID().toString(), identity, verified.displayName.take(120), 1, false, null, 0, merge.initialState(origin), verified.email)
         val envelope = cipher.encrypt(payload.toByteArray(), "${identity.teamId}:${account.id}")
         if (existing == null) Accounts.insert {
             it[id] = account.id; it[teamId] = identity.teamId; it[provider] = identity.provider; it[providerAccountId] = identity.accountId
-            it[organizationId] = identity.organizationId; it[displayName] = account.displayName; it[credentialVersion] = account.credentialVersion
+            it[organizationId] = identity.organizationId; it[displayName] = account.displayName; it[email] = account.email; it[credentialVersion] = account.credentialVersion
             it[credentialEnvelope] = envelope; it[state] = account.state.name
-        } else Accounts.update({ Accounts.id eq account.id }) { it[credentialVersion] = account.credentialVersion; it[credentialEnvelope] = envelope; it[refreshPending] = false }
+        } else Accounts.update({ Accounts.id eq account.id }) { it[credentialVersion] = account.credentialVersion; it[email] = account.email; it[state] = account.state.name; it[credentialEnvelope] = envelope; it[refreshPending] = false }
         EnrollmentOperations.insert { it[teamId] = identity.teamId; it[EnrollmentOperations.operationId] = operationId; it[requestHash] = hash; it[accountId] = account.id; it[created] = existing == null }
         audit(identity.teamId, actorId, if (existing == null) "account.enrolled" else "account.credentials_updated", account.id)
         if (existing == null) EnrollmentResult.Created(account) else EnrollmentResult.Updated(account)
@@ -54,9 +54,10 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
         audit(teamId, actorId, "account.configured", id)
         account
     }
-    override suspend fun handover(author: AccountMutationActor, teamId: String, id: String, accessOnly: Boolean): AccountRecord = database.query {
+    override suspend fun handover(author: AccountMutationActor, teamId: String, id: String, accessOnly: Boolean, requirePending: Boolean): AccountRecord = database.query {
         val actorId = authorizeMutation(this, author, teamId)
         val row = Accounts.selectAll().where { (Accounts.teamId eq teamId) and (Accounts.id eq id) }.forUpdate().singleOrNull() ?: throw missing()
+        if (requirePending && row[Accounts.state] != AccountState.PENDING_HANDOVER.name) throw TeamFailure("handover_not_pending", 409, "This account no longer waits for a handover. Reload the dashboard.")
         if (row[Accounts.refreshPending]) throw TeamFailure("provider_reconnect", 409, "Import verified current credentials before changing refresh ownership.")
         val state = if (accessOnly) AccountState.ACCESS_ONLY else AccountState.READY
         Accounts.update({ (Accounts.teamId eq teamId) and (Accounts.id eq id) }) { it[Accounts.state] = state.name }
@@ -86,4 +87,4 @@ class SqlAccountStore(private val database: Database, private val cipher: Creden
 }
 @Serializable
 internal class CredentialPayload(val accessToken: String, val refreshToken: String, val expiresAtMillis: Long)
-internal fun accountRecord(row: ResultRow) = AccountRecord(row[Accounts.id], AccountIdentity(row[Accounts.teamId], row[Accounts.provider], row[Accounts.providerAccountId], row[Accounts.organizationId]), row[Accounts.displayName], row[Accounts.credentialVersion], row[Accounts.disabled], row[Accounts.poolId], row[Accounts.priority], AccountState.valueOf(row[Accounts.state]))
+internal fun accountRecord(row: ResultRow) = AccountRecord(row[Accounts.id], AccountIdentity(row[Accounts.teamId], row[Accounts.provider], row[Accounts.providerAccountId], row[Accounts.organizationId]), row[Accounts.displayName], row[Accounts.credentialVersion], row[Accounts.disabled], row[Accounts.poolId], row[Accounts.priority], AccountState.valueOf(row[Accounts.state]), row[Accounts.email])
