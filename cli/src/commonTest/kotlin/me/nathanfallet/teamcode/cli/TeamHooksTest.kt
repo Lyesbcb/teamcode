@@ -56,7 +56,10 @@ class TeamHooksTest {
     }
 
     @Test fun onlyVersionsTheMemberApprovedAreInstalledAndANewVersionAsksAgain() = runTest {
-        val root = temporary()
+        // Like teamHooksRoot(), the hooks directory does not exist yet: the first private write creates it owner-only.
+        // A directory created beforehand by another API is refused on Windows when its owner is not the user (an
+        // elevated token makes Administrators the owner of new directories).
+        val root = temporary() / "hooks"
         val approvals = HookApprovals(root / "approvals.json")
         var hooks = listOf(fixture(), fixture("audit", definition = stop.copy(events = listOf("PreToolUse"), matcher = "Bash")), fixture("noisy"))
         val downloads = mutableListOf<String>()
@@ -75,7 +78,7 @@ class TeamHooksTest {
         val installed = plan.installed.single()
         assertEquals("stop-guard", installed.name); assertEquals(1, plan.refused); assertEquals(listOf("audit"), plan.awaiting.map { it.name })
         assertEquals("#!/bin/sh\nexit 0\n", fs.read(with(okio.Path.Companion) { installed.command.toPath() }) { readUtf8() })
-        assertEquals(listOf("bin/guard.sh"), executables.map { it.toString().substringAfterLast("stop-guard-").substringAfter('/') }, "Only the executable files, before the move")
+        assertEquals(listOf("bin/guard.sh"), executables.map { it.relativeTo(root / "installed" / ".staging").segments.drop(1).joinToString("/") }, "Only the executable files, before the move")
         // Installed once: the next launch reuses it without downloading.
         sync.plan()
         assertEquals(listOf("stop-guard"), downloads)
@@ -100,6 +103,18 @@ class TeamHooksTest {
             approvals, LocalHookInstaller(root / "installed", makeExecutable = {}))
         assertEquals(listOf("stop-guard"), failing.plan().failed)
         assertFalse(fs.exists(root / "installed" / "stop-guard" / hooks[0].digest.removePrefix("sha256:")))
+    }
+
+    @Test fun approvingInstallsFirstThenRecordsInTheSameNewHooksDirectory() = runTest {
+        // The order of `teamcode hooks approve`: verify and install, then record. The hooks directory does not exist yet.
+        val root = temporary() / "hooks"
+        val hook = fixture()
+        val approvals = HookApprovals(root / "approvals.json")
+        val sync = TeamHookSync({ listOf(hook.manifest()) }, { hook.artifact() }, approvals, LocalHookInstaller(root / "installed", makeExecutable = {}))
+        sync.ensure(hook.manifest())
+        approvals.record(hook.name, HookApproval(hook.digest, approved = true))
+        assertEquals(mapOf(hook.name to HookApproval(hook.digest, approved = true)), approvals.load())
+        assertEquals("stop-guard", sync.plan().installed.single().name)
     }
 
     private fun installed(name: String, definition: HookDefinitionView) = InstalledHook(name, "1", "sha256:" + "0".repeat(64), definition, "/home/me/.config/teamcode/hooks/installed/$name/x/bin/it's.sh")
