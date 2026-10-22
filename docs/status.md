@@ -1,5 +1,9 @@
 # Implementation status
 
+## Team feed: a cloud session waiting for a person (2026-10-22)
+
+`cloud.session.waiting` (`reason` `permission` or `question`, `requestId`, `eventSeq`) is published in the team event feed, and to its webhooks, when a session's runner uploads a `permission.request`, and `cloud.session.answered` (`requestId`, `behavior`, `eventSeq`) when a member's answer is consumed by the agent. Both are published in the transaction that stores the transcript event, after its other writes, like `cloud.turn`, and in transcript order with the turns of the same batch; neither carries the tool input, the question or the answer. Evidence: `CloudConversationPersistenceTest` (MySQL, run in CI only: no Docker on the authoring machine) reads both from `SqlTeamEventStore` for the session owner, in order, without the question's text. No pod was run. Stacked on the permission relay above.
+
 ## Permission requests relayed from cloud sessions (2026-10-22)
 
 Claude Code in a cloud session runs in bypass mode, which leaves two things that need a person: a tool use matched by an `ask` permission rule, and a question (`AskUserQuestion`). The runner now starts it with `--permission-prompt-tool stdio` when the server says it relays them (`permissionRelay` in `POST /cloud/runner/agent`, capability `cloud.permissions.v1`): each `can_use_tool` control request becomes a `permission.request` event, and `POST /api/v1/cloud/sessions/{id}/permissions` (`teamcode cloud answer`) allows, denies or answers it. The answer is an input of the new kind `permission`, delivered before queued messages and only to the agent process that asked; its consumption is recorded in the transcript with the request, the behavior and its author. No migration (the input kind and event type columns already fit). Codex is unchanged.

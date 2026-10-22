@@ -30,16 +30,20 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         val start = last
         val now = nowMillis()
         val turns = mutableListOf<Pair<Long, String>>()
+        val requests = mutableListOf<Pair<Long, String>>()
         for (event in events.sortedBy { it.sequence }) {
             if (event.sequence <= through) continue
             if (event.sequence != through + 1) break // A gap: the runner resends from acceptedThrough + 1.
             insertEvent(sessionId, teamId, ++last, epoch, event.sequence, event.type, now, event.data)
             if (event.type == CloudEventType.TURN) turns += last to event.data
+            if (event.type == CloudEventType.PERMISSION_REQUEST) requests += last to event.data
             through = event.sequence
         }
         if (last != start) saveCursor(sessionId, cursor != null, last, epoch, through)
         // Last, so the team's cursor lock is taken after every other write of this transaction.
-        for ((seq, data) in turns) publishTurn(sessionId, teamId, seq, data, now)
+        // In transcript order, so a request and the turn end that closes it reach the feed in that order.
+        for ((seq, data) in (turns + requests).sortedBy { it.first })
+            if (requests.any { it.first == seq }) publishWaiting(sessionId, teamId, seq, data, now) else publishTurn(sessionId, teamId, seq, data, now)
         RunnerEventsAck(through, last)
     }
 
@@ -169,6 +173,9 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             }.singleOrNull()?.let(::readInput) ?: return@mapNotNull null
             if (ack.consumed) finish(teamId, input, CloudInputStatus.CONSUMED, null, now)
             else finish(teamId, input, CloudInputStatus.REJECTED, ack.reason ?: "rejected", now)
+        }.also { finished ->
+            // Last, so the team's cursor lock is taken after every other write of this transaction.
+            for (input in finished) if (input.kind == CloudInputKind.PERMISSION && input.status == CloudInputStatus.CONSUMED) publishAnswered(sessionId, teamId, input, now)
         }
     }
 
@@ -327,6 +334,29 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         val owner = CloudSessions.select(CloudSessions.ownerId).where { CloudSessions.id eq sessionId }.single()[CloudSessions.ownerId]
         publishTeamEvent(teamId, TeamEventType.CLOUD_TURN, sessionId, owner, buildJsonObject { put("sessionId", sessionId); put("phase", phase); put("eventSeq", seq) }, at)
     }
+
+    /** `cloud.session.waiting`: why the agent waits and where the request is, never the tool input or the question. */
+    private fun publishWaiting(sessionId: String, teamId: String, seq: Long, data: String, at: Long) {
+        val request = try { Json.parseToJsonElement(data) as? JsonObject } catch (_: IllegalArgumentException) { null }
+        val question = (request?.get("question") as? JsonPrimitive)?.contentOrNull == "true"
+        publishTeamEvent(teamId, TeamEventType.SESSION_WAITING, sessionId, owner(sessionId), buildJsonObject {
+            put("sessionId", sessionId); put("reason", if (question) "question" else "permission")
+            (request?.get("requestId") as? JsonPrimitive)?.contentOrNull?.let { put("requestId", it) }
+            put("eventSeq", seq)
+        }, at)
+    }
+
+    private fun publishAnswered(sessionId: String, teamId: String, input: CloudInput, at: Long) {
+        val answer = input.text?.let { try { Json.parseToJsonElement(it) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+        publishTeamEvent(teamId, TeamEventType.SESSION_ANSWERED, sessionId, owner(sessionId), buildJsonObject {
+            put("sessionId", sessionId)
+            (answer?.get("requestId") as? JsonPrimitive)?.contentOrNull?.let { put("requestId", it) }
+            (answer?.get("behavior") as? JsonPrimitive)?.contentOrNull?.let { put("behavior", it) }
+            input.eventSeq?.let { put("eventSeq", it) }
+        }, at)
+    }
+
+    private fun owner(sessionId: String) = CloudSessions.select(CloudSessions.ownerId).where { CloudSessions.id eq sessionId }.single()[CloudSessions.ownerId]
 
     private fun saveCursor(sessionId: String, exists: Boolean, last: Long, epoch: Int, through: Long) {
         if (exists) CloudSessionTranscripts.update({ CloudSessionTranscripts.sessionId eq sessionId }) {

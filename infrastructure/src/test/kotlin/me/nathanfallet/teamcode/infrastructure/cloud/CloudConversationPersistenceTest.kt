@@ -1,6 +1,9 @@
 package me.nathanfallet.teamcode.infrastructure.cloud
 
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import me.nathanfallet.teamcode.domain.cloud.*
 import me.nathanfallet.teamcode.domain.cloud.CloudSessionState.*
 import me.nathanfallet.teamcode.domain.team.*
@@ -171,6 +174,15 @@ class CloudConversationPersistenceTest {
         for (part in listOf("\"requestId\":\"req-1\"", "\"behavior\":\"allow\"", "\"authorId\":\"${colleague.member.id}\"", "\"kind\":\"permission\""))
             assertTrue(part in answered.data, answered.data)
         assertFalse("Blue" in answered.data, "The answer's texts stay in the input")
+
+        // The team feed says the session waited for a person, then that the answer reached the agent; never the texts.
+        val feed = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
+            0, setOf(TeamEventType.SESSION_WAITING, TeamEventType.SESSION_ANSWERED), 100).events.filter { it.subjectId == s.id }
+        assertEquals(listOf(TeamEventType.SESSION_WAITING, TeamEventType.SESSION_ANSWERED), feed.map { it.type })
+        val (asked, done) = feed.map { Json.parseToJsonElement(it.data).jsonObject }
+        assertEquals(listOf("question", "req-1"), listOf(asked["reason"]!!.jsonPrimitive.content, asked["requestId"]!!.jsonPrimitive.content))
+        assertEquals(listOf("req-1", "allow", answered.seq.toString()), listOf("requestId", "behavior", "eventSeq").map { done[it]!!.jsonPrimitive.content })
+        assertFalse(feed.any { "Blue" in it.data || "Red or blue" in it.data })
     }
 
     private suspend fun accessPolicy(ra: Replica, rb: Replica, admin: Principal, colleague: Principal, other: Principal, groups: Groups, profile: CloudProfile, s: CloudSession) {
