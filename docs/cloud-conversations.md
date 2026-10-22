@@ -62,7 +62,7 @@ Events, in `cloud_session_events`:
 | `input` | `{inputId, kind, status, reason}`, server-written when an input is cancelled or rejected |
 | `transfer` | `{transferId, fromMemberId, toMemberId, atEpoch}`, server-written when the session changed owner |
 
-`parentToolUseId` is set on the events of a Claude Code subagent: it is the `id` of the parent's `tool.call` that started it (the `Agent` tool), so a client can show a subagent's steps under that call; it is absent for the main agent and for Codex. Clients must tolerate unknown types and unknown fields. `seq` starts at 1 and increases by one per session; `epoch` is the producing execution (0 for server events).
+`parentToolUseId` is set on the events of a Claude Code subagent: it is the `id` of the parent's `tool.call` that started it (the `Agent` tool, `Task` in older Claude Code versions), so a client can show a subagent's steps under that call, as `teamcode cloud logs` and `attach` do by indenting them; it is absent for the main agent, for Codex, and when the agent does not report it. Clients must tolerate unknown types and unknown fields. `seq` starts at 1 and increases by one per session; `epoch` is the producing execution (0 for server events).
 
 **Bounds and masking.** The server, not only the runner, removes `thinking`, `signature`, `reasoning` and `redacted_thinking` keys, caps nesting at 16 levels and arrays at 200 items, cuts strings at 16,000 characters (marked), masks secrets (provider and GitHub tokens, TeamCode keys, AWS keys, Slack tokens, JWTs, private keys, `Authorization` values, secret-named assignments, URL credentials) and replaces an event larger than 60,000 bytes by `{truncated, originalBytes}`.
 
@@ -149,6 +149,7 @@ Migrations `V20261020100009*`: `cloud_settings.transcript_retention_days`, `clou
 - The event feed keeps seven days of history; a service that cannot hold a stream open uses [webhooks](webhooks.md).
 - Masking works on values that look like credentials and on secret-named assignments; a secret split across a name/value object (`{"name": "API_KEY", "value": ...}`) or of an unknown shape is not masked.
 - The SSE stream polls the database once a second per open stream (one primary-key read while nothing changes).
+- An event replaced by `{truncated, originalBytes}` (above 60,000 bytes) loses its other fields, `parentToolUseId` included, so a very large subagent result is shown at the top level.
 - When a Claude resume fails, the in-flight message that started the process may be lost; the next one starts a fresh conversation.
 
 ## Evidence
