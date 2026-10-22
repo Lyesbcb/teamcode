@@ -209,7 +209,7 @@ internal fun Route.cloudRunnerConversationRoutes(channel: CloudRunnerChannel, co
         val body = call.boundedJson<RunnerAgentRequest>(4_096)
         val pod = channel.authenticate(call.token(), body.teamId, body.sessionId, body.epoch)
         val agent = runner.agent(pod.teamId, pod.sessionId, pod.epoch)
-        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = true, permissionDeadlineMinutes = agent.permissionDeadlineMinutes))
+        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = agent.permissionRelay, permissionDeadlineMinutes = agent.permissionDeadlineMinutes))
     }
     post(RUNNER_PATH + "events") {
         val body = call.boundedJson<RunnerEventsRequest>(RUNNER_BODY_BYTES)

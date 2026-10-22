@@ -249,7 +249,7 @@ internal class AgentHost(
                     if (event.type == CloudEventTypes.PERMISSION_REQUEST) (event.data["requestId"] as? JsonPrimitive)?.contentOrNull?.let { expireLater(child, active, it) }
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
-                if (deadlines.isNotEmpty()) active.openPermissions.let { open -> cancelDeadlines(child) { it !in open } }
+                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) }
                 result.replies
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.
@@ -302,8 +302,11 @@ internal class AgentHost(
 
     /** Cancels the deadline timers of [child] (every process when null) whose request id matches [which]. Called under [lock]. */
     private fun cancelDeadlines(child: AgentProcess?, which: (String) -> Boolean = { true }) {
-        val done = deadlines.filter { (id, timer) -> (child == null || timer.first === child) && which(id) }.keys
-        for (id in done) deadlines.remove(id)?.second?.cancel()
+        val iterator = deadlines.entries.iterator()
+        while (iterator.hasNext()) {
+            val (id, timer) = iterator.next()
+            if ((child == null || timer.first === child) && which(id)) { timer.second.cancel(); iterator.remove() }
+        }
     }
 
     private fun enqueue(type: String, data: kotlinx.serialization.json.JsonObject) {

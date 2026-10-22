@@ -4,8 +4,12 @@ import kotlinx.coroutines.delay
 import me.nathanfallet.teamcode.domain.cloud.CloudSessionState.*
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 
-/** [permissionDeadlineMinutes]: the team's deadline for unanswered permission requests, 0 for none. */
-data class RunnerAgentConfig(val kind: String, val version: String?, val model: String?, val effort: String?, val conversation: ConversationResume, val permissionDeadlineMinutes: Int = 0)
+/**
+ * [permissionRelay]: the runner relays the agent's permission requests (Claude Code only; Codex's bypass mode produces
+ * none). [permissionDeadlineMinutes]: the team's deadline for unanswered permission requests, 0 for none.
+ */
+data class RunnerAgentConfig(val kind: String, val version: String?, val model: String?, val effort: String?, val conversation: ConversationResume,
+    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0)
 
 /**
  * The agent side of the runner channel: configuration, transcript upload, input delivery and acknowledgements.
@@ -21,7 +25,7 @@ class RunnerConversationUseCase(
     suspend fun agent(teamId: String, sessionId: String, epoch: Int): RunnerAgentConfig {
         val session = live(teamId, sessionId, epoch)
         return RunnerAgentConfig(session.agentKind, session.agentVersion, session.agentModel, session.agentEffort, session.resumeConversation,
-            sessions.settings(teamId).permissionDeadlineMinutes)
+            permissionRelay = session.agentKind == "claude", permissionDeadlineMinutes = sessions.settings(teamId).permissionDeadlineMinutes)
     }
 
     /**

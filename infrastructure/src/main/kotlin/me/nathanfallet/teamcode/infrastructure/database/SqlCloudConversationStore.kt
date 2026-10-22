@@ -109,21 +109,25 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         val expected = new.expectedLastEventSeq
         if (expected != null && lastSeqOf(input.sessionId) > expected)
             throw TeamFailure("stale_view", 409, "The transcript has newer events than expectedLastEventSeq. Read them first.")
+        // A permission answer has its own small bound: messages queued behind a waiting turn must not block the answer that ends it.
+        val answering = input.kind == CloudInputKind.PERMISSION
         val pending = CloudSessionInputs.selectAll().where {
-            (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
+            (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire)) and
+                (if (answering) CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire else CloudSessionInputs.kind neq CloudInputKind.PERMISSION.wire)
         }.count()
+        val limit = if (answering) CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS else pendingLimit
         // One answer per request at a time, decided under the session lock: a second one would only be rejected later by the runner.
         new.permissionRequestId?.let { requestId ->
             val answered = CloudSessionInputs.select(CloudSessionInputs.text).where {
                 (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire) and
                     (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
-            }.limit(pendingLimit).any { row ->
+            }.limit(CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS).any { row ->
                 val text = row[CloudSessionInputs.text] ?: return@any false
                 ((try { Json.parseToJsonElement(text) as? JsonObject } catch (_: IllegalArgumentException) { null })?.get("requestId") as? JsonPrimitive)?.contentOrNull == requestId
             }
             if (answered) throw TeamFailure("permission_request_answered", 409, "This permission request already has an answer on its way to the agent.")
         }
-        if (pending >= pendingLimit) throw TeamFailure("too_many_pending_inputs", 429, "The session already has $pendingLimit pending inputs. Wait for the agent to consume them.")
+        if (pending >= limit) throw TeamFailure("too_many_pending_inputs", 429, "The session already has $limit pending ${if (answering) "permission answers" else "inputs"}. Wait for the agent to consume them.")
         val sleeping = desired == DesiredState.PAUSED || state == CloudSessionState.PAUSING || state == CloudSessionState.PAUSED || session[CloudSessions.blockedCode] != null
         val now = nowMillis()
         val stored = input.copy(createdAt = now)

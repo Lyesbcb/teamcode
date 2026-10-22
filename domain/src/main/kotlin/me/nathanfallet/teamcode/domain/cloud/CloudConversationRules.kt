@@ -144,6 +144,11 @@ object CloudConversationRules {
         }
     }
     const val MAX_PERMISSION_ANSWERS = 16
+    /**
+     * Pending permission answers a session holds at most. They have their own bound, outside [MAX_PENDING_INPUTS]: a
+     * queue full of messages waiting for the turn to end must never block the answer that lets it end.
+     */
+    const val MAX_PENDING_PERMISSION_ANSWERS = 16
     const val MAX_PERMISSION_TEXT_CHARS = 4_000
     /** Question and option indexes stay below this bound (Claude Code asks at most 4 questions of 4 options). */
     const val MAX_PERMISSION_INDEX = 64

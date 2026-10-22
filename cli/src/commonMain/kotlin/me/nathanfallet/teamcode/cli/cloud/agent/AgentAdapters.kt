@@ -51,8 +51,8 @@ interface AgentAdapter {
      * answer leaves the request open.
      */
     fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome = AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
-    /** Permission requests still waiting for an answer. */
-    val openPermissions: Set<String> get() = emptySet()
+    /** Whether the permission request [requestId] still waits for an answer. */
+    fun permissionOpen(requestId: String): Boolean = false
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -113,7 +113,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     private val started = mutableListOf<AgentEvent>()
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
-    override val openPermissions: Set<String> get() = permissions.keys.toSet()
+    override fun permissionOpen(requestId: String) = requestId in permissions
 
     override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
         val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
@@ -203,15 +203,15 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
-                    put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool")
+                    put("requestId", id); put("toolName", request["tool_name"].string()?.take(MAX_PERMISSION_FIELD_CHARS) ?: "tool")
                     val encoded = input.toString()
                     if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES) put("input", input)
                     else { put("inputTruncated", true); put("inputPreview", encoded.take(PERMISSION_PREVIEW_CHARS)) }
-                    request["tool_use_id"].string()?.let { put("toolUseId", it) }
-                    request["description"].string()?.let { put("description", it) }
+                    request["tool_use_id"].string()?.let { put("toolUseId", it.take(MAX_PERMISSION_FIELD_CHARS)) }
+                    request["description"].string()?.let { put("description", it.take(PERMISSION_PREVIEW_CHARS)) }
                     // Only AskUserQuestion is a question to the user; any other tool, interactive or not, is a tool use to approve.
                     put("question", request["tool_name"].string() == "AskUserQuestion")
-                    request["decision_reason_type"].string()?.let { put("reason", it) }
+                    request["decision_reason_type"].string()?.let { put("reason", it.take(MAX_PERMISSION_FIELD_CHARS)) }
                 })))
             }
             // Claude Code withdrew a request (its turn was interrupted): an answer to it is rejected.
@@ -249,6 +249,8 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         const val MAX_PERMISSION_INPUT_BYTES = 15_000
         /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
         const val PERMISSION_PREVIEW_CHARS = 2_000
+        /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
+        const val MAX_PERMISSION_FIELD_CHARS = 200
         val USAGE_FIELDS = listOf(
             "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
             "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",

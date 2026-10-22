@@ -22,6 +22,8 @@ import me.nathanfallet.teamcode.client.TeamCodeClient
 import me.nathanfallet.teamcode.client.TeamCodeException
 
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+/** Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) become spaces. */
+private fun String.printable() = map { if (it.isISOControl()) ' ' else it }.joinToString("")
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
 /**
@@ -32,7 +34,7 @@ private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.ge
     val question = element as? JsonObject ?: JsonObject(emptyMap())
     val options = (question["options"] as? JsonArray).orEmpty().mapIndexed { option, it -> "$option: ${((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull ?: ""}" }
     val several = (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
-    "\n    ? $index: ${question.text("question") ?: ""}" + (if (options.isEmpty()) "" else " (${options.joinToString(" / ")})") + if (several) " several" else ""
+    "\n    ? $index: " + (question.text("question") ?: "").printable() + (if (options.isEmpty()) "" else " (${options.joinToString(" / ").printable()})") + if (several) " several" else ""
 }
 
 /** Micro-dollars as `$0.003253`; null for a negative amount, which no runner reports. */
@@ -55,8 +57,8 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
         CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
-            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".trimEnd() + questions(data["input"])
-        CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}"
+            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
+        CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }
     return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}$body"
