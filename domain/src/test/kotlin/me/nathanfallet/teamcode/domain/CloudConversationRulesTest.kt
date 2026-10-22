@@ -2,6 +2,8 @@ package me.nathanfallet.teamcode.domain
 
 import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules
 import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules.MASK
+import me.nathanfallet.teamcode.domain.cloud.PermissionAnswer
+import me.nathanfallet.teamcode.domain.team.TeamFailure
 import kotlin.test.*
 
 class CloudConversationRulesTest {
@@ -38,5 +40,19 @@ class CloudConversationRulesTest {
         val text = CloudConversationRules.bound("x".repeat(20_000))
         assertEquals(CloudConversationRules.MAX_EVENT_STRING_CHARS, text.length)
         assertTrue(text.endsWith(CloudConversationRules.TRUNCATION_MARK))
+    }
+
+    @Test fun permissionAnswersAreBounded() {
+        fun valid(answer: PermissionAnswer) = CloudConversationRules.validatePermissionAnswer(answer)
+        fun invalid(answer: PermissionAnswer) = assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { valid(answer) }.code)
+        valid(PermissionAnswer("9334d94c-8640-42fb-89e7-052df9b43456", true, null, mapOf("Red or blue?" to "Blue")))
+        valid(PermissionAnswer("r/1+2", false, "Use echo\tinstead.\nThanks.", emptyMap()))
+        invalid(PermissionAnswer("req 1", true, null, emptyMap()))
+        invalid(PermissionAnswer("x".repeat(129), true, null, emptyMap()))
+        invalid(PermissionAnswer("r1", false, null, mapOf("Q" to "A")))
+        invalid(PermissionAnswer("r1", false, " ", emptyMap()))
+        invalid(PermissionAnswer("r1", true, null, mapOf("Q" to "x".repeat(CloudConversationRules.MAX_PERMISSION_TEXT_CHARS + 1))))
+        invalid(PermissionAnswer("r1", true, null, (1..17).associate { "Q$it" to "A" }))
+        invalid(PermissionAnswer("r1", false, "bell\u0007", emptyMap()))
     }
 }

@@ -68,6 +68,10 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * member's answer a `control_response`. A request is open until it is answered or its turn ends.
  */
 class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
+    private companion object {
+        /** Well under the server's 60,000-byte event limit, which would replace the event and its request id. */
+        const val MAX_PERMISSION_INPUT_CHARS = 20_000
+    }
     override var conversationId: String? = null; private set
     /** Messages written and not yet answered by a `result` line. */
     private var pending = 0
@@ -151,7 +155,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 val input = request["input"].obj() ?: JsonObject(emptyMap())
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
-                    put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool"); put("input", input)
+                    // The request must stay answerable: an input too large for one event is left out, never the whole event.
+                    put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool")
+                    if (input.toString().length <= MAX_PERMISSION_INPUT_CHARS) put("input", input) else put("inputTruncated", true)
                     request["tool_use_id"].string()?.let { put("toolUseId", it) }
                     request["description"].string()?.let { put("description", it) }
                     put("question", (request["requires_user_interaction"] as? JsonPrimitive)?.booleanOrNull == true)

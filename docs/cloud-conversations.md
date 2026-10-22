@@ -60,7 +60,7 @@ Events, in `cloud_session_events`:
 | `turn` | `{phase: started, completed, interrupted, failed, durationMs?, steps?}` |
 | `status` | `{agent, conversation?, conversationId?, model?, exitCode?}` |
 | `error` | `{code, message}` |
-| `permission.request` | `{requestId, toolName, input, question, toolUseId?, description?, reason?}`, see [permission requests](#permission-requests) |
+| `permission.request` | `{requestId, toolName, input or inputTruncated, question, toolUseId?, description?, reason?}`, see [permission requests](#permission-requests) |
 | `input` | `{inputId, kind, status, reason}`, server-written when an input is cancelled or rejected, or a permission answer consumed (then with `requestId`, `behavior` and `authorId`) |
 | `transfer` | `{transferId, fromMemberId, toMemberId, atEpoch}`, server-written when the session changed owner |
 
@@ -96,6 +96,8 @@ Bypass mode skips Claude Code's ordinary permission checks, but two things still
 `POST /cloud/sessions/{id}/permissions` with `{requestId, behavior: allow or deny, message?, answers?}` (body at most 64 KiB, `Idempotency-Key` accepted) answers it and returns `202` with the input view (kind `permission`). `deny` passes `message` to the agent; `allow` with `answers` (question text to the chosen label or free text, at most 16) answers a question. It needs the `message` permission, never wakes a session, is refused with `409 nothing_to_answer` unless the session is `ready` or `active`, and is delivered before queued messages. Only the agent process that asked can take it: an answer to a request that is no longer open is `rejected` with `unknown_permission_request`, and one delivered to an execution that ended with `execution_ended`. A request is open until its answer is consumed or its turn ends (a `turn` event). While it waits the turn is running, so the session stays `active`; a pause interrupts it like any long turn.
 
 Codex sessions keep refusing approval requests: their bypass mode produces none.
+
+Limits of this first version: a request waits without a deadline (only an answer, an interrupt or a pause ends it), so an unattended session with an `ask` rule stays `active`; whoever may send messages to the session may answer, as a message could already steer the agent; a tool input above 20,000 characters is left out of the event (`inputTruncated`), the request id kept; answers are keyed by the exact question text, and a question masked or cut in the transcript cannot be answered by its shown text; an answer lost on the way is rejected after 60 s like an interrupt (`delivery_failed`) and must be sent again. Every replica must run this version before members answer: an older replica reads a `permission` input as a message.
 
 ## Attach
 

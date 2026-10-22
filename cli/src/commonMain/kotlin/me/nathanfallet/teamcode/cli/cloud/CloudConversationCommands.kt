@@ -23,6 +23,12 @@ import me.nathanfallet.teamcode.client.TeamCodeException
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
+/** A question request's questions and options in full: `teamcode cloud answer --answer` needs their exact text. */
+private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.get("questions") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.joinToString("") { question ->
+    val options = (question["options"] as? JsonArray).orEmpty().mapNotNull { ((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull }
+    "\n    ? ${question.text("question") ?: ""}" + if (options.isEmpty()) "" else " (${options.joinToString(" / ")})"
+}
+
 /** One readable line (or block) per event; unknown types are shown by name so newer servers stay readable. */
 internal fun CloudEventView.render(): String {
     val time = Instant.fromEpochMilliseconds(at).toString().substring(11, 19)
@@ -36,7 +42,7 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
         CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
-            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd()
+            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd() + questions(data["input"])
         else -> "[$type] $data"
     }
     return "$time #$seq $body"

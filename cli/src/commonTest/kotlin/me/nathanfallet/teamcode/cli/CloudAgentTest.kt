@@ -9,6 +9,7 @@ import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.cli.cloud.RunnerCalls
 import me.nathanfallet.teamcode.cli.cloud.RunnerInference
 import me.nathanfallet.teamcode.cli.cloud.RunnerLoop
+import me.nathanfallet.teamcode.cli.cloud.render
 import me.nathanfallet.teamcode.cli.cloud.agent.*
 import me.nathanfallet.teamcode.cli.platform.AgentProcess
 import me.nathanfallet.teamcode.client.TeamCodeException
@@ -69,6 +70,10 @@ class CloudAgentTest {
 
         val question = adapter.parse("""{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Red or blue?","options":[{"label":"Red"},{"label":"Blue"}]}]},"tool_use_id":"t2","requires_user_interaction":true}}""").events.single()
         assertEquals(true, question.data["question"]!!.jsonPrimitive.boolean)
+        assertTrue(CloudEventView(1, question.type, 0, 1, question.data).render().endsWith("\n    ? Red or blue? (Red / Blue)"), "The exact question and its options are printed")
+        val large = adapter.parse("""{"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"content":"${"x".repeat(30_000)}"}}}""").events.single()
+        assertEquals("r9", large.data.str("requestId")); assertNull(large.data["input"]); assertEquals(true, large.data["inputTruncated"]!!.jsonPrimitive.boolean)
+        assertTrue("x".repeat(30_000) in adapter.answer("r9", true, null, emptyMap()).single(), "The agent still gets its full input back")
         val allowed = obj(adapter.answer("r2", true, null, mapOf("Red or blue?" to "Blue")).single())["response"]!!.jsonObject["response"]!!.jsonObject
         assertEquals("allow", allowed.str("behavior"))
         val updated = allowed["updatedInput"]!!.jsonObject
