@@ -271,8 +271,9 @@ internal class AgentHost(
                     if (event.type != CloudEventTypes.PERMISSION_REQUEST) return@forEach
                     val requestId = (event.data["requestId"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
                     // A request no member can see (the buffer is full while the server is unreachable) is denied at once
-                    // rather than left blocking the agent.
-                    if (kept) expireLater(child, active, requestId)
+                    // rather than left blocking the agent, and so is one raised while the session pauses (no answer reaches it).
+                    if (stopping) denials += active.answer(requestId, false, PAUSE_DENIAL, emptyList()).lines
+                    else if (kept) expireLater(child, active, requestId)
                     else denials += active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.

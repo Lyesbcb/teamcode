@@ -198,7 +198,9 @@ class CloudConversationPersistenceTest {
         ra.agent.acknowledge(team, s.id, 1, listOf(RunnerInputAck(denied.input.id, true, null)))
         ra.agent.events(team, s.id, 1, listOf(
             RunnerEvent(9, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-3","toolName":"Bash","input":{},"question":false}"""),
-            RunnerEvent(10, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
+            RunnerEvent(10, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
+            RunnerEvent(11, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
+            RunnerEvent(12, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
         ))
         failure("permission_request_ended") { ra.conversation.answer(admin, s.id, PermissionAnswer("tool-3", true, null, emptyList()), InputRequest("""{"requestId":"tool-3","behavior":"allow"}""", false, null, null, null)) }
 

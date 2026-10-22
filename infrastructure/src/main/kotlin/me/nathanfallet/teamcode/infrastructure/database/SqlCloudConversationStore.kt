@@ -91,7 +91,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             }.orderBy(CloudSessionEvents.seq to SortOrder.ASC).limit(scanned)
                 .firstOrNull { row -> jsonObject(row[CloudSessionEvents.data])?.let(closes) == true }?.get(CloudSessionEvents.seq)
         // The request's turn ends at the first turn event after it that is an end; the oldest closing event wins (the agent saw it first).
-        val ended = closing(CloudEventType.TURN, 2) { it.str("phase") in CloudConversationRules.TURN_END_PHASES }
+        // Messages queued during the turn add `started` markers before its end: those are skipped.
+        val ended = closing(CloudEventType.TURN, MAX_CLOSING_SCANNED) { it.str("phase") in CloudConversationRules.TURN_END_PHASES }
         val answered = closing(CloudEventType.INPUT, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId && it.str("status") == CloudInputStatus.CONSUMED.wire }
         val expired = closing(CloudEventType.PERMISSION_EXPIRED, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId }
         val state = listOfNotNull(ended?.let { it to PermissionRequestState.ENDED }, answered?.let { it to PermissionRequestState.ANSWERED }, expired?.let { it to PermissionRequestState.EXPIRED })
@@ -239,7 +240,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             val teamId = lockSession(sessionId)[CloudSessions.teamId]
             CloudSessionInputs.selectAll().where {
                 (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
-            }.limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput).forEach { finish(teamId, it, CloudInputStatus.CANCELLED, "session_ended", now); changed++ }
+            }.limit(MAX_PENDING_ALL).map(::readInput).forEach { finish(teamId, it, CloudInputStatus.CANCELLED, "session_ended", now); changed++ }
         }
         changed
     }
@@ -363,7 +364,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     /** Queued and delivered inputs of a session, oldest first; the caller holds the session row lock. */
     internal fun pendingInputs(sessionId: String): List<CloudInput> = CloudSessionInputs.selectAll().where {
         (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
-    }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC).limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput)
+    }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC).limit(MAX_PENDING_ALL).map(::readInput)
 
     /** The caller holds the session row lock, so sequences are dense; [saveCursor] records the new last sequence. */
     private fun insertEvent(sessionId: String, teamId: String, seq: Long, epoch: Int, runnerSeq: Long?, type: CloudEventType, at: Long, data: String) {
@@ -425,7 +426,9 @@ private fun readEvent(row: ResultRow) = CloudEvent(
 )
 /** How many of the session's latest requests an answer is matched against. */
 private const val MAX_REQUESTS_SCANNED = 200
-/** How many later `input` or `permission.expired` events are read to find the one that closed a request. */
+/** Every input a session may hold pending: messages and interrupts, plus permission answers under their own bound. */
+private const val MAX_PENDING_ALL = CloudConversationRules.MAX_PENDING_INPUTS + CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS
+/** How many later `turn`, `input` or `permission.expired` events are read to find the one that closed a request. */
 private const val MAX_CLOSING_SCANNED = 200
 /** Enough of a stored `permission.request` for its leading `requestId` (at most 128 characters, escaped). */
 private const val REQUEST_HEAD_CHARS = 300
