@@ -128,6 +128,9 @@ object CloudConversationRules {
             PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
             PermissionRequestState.ENDED -> throw TeamFailure("permission_request_ended", 409, "The turn of this permission request has ended.")
         }
+        // Nobody may approve what nobody could read: an input too large for the transcript can only be denied.
+        if (answer.allow && request.inputLeftOut)
+            throw TeamFailure("permission_input_unseen", 400, "This request's input was too large to show in the transcript, so it can only be denied.")
         if (!request.question) {
             if (!approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
             if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")
@@ -156,8 +159,6 @@ object CloudConversationRules {
     const val MAX_PERMISSION_DEADLINE_MINUTES = 1_440
     /** The `turn` phases that end a turn, and with it every permission request still open in it. */
     val TURN_END_PHASES = setOf("completed", "interrupted", "failed")
-    /** How far back in a session's transcript an answer looks for its request; an open request belongs to the running turn. */
-    const val PERMISSION_LOOKUP_EVENTS = 1_000L
     /** Printable ASCII without spaces: the agent chooses the shape (Claude Code: a UUID). */
     private val permissionRequestId = Regex("[\\x21-\\x7E]{1,128}")
     fun isPermissionRequestId(id: String) = permissionRequestId.matches(id)

@@ -3,6 +3,18 @@ package me.nathanfallet.teamcode.api.models
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
+/**
+ * What the server keeps of runner event data: the nesting depth from the event, the entries per object or array, the
+ * key length, and the reasoning keys (or object types) it drops. Shared by the server's sanitizer and the runner, which
+ * leaves a permission request's input out rather than letting the server cut it.
+ */
+object CloudTranscriptLimits {
+    const val MAX_DEPTH = 16
+    const val MAX_ENTRIES = 200
+    const val MAX_KEY_CHARS = 64
+    val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+}
+
 /** Normalized transcript event types. Clients must tolerate unknown types and unknown `data` fields. */
 object CloudEventTypes {
     const val USER_MESSAGE = "message.user"

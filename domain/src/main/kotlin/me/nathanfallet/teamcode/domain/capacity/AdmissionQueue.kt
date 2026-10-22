@@ -24,6 +24,8 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
     suspend fun reserve(actor: Principal, input: AdmissionInput, beforeAttempt: suspend () -> Unit = {}): Reservation {
         val ticket = queue.enqueue(actor, input)
         var admitted = false
+        var attempt = 0
+        var lastWait: String? = null
         try {
             return withTimeoutOrNull(MAX_WAIT_MILLIS) {
                 while (true) {
@@ -31,13 +33,17 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
                     try { return@withTimeoutOrNull queue.reserveQueued(actor, ticket, input).also { admitted = true } }
                     catch (error: TeamFailure) {
                         if (error.code !in WAITABLE) throw error
-                        queue.renew(actor, ticket, error.code in setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay"), input)
-                        delay(POLL_MILLIS)
+                        lastWait = error.code
+                        val blocked = error.code in setOf("member_concurrency", "group_concurrency", "run_concurrency", "pacing_concurrency", "pacing_delay")
+                        // Recomputing the physical queue scope reads every account under the team lock: refresh it on
+                        // the first retry and then every few, the lease renewal alone is enough in between.
+                        if (attempt % SCOPE_REFRESH_EVERY == 0) queue.renew(actor, ticket, blocked, input) else queue.renew(actor, ticket, blocked)
+                        delay(pollDelay(attempt++))
                     }
                 }
                 @Suppress("UNREACHABLE_CODE")
                 error("unreachable")
-            } ?: throw TeamFailure("queue_timeout", 503, "TeamCode waited ${MAX_WAIT_MILLIS / 1000}s for free capacity in your pool without getting a turn. Retry shortly.", retryAfterSeconds = 15)
+            } ?: throw TeamFailure("queue_timeout", 503, "TeamCode waited ${MAX_WAIT_MILLIS / 1000}s for free capacity in your pool without getting a turn${lastWait?.let { " (last wait: $it)" }.orEmpty()}. Retry shortly.", retryAfterSeconds = 15)
         } finally {
             // A revoked session must still be able to remove its own pending row.
             // Lease expiry provides cleanup if the database is unreachable or the replica crashes.
@@ -50,6 +56,17 @@ class AwaitAdmissionUseCase(private val queue: AdmissionQueueStore) {
     companion object {
         const val MAX_WAIT_MILLIS = 90_000L
         const val POLL_MILLIS = 500L
+        const val SCOPE_REFRESH_EVERY = 4
+        /**
+         * Each poll is a team-locked transaction, and every queued request polls: a long wait must cost less than a short
+         * one. Fixed at [POLL_MILLIS] for the first attempts so a freed slot is still taken quickly, then 1 s, then 2 s
+         * (well inside [LEASE_MILLIS]), with jitter so waiters do not poll in step.
+         */
+        fun pollDelay(attempt: Int, random: kotlin.random.Random = kotlin.random.Random.Default): Long {
+            if (attempt < 4) return POLL_MILLIS
+            val base = if (attempt < 10) 2 * POLL_MILLIS else 4 * POLL_MILLIS
+            return base - base / 5 + random.nextLong(base * 2 / 5 + 1)
+        }
         const val LEASE_MILLIS = 15_000L
         // "pacing_concurrency" is no longer emitted (pacing only spaces admissions); it stays waitable while older
         // replicas still run during a rolling upgrade.

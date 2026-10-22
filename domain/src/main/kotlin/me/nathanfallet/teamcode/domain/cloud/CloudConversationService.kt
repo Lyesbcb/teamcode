@@ -97,19 +97,19 @@ class CloudConversationService(
     suspend fun answer(principal: Principal, id: String, answer: PermissionAnswer, request: InputRequest): InputOutcome {
         CloudConversationRules.validatePermissionAnswer(answer)
         val session = open(principal, id, CloudPermission.MESSAGE)
-        // A retry of an answer already taken replays it, before the checks its own consumption would now fail.
-        request.clientKey?.let { key -> store.inputByKey(session.id, principal.member.id, key) }?.let { existing ->
-            if (existing.requestDigest != request.requestDigest || existing.kind != CloudInputKind.PERMISSION)
-                throw TeamFailure("idempotency_conflict", 422, "This idempotency key was already used with a different message.")
-            return InputOutcome.Replayed(existing)
-        }
-        if (session.state != READY && session.state != ACTIVE)
-            throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
-        val asked = store.permissionRequest(session.id, answer.requestId, CloudConversationRules.PERMISSION_LOOKUP_EVENTS)
-            ?: throw TeamFailure("unknown_permission_request", 409, "No permission request with this id waits in the session's recent transcript.")
-        CloudConversationRules.checkAnswer(asked, answer, approver = session.ownerId == principal.member.id || principal.isCloudAdministrator, currentEpoch = session.currentEpoch)
+        val approver = session.ownerId == principal.member.id || principal.isCloudAdministrator
         val input = newInput(principal, session, CloudInputKind.PERMISSION, request.text, request.copy(wake = false))
-        return store.insertInput(NewInput(input, null, session.ownerId, permissionRequestId = answer.requestId), CloudConversationRules.MAX_PENDING_INPUTS)
+        // Checked by the store under the session lock, after an idempotent retry was replayed (a retry of an answer
+        // already consumed gets its acknowledgement back) and atomically with the insert (two members answering at
+        // once: the second sees the first).
+        val check = { context: AnswerContext ->
+            if ((context.state != READY && context.state != ACTIVE) || context.desiredState != DesiredState.RUNNING)
+                throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
+            val asked = context.request
+                ?: throw TeamFailure("unknown_permission_request", 409, "No permission request with this id waits in the session's recent transcript.")
+            CloudConversationRules.checkAnswer(asked, answer, approver, context.currentEpoch)
+        }
+        return store.insertInput(NewInput(input, null, session.ownerId, permissionRequestId = answer.requestId, permissionCheck = check), CloudConversationRules.MAX_PENDING_INPUTS)
     }
 
     suspend fun inputs(principal: Principal, id: String, beforeId: String?, limit: Int): CloudInputPage {

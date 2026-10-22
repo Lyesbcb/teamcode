@@ -45,7 +45,7 @@ data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(
  * than a tool use gated by an `ask` rule. [questions]: each question's shape, null when the input was left out of the
  * event. [state]: what the later transcript says about it. [epoch]: the execution that asked; another one cannot answer it.
  */
-data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0)
+data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0, val inputLeftOut: Boolean = false)
 enum class PermissionRequestState {
     /** Nothing closed it yet (the runner may still have, without telling: a withdrawal). */
     OPEN,
@@ -99,7 +99,12 @@ data class NewInput(
     val expectedOwnerId: String? = null,
     /** For a permission answer: refused with `409 permission_request_answered` while another answer to this request is pending. */
     val permissionRequestId: String? = null,
+    /** For a permission answer: the rules it must pass, given the session and its request as they are under the lock. */
+    val permissionCheck: ((AnswerContext) -> Unit)? = null,
 )
+
+/** What a permission answer is checked against, read under the session row lock: [request] is null when none was found. */
+data class AnswerContext(val request: PermissionRequestRecord?, val state: CloudSessionState, val desiredState: DesiredState, val currentEpoch: Int)
 sealed interface InputOutcome {
     val input: CloudInput
     data class Accepted(override val input: CloudInput) : InputOutcome

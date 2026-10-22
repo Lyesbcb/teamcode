@@ -19,6 +19,8 @@ object CloudSessionEvents : Table("cloud_session_events") {
     init {
         uniqueIndex("cloud_event_runner_seq", sessionId, epoch, runnerSeq)
         index("cloud_event_retention", false, teamId, at)
+        /** Events of one type in order: a permission request, and what closed it, without reading the tool events between. */
+        index("cloud_event_type", false, sessionId, type, seq)
     }
 }
 

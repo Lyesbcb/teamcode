@@ -18,10 +18,10 @@ class CloudConversation(val service: CloudConversationService, val access: Cloud
 
 private const val MESSAGE_BODY_BYTES = 256 * 1024
 private const val RUNNER_BODY_BYTES = 2 * 1024 * 1024
-private const val MAX_JSON_DEPTH = 16
-private const val MAX_JSON_ARRAY = 200
+private const val MAX_JSON_DEPTH = CloudTranscriptLimits.MAX_DEPTH
+private const val MAX_JSON_ARRAY = CloudTranscriptLimits.MAX_ENTRIES
 /** Keys whose values are model reasoning or its signature; never stored even if an adapter forwards them. */
-private val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+private val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS
 
 internal fun CloudEvent.view() = CloudEventView(seq, type.wire, at, epoch, Serialization.json.parseToJsonElement(data).jsonObject)
 private fun CloudEventPage.view() = CloudEventPageView(events.map { it.view() }, firstSeq, lastSeq, nextAfter, nextBefore)
@@ -259,7 +259,7 @@ internal object CloudTranscriptSanitizer {
     private fun sanitize(element: JsonElement, depth: Int): JsonElement = when (element) {
         is JsonObject -> if (depth >= MAX_JSON_DEPTH) JsonPrimitive(CloudConversationRules.TRUNCATION_MARK) else JsonObject(
             element.entries.asSequence().filter { (key, value) -> key !in DROPPED_KEYS && !(value is JsonObject && (value["type"] as? JsonPrimitive)?.contentOrNull in DROPPED_KEYS) }
-                .take(MAX_JSON_ARRAY).associate { (key, value) -> key.take(64) to sanitize(value, depth + 1) })
+                .take(MAX_JSON_ARRAY).associate { (key, value) -> key.take(CloudTranscriptLimits.MAX_KEY_CHARS) to sanitize(value, depth + 1) })
         is JsonArray -> if (depth >= MAX_JSON_DEPTH) JsonPrimitive(CloudConversationRules.TRUNCATION_MARK) else JsonArray(
             element.filterNot { it is JsonObject && (it["type"] as? JsonPrimitive)?.contentOrNull in DROPPED_KEYS }.take(MAX_JSON_ARRAY).map { sanitize(it, depth + 1) })
         is JsonPrimitive -> if (element.isString) JsonPrimitive(CloudConversationRules.bound(element.content)) else element

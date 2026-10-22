@@ -5,6 +5,7 @@ import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
 import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
+import me.nathanfallet.teamcode.api.models.CloudTranscriptLimits
 
 /** A normalized transcript event before upload. The server masks and bounds it again. */
 data class AgentEvent(val type: String, val data: JsonObject)
@@ -20,8 +21,11 @@ data class AgentCommand(val command: String, val arguments: List<String>)
  */
 data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0)
 
-/** The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]). */
-data class AnswerOutcome(val lines: List<String>, val refusal: String? = null) {
+/**
+ * The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]);
+ * [input] is the request's tool input, to [AgentAdapter.reopen] it when [lines] could not be written.
+ */
+data class AnswerOutcome(val lines: List<String>, val refusal: String? = null, val input: JsonObject? = null) {
     companion object {
         const val UNKNOWN = "unknown_permission_request"
         const val INVALID = "invalid_answer"
@@ -53,6 +57,8 @@ interface AgentAdapter {
     fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome = AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
     /** Whether the permission request [requestId] still waits for an answer. */
     fun permissionOpen(requestId: String): Boolean = false
+    /** Opens [requestId] again after its answer could not be written, so another answer (or the deadline) can close it. */
+    fun reopen(requestId: String, input: JsonObject) {}
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -60,6 +66,8 @@ interface AgentAdapter {
 private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 private fun JsonElement?.string() = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
 private fun JsonElement?.obj() = this as? JsonObject
+/** At most [limit] characters, never ending on half a surrogate pair. */
+internal fun String.cut(limit: Int): String = if (length <= limit) this else take(if (this[limit - 1].isHighSurrogate()) limit - 1 else limit)
 private fun JsonElement?.array() = this as? JsonArray
 private fun parseObject(line: String): JsonObject? = try { json.parseToJsonElement(line) as? JsonObject } catch (_: IllegalArgumentException) { null }
 private fun turn(phase: String, extra: JsonObjectBuilder.() -> Unit = {}) = AgentEvent(CloudEventTypes.TURN, buildJsonObject { put("phase", phase); extra() })
@@ -114,6 +122,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
     override fun permissionOpen(requestId: String) = requestId in permissions
+    override fun reopen(requestId: String, input: JsonObject) { permissions[requestId] = input }
 
     override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
         val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
@@ -130,7 +139,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                     } else { put("behavior", "deny"); put("message", message ?: "A team member denied this request.") }
                 }
             }
-        }.toString()))
+        }.toString()), input = input)
     }
 
     /**
@@ -141,7 +150,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
      */
     private fun keptWhole(element: JsonElement, depth: Int): Boolean = when (element) {
         is JsonObject -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && (depth == 0 || element["type"].string() !in DROPPED_KEYS) &&
-            element.all { (key, value) -> key.length <= 64 && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
+            element.all { (key, value) -> key.length <= CloudTranscriptLimits.MAX_KEY_CHARS && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
         is JsonArray -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && element.all { keptWhole(it, depth + 1) }
         else -> true
     }
@@ -216,18 +225,26 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                     putJsonObject("response") { put("subtype", "error"); put("request_id", id); put("error", "This control request is not supported by the TeamCode runner.") }
                 }.toString()))
                 val input = request["input"].obj() ?: JsonObject(emptyMap())
+                // An id no member could send back (the server takes 1 to 128 printable ASCII characters) is denied at once.
+                if (!PERMISSION_REQUEST_ID.matches(id)) return AgentOutput(replies = listOf(buildJsonObject {
+                    put("type", "control_response")
+                    putJsonObject("response") {
+                        put("subtype", "success"); put("request_id", id)
+                        putJsonObject("response") { put("behavior", "deny"); put("message", "The request could not be shown to the team: it was denied.") }
+                    }
+                }.toString()))
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
-                    put("requestId", id); put("toolName", request["tool_name"].string()?.take(MAX_PERMISSION_FIELD_CHARS) ?: "tool")
+                    put("requestId", id); put("toolName", request["tool_name"].string()?.cut(MAX_PERMISSION_FIELD_CHARS) ?: "tool")
                     val encoded = input.toString()
                     if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES && keptWhole(input, 1)) put("input", input)
-                    else { put("inputTruncated", true); put("inputPreview", encoded.take(PERMISSION_PREVIEW_CHARS)) }
-                    request["tool_use_id"].string()?.let { put("toolUseId", it.take(MAX_PERMISSION_FIELD_CHARS)) }
-                    request["description"].string()?.let { put("description", it.take(PERMISSION_PREVIEW_CHARS)) }
+                    else { put("inputTruncated", true); put("inputPreview", encoded.cut(PERMISSION_PREVIEW_CHARS)) }
+                    request["tool_use_id"].string()?.let { put("toolUseId", it.cut(MAX_PERMISSION_FIELD_CHARS)) }
+                    request["description"].string()?.let { put("description", it.cut(PERMISSION_PREVIEW_CHARS)) }
                     // Only AskUserQuestion is a question to the user; any other tool, interactive or not, is a tool use to approve.
                     put("question", request["tool_name"].string() == "AskUserQuestion")
-                    request["decision_reason_type"].string()?.let { put("reason", it.take(MAX_PERMISSION_FIELD_CHARS)) }
+                    request["decision_reason_type"].string()?.let { put("reason", it.cut(MAX_PERMISSION_FIELD_CHARS)) }
                 })))
             }
             // Claude Code withdrew a request (its turn was interrupted): an answer to it is rejected.
@@ -265,12 +282,17 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         const val MAX_PERMISSION_INPUT_BYTES = 15_000
         /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
         const val PERMISSION_PREVIEW_CHARS = 2_000
-        /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
+        /**
+         * The other fields of a request event stay short (the description at [PERMISSION_PREVIEW_CHARS]), so the event as a
+         * whole (at most about 15 KB of input or 8 KB of preview, plus 8 KB of description) stays well under the server's 60 KB.
+         */
         const val MAX_PERMISSION_FIELD_CHARS = 200
-        /** The server's transcript limits (depth 16 from the event, 200 entries) and the reasoning keys it drops. */
-        const val MAX_KEPT_DEPTH = 16
-        const val MAX_KEPT_ENTRIES = 200
-        val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+        /** The server's transcript limits and the reasoning keys it drops. */
+        /** The request ids the server accepts in an answer (`CloudConversationRules.validatePermissionAnswer`). */
+        val PERMISSION_REQUEST_ID = Regex("[\\x21-\\x7E]{1,128}")
+        const val MAX_KEPT_DEPTH = CloudTranscriptLimits.MAX_DEPTH
+        const val MAX_KEPT_ENTRIES = CloudTranscriptLimits.MAX_ENTRIES
+        val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS
         val USAGE_FIELDS = listOf(
             "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
             "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",

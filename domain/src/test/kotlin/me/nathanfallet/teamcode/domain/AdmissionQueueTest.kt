@@ -47,6 +47,20 @@ class AdmissionQueueTest {
         assertEquals(2, checked)
         assertFalse(queue.released, "The reservation transaction already consumed the ticket")
     }
+    @Test fun timeoutNamesTheLastThingTheRequestWasWaitingFor() = runTest {
+        val failure = assertFailsWith<TeamFailure> { AwaitAdmissionUseCase(Queue("member_concurrency")).reserve(actor, input) }
+        assertEquals("queue_timeout", failure.code)
+        assertTrue("(last wait: member_concurrency)" in failure.message.orEmpty())
+    }
+    @Test fun longWaitsPollLessOftenAndStayInsideTheLease() {
+        val random = kotlin.random.Random(7)
+        repeat(4) { assertEquals(AwaitAdmissionUseCase.POLL_MILLIS, AwaitAdmissionUseCase.pollDelay(it, random)) }
+        repeat(100) {
+            assertTrue(AwaitAdmissionUseCase.pollDelay(4, random) in 800..1200)
+            assertTrue(AwaitAdmissionUseCase.pollDelay(20, random) in 1600..2400)
+        }
+        assertTrue(2_400 * 4 < AwaitAdmissionUseCase.LEASE_MILLIS, "Several late polls fit in one lease")
+    }
     @Test fun cancellationAndDeadlineRemovePendingMetadataWithoutDispatching() = runTest {
         val queue = Queue("member_concurrency")
         val pending = launch { AwaitAdmissionUseCase(queue).reserve(actor, input) }

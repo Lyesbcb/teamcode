@@ -87,12 +87,17 @@ class CloudConversationRoutesTest {
         override suspend fun lastSeq(sessionId: String) = events.filter { it.sessionId == sessionId }.maxOfOrNull { it.seq } ?: 0
         /** The requests a test says are in the transcript (the MySQL lookup is covered in infrastructure). */
         val requests = mutableMapOf<String, PermissionRequestRecord>()
-        override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long) = requests[requestId]
+        /** The session as the store's lock would read it (the sessions fake of the test). */
+        var sessionOf: (String) -> CloudSession? = { null }
         override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome {
             val input = new.input
             inputs.values.find { it.sessionId == input.sessionId && it.authorId == input.authorId && it.clientKey != null && it.clientKey == input.clientKey }?.let {
                 if (it.requestDigest != input.requestDigest) throw TeamFailure("idempotency_conflict", 422, "conflict")
                 return InputOutcome.Replayed(it)
+            }
+            new.permissionCheck?.let { check ->
+                val session = sessionOf(input.sessionId)!!
+                check(AnswerContext(new.permissionRequestId?.let(requests::get), session.state, session.desiredState, session.currentEpoch))
             }
             new.permissionRequestId?.let { requestId ->
                 if (inputs.values.any { it.sessionId == input.sessionId && it.kind == CloudInputKind.PERMISSION && !it.status.final && "\"requestId\":\"$requestId\"" in it.text.orEmpty() })
@@ -102,8 +107,6 @@ class CloudConversationRoutesTest {
             return InputOutcome.Accepted(input)
         }
         override suspend fun input(sessionId: String, id: String) = inputs[id]?.takeIf { it.sessionId == sessionId }
-        override suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String) =
-            inputs.values.find { it.sessionId == sessionId && it.authorId == authorId && it.clientKey == clientKey }
         override suspend fun inputs(sessionId: String, beforeId: String?, limit: Int) = CloudInputPage(inputs.values.filter { it.sessionId == sessionId }.reversed().take(limit), null)
         override suspend fun clearWake(sessionId: String) = Unit
         override suspend fun pendingWakes(limit: Int) = emptyList<Pair<String, String>>()
@@ -163,7 +166,7 @@ class CloudConversationRoutesTest {
     /** A real server: the test engine buffers a streamed response until it completes, which an endless stream never does. */
     @Test fun transcriptMessagesStreamAndRunnerAgentChannel() = runBlocking {
         val store = Sessions(listOf(admin, colleague, other))
-        val conversations = Conversations()
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
         val access = CloudAccessService(conversations, store)
         val service = CloudConversationService(conversations, store, access, sleep = { delay(20) })
         val sessions = CloudSessionService(store, access = access, initialMessages = service)
@@ -268,6 +271,10 @@ class CloudConversationRoutesTest {
                 conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, PermissionRequestState.EXPIRED, epoch = 1)
                 val expired = answer("colleague", """{"requestId":"old-1","behavior":"allow"}""")
                 assertEquals(HttpStatusCode.Conflict, expired.status, "An expired request was already denied"); assertTrue("permission_request_expired" in expired.bodyAsText())
+                conversations.requests["big-1"] = PermissionRequestRecord("big-1", question = false, null, epoch = 1, inputLeftOut = true)
+                val unseen = answer("colleague", """{"requestId":"big-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.BadRequest, unseen.status, "Nobody approves an input nobody could read"); assertTrue("permission_input_unseen" in unseen.bodyAsText())
+                assertEquals(HttpStatusCode.Accepted, answer("colleague", """{"requestId":"big-1","behavior":"deny"}""").status, "but it can be denied")
                 conversations.inputs.values.removeIf { it.kind == CloudInputKind.PERMISSION }
                 val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1")
                 assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)
@@ -338,7 +345,7 @@ class CloudConversationRoutesTest {
 
     @Test fun attachmentsAndPolicyFollowMemberAndGroupRules() = testApplication {
         val store = Sessions(listOf(admin, colleague, other))
-        val conversations = Conversations()
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
         val groups = object : CloudGroupDirectory {
             override suspend fun groupsOf(teamId: String, memberId: String) = if (memberId == other.id) setOf("reviewers") else emptySet()
             override suspend fun exists(teamId: String, groupId: String) = groupId == "reviewers"

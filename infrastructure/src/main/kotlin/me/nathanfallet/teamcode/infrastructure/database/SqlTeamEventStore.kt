@@ -23,6 +23,25 @@ internal fun publishTeamEvent(team: String, type: TeamEventType, subject: String
     }
 }
 
+/** One feed event to publish with [publishTeamEvents]. */
+internal data class PendingTeamEvent(val type: TeamEventType, val subject: String, val owner: String, val data: JsonObject, val at: Long)
+
+/**
+ * Appends [events] to the team's feed in order, in a fixed number of statements however many there are: the cursor
+ * moves once by their count, and they are inserted in one batch. Same lock rules as [publishTeamEvent].
+ */
+internal fun publishTeamEvents(team: String, events: List<PendingTeamEvent>) {
+    if (events.isEmpty()) return
+    // As in [publishTeamEvent]: one statement takes the row's lock and moves the cursor.
+    val count = events.size.toLong()
+    TeamEventCursors.upsert(onUpdate = { it[TeamEventCursors.lastSeq] = TeamEventCursors.lastSeq + count }) { it[teamId] = team; it[lastSeq] = count }
+    val last = TeamEventCursors.select(TeamEventCursors.lastSeq).where { TeamEventCursors.teamId eq team }.single()[TeamEventCursors.lastSeq]
+    TeamEvents.batchInsert(events.withIndex(), shouldReturnGeneratedValues = false) { (index, event) ->
+        this[TeamEvents.teamId] = team; this[TeamEvents.seq] = last - count + 1 + index; this[TeamEvents.type] = event.type.wire
+        this[TeamEvents.subjectId] = event.subject; this[TeamEvents.ownerId] = event.owner; this[TeamEvents.at] = event.at; this[TeamEvents.data] = event.data.toString()
+    }
+}
+
 /**
  * Publishes what a session write means to the feed (see [TeamEventRules.session]); the caller holds the session row
  * lock and calls this after its other writes. [action] is the write's audit action, which names the reason.

@@ -89,6 +89,10 @@ internal class AgentHost(
     private var stopping = false
     /** Deadline timers of open permission requests, by request id, with the process that asked; guarded by [lock]. */
     private val deadlines = mutableMapOf<String, Pair<AgentProcess, Job>>()
+    /** Requests whose answer is being written: their deadline stays until the write succeeds. Under [lock]. */
+    private val writing = mutableSetOf<String>()
+    /** Requests whose deadline passed while their answer was being written: denied at once if that write fails. Under [lock]. */
+    private val dueWhileWriting = mutableSetOf<String>()
     private lateinit var scope: CoroutineScope
 
     /** Runs input delivery and uploads until cancelled or fenced. */
@@ -168,14 +172,26 @@ internal class AgentHost(
             val allow = (answer["behavior"] as? JsonPrimitive)?.contentOrNull == "allow"
             val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
             // Never starts the agent: only the process that asked can take the answer.
-            val (child, outcome) = lock.withLock {
+            val (child, active, outcome) = lock.withLock {
+                // Accepted while draining too: an answer is what lets a turn blocked on a request end before the pause.
                 val child = process ?: return@withLock null
-                val outcome = adapter?.answer(requestId, allow, message, answers) ?: return@withLock null
-                if (outcome.lines.isNotEmpty()) deadlines.remove(requestId)?.second?.cancel()
-                child to outcome
+                val active = adapter ?: return@withLock null
+                // The deadline keeps running until the answer is written: a failed write leaves it as it was.
+                Triple(child, active, active.answer(requestId, allow, message, answers)).also { if (it.third.lines.isNotEmpty()) writing += requestId }
             } ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, AnswerOutcome.UNKNOWN)
             if (outcome.lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, outcome.refusal ?: AnswerOutcome.UNKNOWN)
-            return if (write(child, outcome.lines)) consumed else unavailable
+            val written = write(child, outcome.lines)
+            lock.withLock {
+                writing -= requestId
+                val due = dueWhileWriting.remove(requestId)
+                if (written) deadlines.remove(requestId)?.second?.cancel()
+                // Not written: the request stays open for another answer, with its deadline; one that passed meanwhile denies it now.
+                else if (process === child && outcome.input != null) {
+                    active.reopen(requestId, outcome.input)
+                    if (due) expireLater(child, active, requestId, delayMillis = 0)
+                }
+            }
+            return if (written) consumed else unavailable
         }
         val text = input.text ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
         val (child, lines) = lock.withLock {
@@ -252,10 +268,10 @@ internal class AgentHost(
                     // A request no member can see (the buffer is full while the server is unreachable) is denied at once
                     // rather than left blocking the agent.
                     if (kept) expireLater(child, active, requestId)
-                    else denials += active.answer(requestId, false, "The request could not be shown to the team: it was denied.", emptyList()).lines
+                    else denials += active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
-                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) }
+                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) && it !in writing }
                 result.replies + denials
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.
@@ -287,23 +303,26 @@ internal class AgentHost(
      * With a team deadline, denies the request [requestId] when it is still open after it: the agent reads why, and
      * the transcript gets a `permission.expired` event. Called under [lock].
      */
-    private fun expireLater(child: AgentProcess, active: AgentAdapter, requestId: String) {
+    private fun expireLater(child: AgentProcess, active: AgentAdapter, requestId: String, delayMillis: Long? = null) {
         val minutes = settings?.permissionDeadlineMinutes?.takeIf { it > 0 } ?: return
         deadlines.remove(requestId)?.second?.cancel()
         deadlines[requestId] = child to scope.launch {
-            sleep(minutes * 60_000L)
+            sleep(delayMillis ?: (minutes * 60_000L))
             val message = "No answer within $minutes minute${if (minutes == 1) "" else "s"}: the request was denied."
-            val lines = lock.withLock {
+            val outcome = lock.withLock {
                 deadlines.remove(requestId)
+                // An answer being written: denied only if that write fails.
+                if (requestId in writing) { dueWhileWriting += requestId; return@launch }
                 // Answered, withdrawn, ended with its turn, or another process by now: nothing to deny.
                 if (process !== child) return@launch
-                active.answer(requestId, false, message, emptyList()).lines.ifEmpty { return@launch }.also {
+                active.answer(requestId, false, message, emptyList()).takeIf { it.lines.isNotEmpty() }?.also {
                     // Recorded before the agent reads the denial, so it precedes whatever the agent does next (the end
                     // of its turn in particular).
                     enqueue(CloudEventTypes.PERMISSION_EXPIRED, buildJsonObject { put("requestId", requestId); put("deadlineMinutes", minutes); put("message", message) })
-                }
+                } ?: return@launch
             }
-            write(child, lines)
+            // Not written (the process is going away): the request stays open, like an answer that could not be written.
+            if (!write(child, outcome.lines)) lock.withLock { if (process === child && outcome.input != null) active.reopen(requestId, outcome.input) }
         }
     }
 
@@ -375,10 +394,16 @@ internal class AgentHost(
         val rejected = batch.single()
         if (rejected.isRejectionMarker()) { sleep(UPLOAD_MILLIS * 4); return false }
         log("The server refused one transcript event; replacing it with a marker.")
-        lock.withLock {
+        val denial = lock.withLock {
             val index = buffer.indexOfFirst { it.sequence == rejected.sequence }
             if (index >= 0) buffer[index] = RunnerEventView(rejected.sequence, CloudEventTypes.ERROR, buildJsonObject { put("code", REJECTED_CODE); put("type", rejected.type) })
+            // A request no member will see is denied rather than left blocking the agent.
+            val requestId = (rejected.data["requestId"] as? JsonPrimitive)?.contentOrNull
+            val child = process; val active = adapter
+            if (rejected.type != CloudEventTypes.PERMISSION_REQUEST || requestId == null || child == null || active == null) null
+            else { deadlines.remove(requestId)?.second?.cancel(); child to active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines }
         }
+        denial?.let { (child, lines) -> if (lines.isNotEmpty()) write(child, lines) }
         return true
     }
 
@@ -421,6 +446,8 @@ internal class AgentHost(
         const val MAX_BATCH_BYTES = 1_000_000
         private const val REJECTED_CODE = "transcript_event_rejected"
         const val MAX_BUFFERED = 5_000
+        /** What the agent reads when its request could not be recorded for the team. */
+        const val UNSEEN_DENIAL = "The request could not be shown to the team: it was denied."
         const val MAX_HANDLED = 1_000
         const val DEFAULT_DRAIN_MILLIS = 10 * 60_000L
         const val SAFETY_MARGIN_MILLIS = 60_000L
