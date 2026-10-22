@@ -13,6 +13,11 @@ import me.nathanfallet.teamcode.domain.capacity.*
 import me.nathanfallet.teamcode.domain.gateway.*
 import me.nathanfallet.teamcode.domain.routing.*
 import me.nathanfallet.teamcode.domain.team.*
+import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.*
 
 class PoolAccountRoutesTest {
@@ -74,6 +79,15 @@ class PoolAccountRoutesTest {
         assertTrue(windows.contains("<code>deleted-id</code>"), windows)
         val serialized = Serialization.json.decodeFromString<List<PoolAccountStatusView>>(client.get("/api/v1/pools/accounts") { bearerAuth("member") }.bodyAsText())
         assertEquals(2, serialized.size)
+        // Every DTO field is sent, nulls included, and nothing else: the shape StatusReportTest serves to `teamcode status --json`.
+        fun fields(element: JsonElement) = element.jsonObject.keys
+        for (token in listOf("admin", "member")) {
+            val accounts = Json.parseToJsonElement(client.get("/api/v1/pools/accounts") { bearerAuth(token) }.bodyAsText()).jsonArray
+            assertTrue(accounts.all { fields(it) == PoolAccountStatusView.serializer().descriptor.elementNames.toSet() }, token)
+            assertTrue(accounts.flatMap { it.jsonObject.getValue("windows").jsonArray }.all { fields(it) == AccountWindowView.serializer().descriptor.elementNames.toSet() }, token)
+            val capacity = Json.parseToJsonElement(client.get("/api/v1/capacity") { bearerAuth(token) }.bodyAsText())
+            assertEquals(CapacityView.serializer().descriptor.elementNames.toSet(), fields(capacity), token)
+        }
     }
 }
 
