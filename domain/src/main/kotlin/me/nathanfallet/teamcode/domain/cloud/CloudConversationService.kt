@@ -101,9 +101,9 @@ class CloudConversationService(
             throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
         val asked = store.permissionRequest(session.id, answer.requestId, CloudConversationRules.PERMISSION_LOOKUP_EVENTS)
             ?: throw TeamFailure("unknown_permission_request", 409, "No permission request with this id waits in the session's recent transcript.")
-        CloudConversationRules.checkAnswer(asked, answer, approver = session.ownerId == principal.member.id || principal.isCloudAdministrator)
+        CloudConversationRules.checkAnswer(asked, answer, approver = session.ownerId == principal.member.id || principal.isCloudAdministrator, currentEpoch = session.currentEpoch)
         val input = newInput(principal, session, CloudInputKind.PERMISSION, request.text, request.copy(wake = false))
-        return store.insertInput(NewInput(input, null, session.ownerId), CloudConversationRules.MAX_PENDING_INPUTS)
+        return store.insertInput(NewInput(input, null, session.ownerId, permissionRequestId = answer.requestId), CloudConversationRules.MAX_PENDING_INPUTS)
     }
 
     suspend fun inputs(principal: Principal, id: String, beforeId: String?, limit: Int): CloudInputPage {

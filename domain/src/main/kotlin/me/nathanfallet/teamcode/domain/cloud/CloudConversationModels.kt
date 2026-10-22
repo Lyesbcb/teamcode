@@ -43,9 +43,9 @@ data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(
 /**
  * A `permission.request` as the transcript holds it. [question]: a question to the user (`AskUserQuestion`) rather
  * than a tool use gated by an `ask` rule. [questions]: each question's shape, null when the input was left out of the
- * event. [state]: what the later transcript says about it.
+ * event. [state]: what the later transcript says about it. [epoch]: the execution that asked; another one cannot answer it.
  */
-data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN)
+data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0)
 enum class PermissionRequestState {
     /** Nothing closed it yet (the runner may still have, without telling: a withdrawal). */
     OPEN,
@@ -56,7 +56,8 @@ enum class PermissionRequestState {
     /** Its turn ended (a later `turn` event that completed, interrupted or failed it). */
     ENDED,
 }
-data class QuestionShape(val options: Int, val multiSelect: Boolean)
+/** [text]: the question's text, which Claude Code keys answers by, so two answered questions must not share it. */
+data class QuestionShape(val options: Int, val multiSelect: Boolean, val text: String? = null)
 enum class CloudInputStatus(val wire: String) {
     QUEUED("queued"), DELIVERED("delivered"), CONSUMED("consumed"), CANCELLED("cancelled"), REJECTED("rejected");
     val final get() = this == CONSUMED || this == CANCELLED || this == REJECTED
@@ -96,6 +97,8 @@ data class NewInput(
     val expectedLastEventSeq: Long?,
     /** The owner the caller was authorized against; an owner change since then refuses the input (`session_busy`). */
     val expectedOwnerId: String? = null,
+    /** For a permission answer: refused with `409 permission_request_answered` while another answer to this request is pending. */
+    val permissionRequestId: String? = null,
 )
 sealed interface InputOutcome {
     val input: CloudInput

@@ -202,6 +202,8 @@ internal class AgentHost(
     private suspend fun ensureStarted(): AgentAdapter {
         adapter?.let { current -> if (process?.exitCode() == null) return current }
         reader?.cancel()
+        // That reader's tail, which cancels its process's timers, may never run now.
+        cancelDeadlines(null)
         val config = settings ?: retrying { channel.agent() }.let { AgentSettings(it.kind, it.version, it.model, it.effort, it.permissionRelay, it.permissionDeadlineMinutes) }.also { settings = it }
         val stored = state.read()
         val resume = stored?.takeIf { it.kind == config.kind && it.version == config.version }?.conversationId
@@ -247,7 +249,7 @@ internal class AgentHost(
                     if (event.type == CloudEventTypes.PERMISSION_REQUEST) (event.data["requestId"] as? JsonPrimitive)?.contentOrNull?.let { expireLater(child, active, it) }
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
-                if (deadlines.isNotEmpty()) cancelDeadlines(child) { it !in active.openPermissions }
+                if (deadlines.isNotEmpty()) active.openPermissions.let { open -> cancelDeadlines(child) { it !in open } }
                 result.replies
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.

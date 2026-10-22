@@ -165,6 +165,8 @@ class CloudConversationPersistenceTest {
         failure("unknown_permission_request") { ra.conversation.answer(colleague, s.id, PermissionAnswer("req-9", true, null, emptyList()), InputRequest(text, false, null, null, null)) }
         val answer = rb.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, listOf(QuestionAnswer(0, listOf(1)))), InputRequest(text, false, "answer-1", "a1", null))
         assertIs<InputOutcome.Accepted>(answer); assertEquals(CloudInputKind.PERMISSION, answer.input.kind); assertFalse(answer.input.woke)
+        assertIs<InputOutcome.Replayed>(ra.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, listOf(QuestionAnswer(0, listOf(1)))), InputRequest(text, false, "answer-1", "a1", null)))
+        failure("permission_request_answered") { ra.conversation.answer(colleague, s.id, PermissionAnswer("req-1", false, null, emptyList()), InputRequest("""{"requestId":"req-1","behavior":"deny"}""", false, "answer-2", "a2", null)) }
         val both = rb.agent.inputs(team, s.id, 1, 0)
         assertEquals(listOf(CloudInputKind.PERMISSION, CloudInputKind.MESSAGE), both.map { it.kind }, "The answer concerns the running turn")
         assertEquals(text, both.first().text)
@@ -183,8 +185,8 @@ class CloudConversationPersistenceTest {
             RunnerEvent(7, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-2","toolName":"Bash","inputTruncated":true,"question":false}"""),
             RunnerEvent(8, CloudEventType.PERMISSION_EXPIRED, """{"requestId":"tool-2","deadlineMinutes":5,"message":"No answer within 5 minutes: the request was denied."}"""),
         ))
-        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED), ra.conversations.permissionRequest(s.id, "tool-2", 100))
-        assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false)), PermissionRequestState.ANSWERED), rb.conversations.permissionRequest(s.id, "req-1", 100))
+        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1), ra.conversations.permissionRequest(s.id, "tool-2", 100))
+        assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false, "Red or blue?")), PermissionRequestState.ANSWERED, epoch = 1), rb.conversations.permissionRequest(s.id, "req-1", 100))
         assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 100)?.state)
         assertNull(ra.conversations.permissionRequest(s.id, "req-1", 3), "Only the recent transcript is searched")
         failure("permission_request_expired") { ra.conversation.answer(colleague, s.id, PermissionAnswer("tool-2", true, null, emptyList()), InputRequest("""{"requestId":"tool-2","behavior":"allow"}""", false, null, null, null)) }

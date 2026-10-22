@@ -69,7 +69,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
         val from = lastSeqOf(sessionId) - window
         // A range of the primary key (session, seq), newest first: what closed a request is seen before the request.
-        val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data).where {
+        val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data, CloudSessionEvents.epoch).where {
             (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq greater from) and
                 (CloudSessionEvents.type inList PERMISSION_LOOKUP_TYPES)
         }.orderBy(CloudSessionEvents.seq to SortOrder.DESC)
@@ -82,7 +82,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 CloudEventType.TURN.wire -> if (text("phase") in TURN_ENDS) state = PermissionRequestState.ENDED
                 CloudEventType.INPUT.wire -> if (text("requestId") == requestId && text("status") == CloudInputStatus.CONSUMED.wire) state = PermissionRequestState.ANSWERED
                 CloudEventType.PERMISSION_EXPIRED.wire -> if (text("requestId") == requestId) state = PermissionRequestState.EXPIRED
-                else -> if (text("requestId") == requestId) return@query permissionRequestRecord(requestId, data, state)
+                else -> if (text("requestId") == requestId) return@query permissionRequestRecord(requestId, data, state).copy(epoch = row[CloudSessionEvents.epoch])
             }
         }
         null
@@ -112,6 +112,17 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         val pending = CloudSessionInputs.selectAll().where {
             (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
         }.count()
+        // One answer per request at a time, decided under the session lock: a second one would only be rejected later by the runner.
+        new.permissionRequestId?.let { requestId ->
+            val answered = CloudSessionInputs.select(CloudSessionInputs.text).where {
+                (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire) and
+                    (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
+            }.limit(pendingLimit).any { row ->
+                val text = row[CloudSessionInputs.text] ?: return@any false
+                ((try { Json.parseToJsonElement(text) as? JsonObject } catch (_: IllegalArgumentException) { null })?.get("requestId") as? JsonPrimitive)?.contentOrNull == requestId
+            }
+            if (answered) throw TeamFailure("permission_request_answered", 409, "This permission request already has an answer on its way to the agent.")
+        }
         if (pending >= pendingLimit) throw TeamFailure("too_many_pending_inputs", 429, "The session already has $pendingLimit pending inputs. Wait for the agent to consume them.")
         val sleeping = desired == DesiredState.PAUSED || state == CloudSessionState.PAUSING || state == CloudSessionState.PAUSED || session[CloudSessions.blockedCode] != null
         val now = nowMillis()
@@ -398,7 +409,8 @@ private val TURN_ENDS = setOf("completed", "interrupted", "failed")
 private fun permissionRequestRecord(requestId: String, data: JsonObject, state: PermissionRequestState): PermissionRequestRecord {
     val questions = ((data["input"] as? JsonObject)?.get("questions") as? JsonArray)?.map { question ->
         val shape = question as? JsonObject
-        QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true)
+        QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true,
+            (shape?.get("question") as? JsonPrimitive)?.contentOrNull)
     }
     return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, state)
 }

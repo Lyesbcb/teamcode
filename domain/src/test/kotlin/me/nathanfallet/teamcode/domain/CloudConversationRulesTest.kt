@@ -77,6 +77,8 @@ class CloudConversationRulesTest {
         assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", true, null, listOf(QuestionAnswer(0, listOf(0)))), approver = true) }.code)
         for ((state, code) in listOf(PermissionRequestState.EXPIRED to "permission_request_expired", PermissionRequestState.ANSWERED to "permission_request_answered", PermissionRequestState.ENDED to "permission_request_ended"))
             assertEquals(code, assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(state = state), allow, approver = true) }.code)
+        assertEquals("permission_request_ended", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(epoch = 1), allow, approver = true, currentEpoch = 2) }.code,
+            "A request of an execution that ended went with it")
     }
 
     @Test fun anyoneWhoMaySendMessagesAnswersAQuestionByIndex() {
@@ -91,5 +93,10 @@ class CloudConversationRulesTest {
         refused(QuestionAnswer(0, listOf(2)))
         refused(QuestionAnswer(0, listOf(0, 1)))
         CloudConversationRules.checkAnswer(question.copy(questions = null), PermissionAnswer("q1", true, null, listOf(QuestionAnswer(5, listOf(7)))), approver = false)
+        val twins = question.copy(questions = listOf(QuestionShape(2, false, "Which one?"), QuestionShape(2, false, "Which one?")))
+        CloudConversationRules.checkAnswer(twins, PermissionAnswer("q1", true, null, listOf(QuestionAnswer(1, listOf(0)))), approver = false)
+        assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> {
+            CloudConversationRules.checkAnswer(twins, PermissionAnswer("q1", true, null, listOf(QuestionAnswer(0, listOf(0)), QuestionAnswer(1, listOf(1)))), approver = false)
+        }.code, "Claude Code keys answers by text: two questions with one text cannot both be answered")
     }
 }

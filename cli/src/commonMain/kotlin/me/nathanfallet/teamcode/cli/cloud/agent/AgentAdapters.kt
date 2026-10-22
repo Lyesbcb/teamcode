@@ -242,8 +242,11 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     }
 
     private companion object {
-        /** UTF-8 bytes, well under the server's 60,000-byte event limit, which would replace the event and its request id. */
-        const val MAX_PERMISSION_INPUT_BYTES = 20_000
+        /**
+         * UTF-8 bytes, under the server's 60,000-byte event limit (which would replace the event and its request id)
+         * and its 16,000-character limit per string (which would cut a command silently).
+         */
+        const val MAX_PERMISSION_INPUT_BYTES = 15_000
         /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
         const val PERMISSION_PREVIEW_CHARS = 2_000
         val USAGE_FIELDS = listOf(

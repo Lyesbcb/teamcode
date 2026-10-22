@@ -120,8 +120,9 @@ object CloudConversationRules {
      * send messages to the session, which the caller already passed. Answers need a question request, and their
      * indexes must exist in it when its input is known.
      */
-    fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean) {
-        when (request.state) {
+    fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean, currentEpoch: Int = request.epoch) {
+        // An execution that ended (a pause, a new pod) took its open requests with it.
+        when (if (request.epoch != currentEpoch && request.state == PermissionRequestState.OPEN) PermissionRequestState.ENDED else request.state) {
             PermissionRequestState.OPEN -> Unit
             PermissionRequestState.EXPIRED -> throw TeamFailure("permission_request_expired", 409, "This permission request expired without an answer and was denied.")
             PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
@@ -134,6 +135,8 @@ object CloudConversationRules {
         }
         if (answer.allow && answer.answers.isEmpty()) throw TeamFailure("invalid_permission_answer", 400, "Answer at least one question, or deny the request.")
         val questions = request.questions ?: return
+        val texts = answer.answers.mapNotNull { questions.getOrNull(it.question)?.text }
+        if (texts.toSet().size != texts.size) throw TeamFailure("invalid_permission_answer", 400, "Two of these questions have the same text; answer only one of them.")
         for (item in answer.answers) {
             val shape = questions.getOrNull(item.question) ?: throw TeamFailure("invalid_permission_answer", 400, "The request has ${questions.size} questions, numbered from 0.")
             if (item.options.any { it >= shape.options } || (item.options.size > 1 && !shape.multiSelect))
