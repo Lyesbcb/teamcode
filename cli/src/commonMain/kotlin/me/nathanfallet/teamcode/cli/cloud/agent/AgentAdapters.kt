@@ -73,12 +73,12 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     })
     override fun startup(resume: String?, workingDirectory: String): List<String> {
         // A resumed conversation starts from the cost it had in the previous process, which this one never saw.
-        reportedCostMicros = if (resume == null) 0 else null
+        reportedCostUsd = if (resume == null) 0.0 else null
         return emptyList()
     }
 
-    /** The conversation's cost at the last `result`, or null while unknown (a resumed conversation's first turn). */
-    private var reportedCostMicros: Long? = 0
+    /** The conversation's cost at the last priced `result`; null while unknown (before [startup], or a resumed conversation's first turn). */
+    private var reportedCostUsd: Double? = null
 
     private val started = mutableListOf<AgentEvent>()
     override fun takeEvents(): List<AgentEvent> = started.toList().also { started.clear() }
@@ -129,9 +129,11 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 val failed = (value["is_error"] as? JsonPrimitive)?.booleanOrNull == true
                 val interrupted = value["subtype"].string() == "error_during_execution"
                 // `total_cost_usd` is the conversation's running total (kept across `--resume`); `usage` is this turn's.
-                val totalCostMicros = (value["total_cost_usd"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it >= 0 }?.let { (it * 1_000_000).roundToLong() }
-                val costMicros = totalCostMicros?.let { total -> reportedCostMicros?.let { (total - it).coerceAtLeast(0) } }
-                if (totalCostMicros != null) reportedCostMicros = totalCostMicros
+                // A total below the previous one (a counter that restarted) gives the turn no cost of its own rather than a wrong one.
+                val totalCostUsd = (value["total_cost_usd"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it >= 0 }
+                val costMicros = totalCostUsd?.let { total -> reportedCostUsd?.takeIf { it <= total }?.let { ((total - it) * 1_000_000).roundToLong() } }
+                val totalCostMicros = totalCostUsd?.let { (it * 1_000_000).roundToLong() }
+                if (totalCostUsd != null) reportedCostUsd = totalCostUsd
                 val usage = value["usage"].obj()
                 AgentOutput(listOf(turn(if (interrupted) "interrupted" else if (failed) "failed" else "completed") {
                     (value["duration_ms"] as? JsonPrimitive)?.longOrNull?.let { put("durationMs", it) }
