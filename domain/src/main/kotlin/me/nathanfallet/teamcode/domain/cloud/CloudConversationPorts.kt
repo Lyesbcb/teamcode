@@ -20,6 +20,11 @@ interface CloudConversationStore {
     /** Ascending page: events after [after] (forward), or the newest ones before [before] (backward). */
     suspend fun events(sessionId: String, after: Long?, before: Long?, limit: Int): CloudEventPage
     suspend fun lastSeq(sessionId: String): Long
+    /**
+     * The newest `permission.request` [requestId] among the session's last [window] events, with whether a
+     * `permission.expired` for it follows; null when there is none.
+     */
+    suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord?
 
     /**
      * Inserts an input under the session row lock: refuses a session that is ending, a stale view, more than

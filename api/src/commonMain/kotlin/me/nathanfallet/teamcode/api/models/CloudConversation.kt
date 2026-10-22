@@ -19,7 +19,12 @@ object CloudEventTypes {
      * with `POST /cloud/sessions/{id}/permissions`. It stays open until that answer is consumed or the turn ends.
      */
     const val PERMISSION_REQUEST = "permission.request"
-    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT, PERMISSION_REQUEST)
+    /**
+     * Runner-written: no answer came within the team's deadline, so the request was denied (`data.requestId`,
+     * `deadlineMinutes`, `message`, the text the agent read).
+     */
+    const val PERMISSION_EXPIRED = "permission.expired"
+    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT, PERMISSION_REQUEST, PERMISSION_EXPIRED)
 }
 
 /**
@@ -58,16 +63,24 @@ data class SendCloudMessageRequest(
 
 /**
  * `POST /cloud/sessions/{id}/permissions`: the answer to the `permission.request` event [requestId]. [behavior] is
- * `allow` or `deny`; [message] tells the agent why it was denied. [answers] answers a question
- * (`AskUserQuestion`), by question text, with the chosen option's label or free text; it needs `allow`.
+ * `allow` or `deny`; [message] tells the agent why it was denied. [answers] answers a question (`AskUserQuestion`),
+ * one entry per answered question, by index; it needs `allow`.
  */
 @Serializable
 data class AnswerCloudPermissionRequest(
     val requestId: String,
     val behavior: String,
     val message: String? = null,
-    val answers: Map<String, String>? = null,
+    val answers: List<CloudQuestionAnswer>? = null,
 )
+
+/**
+ * The answer to the question at index [question] (0-based, in the request's `input.questions`): the chosen [options]
+ * by index (0-based, in that question's `options`; several only for a `multiSelect` question), or free [text]. Send
+ * one or the other.
+ */
+@Serializable
+data class CloudQuestionAnswer(val question: Int, val options: List<Int> = emptyList(), val text: String? = null)
 
 /** Input acknowledgement levels, in order. `cancelled` and `rejected` are final like `consumed`. */
 object CloudInputStatuses {
@@ -139,9 +152,15 @@ data class CloudAccessPolicyView(val version: Int = 0, val rules: List<CloudAcce
 /** Runner channel for the agent: configuration, batched events, input long-poll and acknowledgements. */
 @Serializable
 data class RunnerAgentRequest(val teamId: String, val sessionId: String, val epoch: Int)
-/** [permissionRelay]: the server takes `permission.request` events and their answers, so the runner may relay them. */
+/**
+ * [permissionRelay]: the server takes `permission.request` events and their answers, so the runner may relay them.
+ * [permissionDeadlineMinutes]: how long a request waits for an answer before the runner denies it; 0 waits without a deadline.
+ */
 @Serializable
-data class RunnerAgentView(val kind: String, val version: String? = null, val model: String? = null, val effort: String? = null, val conversation: String, val permissionRelay: Boolean = false)
+data class RunnerAgentView(
+    val kind: String, val version: String? = null, val model: String? = null, val effort: String? = null, val conversation: String,
+    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0,
+)
 /** [sequence] is the runner's own counter for this epoch, starting at 1; a retried batch is deduplicated on it. */
 @Serializable
 data class RunnerEventView(val sequence: Long, val type: String, val data: JsonObject)

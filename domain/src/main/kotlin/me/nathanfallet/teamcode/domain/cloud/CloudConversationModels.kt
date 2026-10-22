@@ -6,6 +6,8 @@ enum class CloudEventType(val wire: String) {
     TURN("turn"), STATUS("status"), ERROR("error"),
     /** The agent waits for a person before using a tool; answered by a [CloudInputKind.PERMISSION] input. */
     PERMISSION_REQUEST("permission.request"),
+    /** The runner denied a request nobody answered within the team's deadline: `{requestId, deadlineMinutes, message}`. */
+    PERMISSION_EXPIRED("permission.expired"),
     /** Written by the server when an input is consumed, cancelled or rejected. */
     INPUT("input"),
     /** Written by the server when the session changed owner: `{transferId, fromMemberId, toMemberId, atEpoch}`. */
@@ -34,7 +36,28 @@ enum class CloudInputKind(val wire: String) {
 }
 
 /** A member's answer to the `permission.request` [requestId]: [answers] (a question's answers) need [allow]. */
-data class PermissionAnswer(val requestId: String, val allow: Boolean, val message: String?, val answers: Map<String, String>)
+data class PermissionAnswer(val requestId: String, val allow: Boolean, val message: String?, val answers: List<QuestionAnswer>)
+/** The answer to the question at index [question]: the chosen [options] by index, or free [text]. */
+data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(), val text: String? = null)
+
+/**
+ * A `permission.request` as the transcript holds it. [question]: a question to the user (`AskUserQuestion`) rather
+ * than a tool use gated by an `ask` rule. [questions]: each question's shape, null when the input was left out of the
+ * event. [state]: what the later transcript says about it. [epoch]: the execution that asked; another one cannot answer it.
+ */
+data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0)
+enum class PermissionRequestState {
+    /** Nothing closed it yet (the runner may still have, without telling: a withdrawal). */
+    OPEN,
+    /** The agent consumed an answer to it. */
+    ANSWERED,
+    /** The runner denied it at the team's deadline (`permission.expired`). */
+    EXPIRED,
+    /** Its turn ended (a later `turn` event that completed, interrupted or failed it). */
+    ENDED,
+}
+/** [text]: the question's text, which Claude Code keys answers by, so two answered questions must not share it. */
+data class QuestionShape(val options: Int, val multiSelect: Boolean, val text: String? = null)
 enum class CloudInputStatus(val wire: String) {
     QUEUED("queued"), DELIVERED("delivered"), CONSUMED("consumed"), CANCELLED("cancelled"), REJECTED("rejected");
     val final get() = this == CONSUMED || this == CANCELLED || this == REJECTED
@@ -74,6 +97,8 @@ data class NewInput(
     val expectedLastEventSeq: Long?,
     /** The owner the caller was authorized against; an owner change since then refuses the input (`session_busy`). */
     val expectedOwnerId: String? = null,
+    /** For a permission answer: refused with `409 permission_request_answered` while another answer to this request is pending. */
+    val permissionRequestId: String? = null,
 )
 sealed interface InputOutcome {
     val input: CloudInput

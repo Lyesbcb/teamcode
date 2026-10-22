@@ -61,6 +61,8 @@ object CloudSettingsTable : Table("cloud_settings") {
     val transferOfferDays = integer("transfer_offer_days").default(7)
     /** `cancel` or `keep`: unconsumed messages when a session changes owner. */
     val transferPendingInputs = varchar("transfer_pending_inputs", 16).default("cancel")
+    /** Minutes a cloud agent's permission request waits before the runner denies it; 0 waits without a deadline. */
+    val permissionDeadlineMinutes = integer("permission_deadline_minutes").default(0)
     override val primaryKey = PrimaryKey(teamId)
 }
 /** Whether cloud sessions run and how their pods are built; no row until an administrator or the initial seed saves it. */

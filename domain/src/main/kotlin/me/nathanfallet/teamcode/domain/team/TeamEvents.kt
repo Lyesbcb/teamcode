@@ -28,7 +28,11 @@ enum class TeamEventType(val wire: String, val subject: TeamEventSubject) {
      * It stops waiting at [SESSION_ANSWERED] for that request, or at the next `cloud.turn` that ends the turn.
      */
     SESSION_WAITING("cloud.session.waiting", TeamEventSubject.SESSION),
-    /** A member's answer to a permission request reached the agent: `{requestId, behavior, eventSeq}`. */
+    /**
+     * The wait for a permission request ended with a decision: `{requestId, behavior, reason, eventSeq}`. `reason` is
+     * `answered` (a member's answer reached the agent; `eventSeq` is its `input` event) or `expired` (the runner denied it
+     * at the team's deadline; `behavior` is `deny` and `eventSeq` the `permission.expired` event).
+     */
     SESSION_ANSWERED("cloud.session.answered", TeamEventSubject.SESSION),
     RUN_STARTED("run.started", TeamEventSubject.RUN),
     /** No heartbeat for [AgentRunService.HEARTBEAT_TTL_MILLIS]; a later heartbeat and another silence emit it again. */

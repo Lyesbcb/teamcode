@@ -1,8 +1,10 @@
 package me.nathanfallet.teamcode.cli.cloud.agent
 
+import kotlin.math.roundToLong
 import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
+import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
 
 /** A normalized transcript event before upload. The server masks and bounds it again. */
 data class AgentEvent(val type: String, val data: JsonObject)
@@ -12,8 +14,19 @@ data class AgentOutput(val events: List<AgentEvent> = emptyList(), val replies: 
 
 data class AgentCommand(val command: String, val arguments: List<String>)
 
-/** Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their answers. */
-data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false)
+/**
+ * Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their
+ * answers. [permissionDeadlineMinutes]: how long a request waits before the host denies it; 0 for no deadline.
+ */
+data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0)
+
+/** The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]). */
+data class AnswerOutcome(val lines: List<String>, val refusal: String? = null) {
+    companion object {
+        const val UNKNOWN = "unknown_permission_request"
+        const val INVALID = "invalid_answer"
+    }
+}
 
 /**
  * One long-lived agent process with streaming input. Adapters are pure translators between TeamCode inputs and an
@@ -33,10 +46,13 @@ interface AgentAdapter {
     fun interrupt(): List<String>
     fun parse(line: String): AgentOutput
     /**
-     * Lines answering the open permission request [requestId] (`allow` with optional question [answers], or deny with
-     * [message]); empty when no such request is open, so the answer is rejected.
+     * Lines answering the open permission request [requestId] (`allow` with optional question [answers] by index, or
+     * deny with [message]). Refused when no such request is open, or when an index is not in the request; a refused
+     * answer leaves the request open.
      */
-    fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> = emptyList()
+    fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome = AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
+    /** Whether the permission request [requestId] still waits for an answer. */
+    fun permissionOpen(requestId: String): Boolean = false
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -60,7 +76,9 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * Claude Code in print mode with stream-json input and output: `claude -p --input-format stream-json
  * --output-format stream-json --verbose --dangerously-skip-permissions`, resumed with `--resume <session_id>`.
  * Messages written while a turn runs are queued by Claude Code itself; an interrupt is a `control_request`.
- * Thinking blocks are dropped here and never uploaded.
+ * Thinking blocks are dropped here and never uploaded. Events produced by a subagent keep its parent's tool call id as
+ * `parentToolUseId`. A finished turn carries Claude Code's own cost estimate and the turn's tokens from its `result`
+ * line.
  *
  * With [AgentSettings.permissionRelay], Claude Code also gets `--permission-prompt-tool stdio`. Bypass mode still
  * skips ordinary permission checks; what remains, an `ask` permission rule or a question to the user
@@ -68,10 +86,6 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * member's answer a `control_response`. A request is open until it is answered or its turn ends.
  */
 class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
-    private companion object {
-        /** Well under the server's 60,000-byte event limit, which would replace the event and its request id. */
-        const val MAX_PERMISSION_INPUT_CHARS = 20_000
-    }
     override var conversationId: String? = null; private set
     /** Messages written and not yet answered by a `result` line. */
     private var pending = 0
@@ -84,26 +98,58 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         settings.effort?.let { addAll(listOf("--effort", it)) }
         resume?.let { addAll(listOf("--resume", it)) }
     })
-    override fun startup(resume: String?, workingDirectory: String) = emptyList<String>()
+    override fun startup(resume: String?, workingDirectory: String): List<String> {
+        // A resumed conversation starts from the cost it had in the previous process, which this one never saw.
+        reportedCostUsd = if (resume == null) 0.0 else null
+        return emptyList()
+    }
+
+    /** The conversation's cost at the last priced `result`; null while unknown (before [startup], or a resumed conversation's first turn). */
+    private var reportedCostUsd: Double? = null
+
+    /** A subagent's lines carry the `tool_use` id of the parent's Agent (Task) call; the main agent's carry null. */
+    private fun JsonObjectBuilder.parent(line: JsonObject) { line["parent_tool_use_id"].string()?.let { put("parentToolUseId", it) } }
 
     private val started = mutableListOf<AgentEvent>()
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
+    override fun permissionOpen(requestId: String) = requestId in permissions
 
-    override fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> {
-        val input = permissions.remove(requestId) ?: return emptyList()
-        return listOf(buildJsonObject {
+    override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
+        val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
+        val texts = if (answers.isEmpty()) emptyMap() else questionTexts(input, answers) ?: return AnswerOutcome(emptyList(), AnswerOutcome.INVALID)
+        permissions.remove(requestId)
+        return AnswerOutcome(listOf(buildJsonObject {
             put("type", "control_response")
             putJsonObject("response") {
                 put("subtype", "success"); put("request_id", requestId)
                 putJsonObject("response") {
                     if (allow) {
                         put("behavior", "allow")
-                        put("updatedInput", if (answers.isEmpty()) input else JsonObject(input + ("answers" to buildJsonObject { answers.forEach { (question, value) -> put(question, value) } })))
+                        put("updatedInput", if (texts.isEmpty()) input else JsonObject(input + ("answers" to buildJsonObject { texts.forEach { (question, value) -> put(question, value) } })))
                     } else { put("behavior", "deny"); put("message", message ?: "A team member denied this request.") }
                 }
             }
-        }.toString())
+        }.toString()))
+    }
+
+    /**
+     * Claude Code's answer format: question text to the chosen label, several labels joined with ", " for a
+     * multi-select question, or the free text. Null when an index is not in the request.
+     */
+    private fun questionTexts(input: JsonObject, answers: List<CloudQuestionAnswer>): Map<String, String>? {
+        val questions = input["questions"].array() ?: return null
+        // Claude Code keys answers by question text: two answered questions with one text cannot both reach it.
+        val texts = answers.map { questions.getOrNull(it.question).obj()?.get("question").string() }
+        if (texts.toSet().size != texts.size) return null
+        return answers.associate { answer ->
+            val question = questions.getOrNull(answer.question).obj() ?: return null
+            val text = question["question"].string() ?: return null
+            val options = question["options"].array().orEmpty()
+            if (answer.text == null && (answer.options.isEmpty() || (answer.options.size > 1 && (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull != true))) return null
+            val value = answer.text ?: answer.options.map { options.getOrNull(it).obj()?.get("label").string() ?: return null }.joinToString(", ")
+            text to value
+        }
     }
     override fun takeEvents(): List<AgentEvent> = started.toList().also { started.clear() }
 
@@ -134,9 +180,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
             "assistant" -> AgentOutput(value["message"].obj()?.get("content").array().orEmpty().mapNotNull { block ->
                 val content = block.obj() ?: return@mapNotNull null
                 when (content["type"].string()) {
-                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it) }) }
+                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it); parent(value) }) }
                     "tool_use" -> AgentEvent(CloudEventTypes.TOOL_CALL, buildJsonObject {
-                        content["id"].string()?.let { put("id", it) }; put("name", content["name"].string() ?: "tool"); content["input"]?.let { put("input", it) }
+                        content["id"].string()?.let { put("id", it) }; put("name", content["name"].string() ?: "tool"); content["input"]?.let { put("input", it) }; parent(value)
                     })
                     else -> null // thinking and redacted_thinking are never uploaded.
                 }
@@ -146,6 +192,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 AgentEvent(CloudEventTypes.TOOL_RESULT, buildJsonObject {
                     content["tool_use_id"].string()?.let { put("id", it) }; put("output", resultText(content["content"]))
                     put("isError", (content["is_error"] as? JsonPrimitive)?.booleanOrNull ?: false)
+                    parent(value)
                 })
             })
             "control_request" -> {
@@ -156,12 +203,15 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
-                    put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool")
-                    if (input.toString().length <= MAX_PERMISSION_INPUT_CHARS) put("input", input) else put("inputTruncated", true)
-                    request["tool_use_id"].string()?.let { put("toolUseId", it) }
-                    request["description"].string()?.let { put("description", it) }
-                    put("question", (request["requires_user_interaction"] as? JsonPrimitive)?.booleanOrNull == true)
-                    request["decision_reason_type"].string()?.let { put("reason", it) }
+                    put("requestId", id); put("toolName", request["tool_name"].string()?.take(MAX_PERMISSION_FIELD_CHARS) ?: "tool")
+                    val encoded = input.toString()
+                    if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES) put("input", input)
+                    else { put("inputTruncated", true); put("inputPreview", encoded.take(PERMISSION_PREVIEW_CHARS)) }
+                    request["tool_use_id"].string()?.let { put("toolUseId", it.take(MAX_PERMISSION_FIELD_CHARS)) }
+                    request["description"].string()?.let { put("description", it.take(PERMISSION_PREVIEW_CHARS)) }
+                    // Only AskUserQuestion is a question to the user; any other tool, interactive or not, is a tool use to approve.
+                    put("question", request["tool_name"].string() == "AskUserQuestion")
+                    request["decision_reason_type"].string()?.let { put("reason", it.take(MAX_PERMISSION_FIELD_CHARS)) }
                 })))
             }
             // Claude Code withdrew a request (its turn was interrupted): an answer to it is rejected.
@@ -172,13 +222,39 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 if (pending > 0) pending--
                 val failed = (value["is_error"] as? JsonPrimitive)?.booleanOrNull == true
                 val interrupted = value["subtype"].string() == "error_during_execution"
+                // `total_cost_usd` is the conversation's running total (kept across `--resume`); `usage` is this turn's.
+                // A total below the previous one (a counter that restarted) gives the turn no cost of its own rather than a wrong one.
+                val totalCostUsd = (value["total_cost_usd"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it >= 0 }
+                val costMicros = totalCostUsd?.let { total -> reportedCostUsd?.takeIf { it <= total }?.let { ((total - it) * 1_000_000).roundToLong() } }
+                val totalCostMicros = totalCostUsd?.let { (it * 1_000_000).roundToLong() }
+                if (totalCostUsd != null) reportedCostUsd = totalCostUsd
+                val usage = value["usage"].obj()
                 AgentOutput(listOf(turn(if (interrupted) "interrupted" else if (failed) "failed" else "completed") {
                     (value["duration_ms"] as? JsonPrimitive)?.longOrNull?.let { put("durationMs", it) }
                     (value["num_turns"] as? JsonPrimitive)?.intOrNull?.let { put("steps", it) }
+                    costMicros?.let { put("costMicros", it) }
+                    totalCostMicros?.let { put("totalCostMicros", it) }
+                    for ((from, to) in USAGE_FIELDS) (usage?.get(from) as? JsonPrimitive)?.longOrNull?.let { put(to, it) }
                 }))
             }
             else -> AgentOutput()
         }
+    }
+
+    private companion object {
+        /**
+         * UTF-8 bytes, under the server's 60,000-byte event limit (which would replace the event and its request id)
+         * and its 16,000-character limit per string (which would cut a command silently).
+         */
+        const val MAX_PERMISSION_INPUT_BYTES = 15_000
+        /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
+        const val PERMISSION_PREVIEW_CHARS = 2_000
+        /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
+        const val MAX_PERMISSION_FIELD_CHARS = 200
+        val USAGE_FIELDS = listOf(
+            "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
+            "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",
+        )
     }
 }
 

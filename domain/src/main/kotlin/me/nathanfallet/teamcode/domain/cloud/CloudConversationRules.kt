@@ -28,19 +28,19 @@ object CloudConversationRules {
      */
     private val secrets = listOf(
         // Prefixed shapes start at a word boundary and contain a digit, so `task-management-…` or `etc_…` stay readable.
-        Regex("(?<![A-Za-z0-9_-])sk-(?:ant-)?(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{16,}"),
+        Regex("(?<![A-Za-z0-9_-])sk-(?:ant-)?(?=[A-Za-z0-9_-]{0,256}[0-9])[A-Za-z0-9_-]{16,}"),
         Regex("(?<![A-Za-z0-9_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
         Regex("github_pat_[A-Za-z0-9_]{20,}"),
-        Regex("(?<![A-Za-z0-9_-])tc(?:ex|sk|dv|ss)?_(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{16,}"),
+        Regex("(?<![A-Za-z0-9_-])tc(?:ex|sk|dv|ss)?_(?=[A-Za-z0-9_-]{0,256}[0-9])[A-Za-z0-9_-]{16,}"),
         Regex("(?:AKIA|ASIA)[A-Z0-9]{16}"),
         Regex("xox[abprs]-[A-Za-z0-9-]{10,}"),
-        Regex("eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"),
+        Regex("(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"),
         Regex("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"),
     )
     private val authorization = Regex("(?i)\\b(bearer|basic|token)\\s+([A-Za-z0-9._~+/=-]{12,})")
     /** A name ending in a secret word (`GITHUB_TOKEN`, `"api_key"`, not `max_tokens`) assigned a value of 8 characters or more. */
     private val assignment = Regex("(?i)\\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|CREDENTIALS?))(\"?\\s*[=:]\\s*)(\"[^\"]{8,}\"|'[^']{8,}'|[^\\s\"',;]{8,})")
-    private val urlCredentials = Regex("(?i)(\\b[a-z][a-z0-9+.-]*://)[^\\s/@:]+:[^\\s/@]+@")
+    private val urlCredentials = Regex("(?i)((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://)[^\\s/@:]+:[^\\s/@]+@")
 
     /**
      * A plain word (`configuration`, `Authentication.`) after `token`, `basic` or `bearer` is prose. Anything else is
@@ -51,6 +51,34 @@ object CloudConversationRules {
         return word.length > MAX_WORD || word.any { !it.isLetter() } || word.drop(1).any { it.isUpperCase() }
     }
     private const val MAX_WORD = 16
+
+    /** The kind of each pattern of [secrets], in order, as [detect] names it. */
+    private val secretKinds = listOf("provider_api_key", "github_token", "github_token", "teamcode_credential", "aws_access_key", "slack_token", "jwt", "private_key")
+
+    /**
+     * The kind of the first credential found in [text], or null: the shapes [mask] hides, plus authorization values
+     * and URLs with credentials. Name-based assignments (`API_KEY = "…"`) are not reported: they are ordinary code in a
+     * page and say nothing about the value. Used to refuse publishing a file rather than to rewrite it.
+     */
+    fun detect(text: String): String? {
+        secrets.forEachIndexed { index, pattern -> if (pattern.containsMatchIn(text)) return secretKinds[index] }
+        if (authorizationValue.findAll(text).any { looksLikeSecretValue(it.groupValues[2]) }) return "authorization_header"
+        if (urlCredentials.containsMatchIn(text)) return "url_credentials"
+        return null
+    }
+
+    /** On one line only: a whole page holds prose (`Basic cross-browser support`) and Markdown headings (`Token` over `-----`). */
+    private val authorizationValue = Regex("(?i)\\b(bearer|basic|token)[ \\t]+([A-Za-z0-9._~+/=-]{12,})")
+
+    /**
+     * Stricter than [looksLikeCredential], since a hit refuses a whole file: a digit or a base64 or token symbol
+     * (`+/=_~`), or mixed case with no word separator (`dXNlcjpwYXNzd29yZA`); hyphenated or dotted words are prose.
+     */
+    private fun looksLikeSecretValue(value: String): Boolean {
+        val word = value.trimEnd('.')
+        if (word.any { it.isDigit() || it in "+/=_~" }) return true
+        return '-' !in word && '.' !in word && word.any { it.isLowerCase() } && word.drop(1).any { it.isUpperCase() }
+    }
 
     fun mask(text: String): String {
         var masked = text
@@ -72,17 +100,62 @@ object CloudConversationRules {
             throw TeamFailure("invalid_message", 400, "Send a message of 1–$MAX_MESSAGE_CHARS characters without control characters.")
     }
 
-    /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label or a sentence each. */
+    /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label index or a sentence each. */
     fun validatePermissionAnswer(answer: PermissionAnswer) {
         if (!isPermissionRequestId(answer.requestId))
             throw TeamFailure("invalid_permission_answer", 400, "Send the requestId of a permission.request event.")
-        val texts = listOfNotNull(answer.message) + answer.answers.keys + answer.answers.values
+        val texts = listOfNotNull(answer.message) + answer.answers.mapNotNull { it.text }
         if (answer.answers.size > MAX_PERMISSION_ANSWERS || texts.any { it.isBlank() || it.length > MAX_PERMISSION_TEXT_CHARS || it.any { c -> c.isISOControl() && c != '\n' && c != '\t' && c != '\r' } })
             throw TeamFailure("invalid_permission_answer", 400, "Send at most $MAX_PERMISSION_ANSWERS answers and texts of 1–$MAX_PERMISSION_TEXT_CHARS characters.")
         if (answer.answers.isNotEmpty() && !answer.allow) throw TeamFailure("invalid_permission_answer", 400, "Answers go with behavior allow.")
+        if (answer.answers.map { it.question }.toSet().size != answer.answers.size || answer.answers.any { it.question !in 0 until MAX_PERMISSION_INDEX })
+            throw TeamFailure("invalid_permission_answer", 400, "Answer each question once, by its index (0 to ${MAX_PERMISSION_INDEX - 1}).")
+        if (answer.answers.any { (it.options.isEmpty()) == (it.text == null) || it.options.toSet().size != it.options.size || it.options.any { option -> option !in 0 until MAX_PERMISSION_INDEX } })
+            throw TeamFailure("invalid_permission_answer", 400, "Answer a question with distinct option indexes (0 to ${MAX_PERMISSION_INDEX - 1}) or with a text, not both.")
+    }
+
+    /**
+     * Who may answer [request], and whether [answer] fits it. Approving or denying a tool use gated by an `ask` rule
+     * is the session owner's or an administrator's decision ([approver]); a question is answered by anyone who may
+     * send messages to the session, which the caller already passed. Answers need a question request, and their
+     * indexes must exist in it when its input is known.
+     */
+    fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean, currentEpoch: Int = request.epoch) {
+        // An execution that ended (a pause, a new pod) took its open requests with it.
+        when (if (request.epoch != currentEpoch && request.state == PermissionRequestState.OPEN) PermissionRequestState.ENDED else request.state) {
+            PermissionRequestState.OPEN -> Unit
+            PermissionRequestState.EXPIRED -> throw TeamFailure("permission_request_expired", 409, "This permission request expired without an answer and was denied.")
+            PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
+            PermissionRequestState.ENDED -> throw TeamFailure("permission_request_ended", 409, "The turn of this permission request has ended.")
+        }
+        if (!request.question) {
+            if (!approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
+            if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")
+            return
+        }
+        if (answer.allow && answer.answers.isEmpty()) throw TeamFailure("invalid_permission_answer", 400, "Answer at least one question, or deny the request.")
+        val questions = request.questions ?: return
+        val texts = answer.answers.mapNotNull { questions.getOrNull(it.question)?.text }
+        if (texts.toSet().size != texts.size) throw TeamFailure("invalid_permission_answer", 400, "Two of these questions have the same text; answer only one of them.")
+        for (item in answer.answers) {
+            val shape = questions.getOrNull(item.question) ?: throw TeamFailure("invalid_permission_answer", 400, "The request has ${questions.size} questions, numbered from 0.")
+            if (item.options.any { it >= shape.options } || (item.options.size > 1 && !shape.multiSelect))
+                throw TeamFailure("invalid_permission_answer", 400, "Question ${item.question} has ${shape.options} options, numbered from 0" + if (shape.multiSelect) "." else ", and takes one.")
+        }
     }
     const val MAX_PERMISSION_ANSWERS = 16
+    /**
+     * Pending permission answers a session holds at most. They have their own bound, outside [MAX_PENDING_INPUTS]: a
+     * queue full of messages waiting for the turn to end must never block the answer that lets it end.
+     */
+    const val MAX_PENDING_PERMISSION_ANSWERS = 16
     const val MAX_PERMISSION_TEXT_CHARS = 4_000
+    /** Question and option indexes stay below this bound (Claude Code asks at most 4 questions of 4 options). */
+    const val MAX_PERMISSION_INDEX = 64
+    /** The longest deadline a team may set for unanswered permission requests: a day. */
+    const val MAX_PERMISSION_DEADLINE_MINUTES = 1_440
+    /** How far back in a session's transcript an answer looks for its request; an open request belongs to the running turn. */
+    const val PERMISSION_LOOKUP_EVENTS = 1_000L
     /** Printable ASCII without spaces: the agent chooses the shape (Claude Code: a UUID). */
     private val permissionRequestId = Regex("[\\x21-\\x7E]{1,128}")
     fun isPermissionRequestId(id: String) = permissionRequestId.matches(id)

@@ -3,6 +3,10 @@ package me.nathanfallet.teamcode.domain
 import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules
 import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules.MASK
 import me.nathanfallet.teamcode.domain.cloud.PermissionAnswer
+import me.nathanfallet.teamcode.domain.cloud.PermissionRequestRecord
+import me.nathanfallet.teamcode.domain.cloud.PermissionRequestState
+import me.nathanfallet.teamcode.domain.cloud.QuestionAnswer
+import me.nathanfallet.teamcode.domain.cloud.QuestionShape
 import me.nathanfallet.teamcode.domain.team.TeamFailure
 import kotlin.test.*
 
@@ -45,14 +49,54 @@ class CloudConversationRulesTest {
     @Test fun permissionAnswersAreBounded() {
         fun valid(answer: PermissionAnswer) = CloudConversationRules.validatePermissionAnswer(answer)
         fun invalid(answer: PermissionAnswer) = assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { valid(answer) }.code)
-        valid(PermissionAnswer("9334d94c-8640-42fb-89e7-052df9b43456", true, null, mapOf("Red or blue?" to "Blue")))
-        valid(PermissionAnswer("r/1+2", false, "Use echo\tinstead.\nThanks.", emptyMap()))
-        invalid(PermissionAnswer("req 1", true, null, emptyMap()))
-        invalid(PermissionAnswer("x".repeat(129), true, null, emptyMap()))
-        invalid(PermissionAnswer("r1", false, null, mapOf("Q" to "A")))
-        invalid(PermissionAnswer("r1", false, " ", emptyMap()))
-        invalid(PermissionAnswer("r1", true, null, mapOf("Q" to "x".repeat(CloudConversationRules.MAX_PERMISSION_TEXT_CHARS + 1))))
-        invalid(PermissionAnswer("r1", true, null, (1..17).associate { "Q$it" to "A" }))
-        invalid(PermissionAnswer("r1", false, "bell\u0007", emptyMap()))
+        valid(PermissionAnswer("9334d94c-8640-42fb-89e7-052df9b43456", true, null, listOf(QuestionAnswer(0, listOf(1)), QuestionAnswer(1, text = "Purple"))))
+        valid(PermissionAnswer("r/1+2", false, "Use echo\tinstead.\nThanks.", emptyList()))
+        valid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, listOf(0, 2)))))
+        invalid(PermissionAnswer("req 1", true, null, emptyList()))
+        invalid(PermissionAnswer("x".repeat(129), true, null, emptyList()))
+        invalid(PermissionAnswer("r1", false, null, listOf(QuestionAnswer(0, listOf(0)))))
+        invalid(PermissionAnswer("r1", false, " ", emptyList()))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, text = "x".repeat(CloudConversationRules.MAX_PERMISSION_TEXT_CHARS + 1)))))
+        invalid(PermissionAnswer("r1", true, null, (0..16).map { QuestionAnswer(it, listOf(0)) }))
+        invalid(PermissionAnswer("r1", false, "bell\u0007", emptyList()))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, listOf(0)), QuestionAnswer(0, listOf(1)))))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(-1, listOf(0)))))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0))))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, listOf(1), "Both"))))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, listOf(1, 1)))))
+        invalid(PermissionAnswer("r1", true, null, listOf(QuestionAnswer(0, listOf(CloudConversationRules.MAX_PERMISSION_INDEX)))))
+    }
+
+    @Test fun onlyTheOwnerOrAnAdministratorDecidesAToolUse() {
+        val tool = PermissionRequestRecord("t1", question = false, questions = null)
+        val allow = PermissionAnswer("t1", true, null, emptyList())
+        CloudConversationRules.checkAnswer(tool, allow, approver = true)
+        CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", false, "No.", emptyList()), approver = true)
+        assertEquals("permission_answer_denied", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, allow, approver = false) }.code)
+        assertEquals(403, assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", false, null, emptyList()), approver = false) }.status)
+        assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", true, null, listOf(QuestionAnswer(0, listOf(0)))), approver = true) }.code)
+        for ((state, code) in listOf(PermissionRequestState.EXPIRED to "permission_request_expired", PermissionRequestState.ANSWERED to "permission_request_answered", PermissionRequestState.ENDED to "permission_request_ended"))
+            assertEquals(code, assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(state = state), allow, approver = true) }.code)
+        assertEquals("permission_request_ended", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(epoch = 1), allow, approver = true, currentEpoch = 2) }.code,
+            "A request of an execution that ended went with it")
+    }
+
+    @Test fun anyoneWhoMaySendMessagesAnswersAQuestionByIndex() {
+        val question = PermissionRequestRecord("q1", question = true, questions = listOf(QuestionShape(2, false), QuestionShape(3, true)))
+        fun check(vararg answers: QuestionAnswer) = CloudConversationRules.checkAnswer(question, PermissionAnswer("q1", true, null, answers.toList()), approver = false)
+        fun refused(vararg answers: QuestionAnswer) = assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { check(*answers) }.code)
+        check(QuestionAnswer(0, listOf(1)), QuestionAnswer(1, listOf(0, 2)))
+        check(QuestionAnswer(1, text = "Purple"))
+        CloudConversationRules.checkAnswer(question, PermissionAnswer("q1", false, "Skip it.", emptyList()), approver = false)
+        refused()
+        refused(QuestionAnswer(2, listOf(0)))
+        refused(QuestionAnswer(0, listOf(2)))
+        refused(QuestionAnswer(0, listOf(0, 1)))
+        CloudConversationRules.checkAnswer(question.copy(questions = null), PermissionAnswer("q1", true, null, listOf(QuestionAnswer(5, listOf(7)))), approver = false)
+        val twins = question.copy(questions = listOf(QuestionShape(2, false, "Which one?"), QuestionShape(2, false, "Which one?")))
+        CloudConversationRules.checkAnswer(twins, PermissionAnswer("q1", true, null, listOf(QuestionAnswer(1, listOf(0)))), approver = false)
+        assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> {
+            CloudConversationRules.checkAnswer(twins, PermissionAnswer("q1", true, null, listOf(QuestionAnswer(0, listOf(0)), QuestionAnswer(1, listOf(1)))), approver = false)
+        }.code, "Claude Code keys answers by text: two questions with one text cannot both be answered")
     }
 }
