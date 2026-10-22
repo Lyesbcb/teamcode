@@ -7,7 +7,7 @@ import me.nathanfallet.teamcode.domain.cloud.CloudSessionState
 enum class TeamEventSubject(val wire: String) { SESSION("session"), RUN("run") }
 
 /**
- * The types of the caller-wide feed. A new kind of event (a session waiting for a human, say) is one entry here and
+ * The types of the caller-wide feed. A new kind of event is one entry here and
  * one `publishTeamEvent` call where it happens: the journal, the stream and the audience rules need no other change.
  * The wire name is the SSE `event:` field and is stored, so it never changes once released.
  */

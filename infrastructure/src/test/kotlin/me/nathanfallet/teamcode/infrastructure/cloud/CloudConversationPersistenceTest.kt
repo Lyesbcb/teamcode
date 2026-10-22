@@ -183,6 +183,18 @@ class CloudConversationPersistenceTest {
         assertEquals(listOf("question", "req-1"), listOf(asked["reason"]!!.jsonPrimitive.content, asked["requestId"]!!.jsonPrimitive.content))
         assertEquals(listOf("req-1", "allow", answered.seq.toString()), listOf("requestId", "behavior", "eventSeq").map { done[it]!!.jsonPrimitive.content })
         assertFalse(feed.any { "Blue" in it.data || "Red or blue" in it.data })
+
+        // In one batch, a request and the end of its turn reach the feed in transcript order; an id no member could answer is left out.
+        val before = SqlTeamEventStore(ra.database).head(team)
+        rb.agent.events(team, s.id, 1, listOf(
+            RunnerEvent(6, CloudEventType.PERMISSION_REQUEST, """{"requestId":"has space","toolName":"Bash","input":{},"question":false}"""),
+            RunnerEvent(7, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
+        ))
+        val oneBatch = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
+            before, setOf(TeamEventType.SESSION_WAITING, TeamEventType.CLOUD_TURN), 100).events.filter { it.subjectId == s.id }
+        assertEquals(listOf(TeamEventType.SESSION_WAITING, TeamEventType.CLOUD_TURN), oneBatch.map { it.type })
+        val plain = Json.parseToJsonElement(oneBatch.first().data).jsonObject
+        assertEquals("permission", plain["reason"]!!.jsonPrimitive.content); assertNull(plain["requestId"])
     }
 
     private suspend fun accessPolicy(ra: Replica, rb: Replica, admin: Principal, colleague: Principal, other: Principal, groups: Groups, profile: CloudProfile, s: CloudSession) {
