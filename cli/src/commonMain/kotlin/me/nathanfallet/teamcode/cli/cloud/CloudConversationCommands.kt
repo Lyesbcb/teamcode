@@ -22,8 +22,13 @@ import me.nathanfallet.teamcode.client.TeamCodeClient
 import me.nathanfallet.teamcode.client.TeamCodeException
 
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
-/** Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) become spaces. */
-private fun String.printable() = map { if (it.isISOControl()) ' ' else it }.joinToString("")
+/**
+ * Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) and
+ * invisible format characters (bidirectional overrides, zero-width marks, line separators) become spaces.
+ */
+private fun String.printable() = map { if (it.isISOControl() || it.category in HIDDEN) ' ' else it }.joinToString("")
+private fun JsonElement?.isTrue() = (this as? JsonPrimitive)?.booleanOrNull == true
+private val HIDDEN = setOf(CharCategory.FORMAT, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR)
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
 /**
@@ -55,9 +60,10 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
-        CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
+        CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
-            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
+            // A question is shown by the indexed lines that follow, not as raw JSON.
+            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue()) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }

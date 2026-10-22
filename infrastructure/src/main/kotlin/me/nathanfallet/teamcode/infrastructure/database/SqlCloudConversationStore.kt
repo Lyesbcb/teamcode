@@ -66,6 +66,12 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
 
+    override suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String): CloudInput? = database.query {
+        CloudSessionInputs.selectAll().where {
+            (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.authorId eq authorId) and (CloudSessionInputs.clientKey eq clientKey)
+        }.singleOrNull()?.let(::readInput)
+    }
+
     override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
         val from = lastSeqOf(sessionId) - window
         // A range of the primary key (session, seq), newest first: what closed a request is seen before the request.
@@ -186,10 +192,13 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 it[status] = CloudInputStatus.QUEUED.wire
             }
         }
-        val queued = CloudSessionInputs.selectAll().where { (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }
-            .orderBy(CloudSessionInputs.createdAt to SortOrder.ASC, CloudSessionInputs.id to SortOrder.ASC).limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput)
-        // Interrupts and permission answers first: they concern the turn running now, not the queue behind it.
-        val chosen = (queued.filter { it.kind != CloudInputKind.MESSAGE } + queued.filter { it.kind == CloudInputKind.MESSAGE }).take(limit)
+        fun queued(urgent: Boolean) = CloudSessionInputs.selectAll().where {
+            (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) and
+                (if (urgent) CloudSessionInputs.kind neq CloudInputKind.MESSAGE.wire else CloudSessionInputs.kind eq CloudInputKind.MESSAGE.wire)
+        }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC, CloudSessionInputs.id to SortOrder.ASC).limit(limit).map(::readInput)
+        // Interrupts and permission answers first, read on their own so a full message queue never hides them:
+        // they concern the turn running now, not the queue behind it.
+        val chosen = queued(urgent = true).let { urgent -> if (urgent.size >= limit) urgent else urgent + queued(urgent = false).take(limit - urgent.size) }
         chosen.map { input ->
             CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }) {
                 it[status] = CloudInputStatus.DELIVERED.wire; it[deliveredAt] = now; it[deliveredEpoch] = epoch; it[attempts] = input.attempts + 1

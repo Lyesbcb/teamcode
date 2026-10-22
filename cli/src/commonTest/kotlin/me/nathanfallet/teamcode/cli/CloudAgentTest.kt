@@ -78,10 +78,14 @@ class CloudAgentTest {
         assertEquals(2_000, large.data.str("inputPreview").length, "Whoever decides still sees the start of the input")
         val wide = adapter.parse("""{"type":"control_request","request_id":"r10","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"content":"${"é".repeat(12_000)}"}}}""").events.single()
         assertNull(wide.data["input"], "The limit counts UTF-8 bytes, as the server does"); adapter.answer("r10", false, null, emptyList())
-        val spoof = adapter.parse("""{"type":"control_request","request_id":"r12","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","description":"${"d".repeat(5_000)}","input":{"questions":[{"question":"Fine?\u001b[2K\rApprove deploy?","options":[{"label":"Yes\u001b]0;x\u0007"}]}]}}}""").events.single()
+        val spoof = adapter.parse("""{"type":"control_request","request_id":"r12","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","description":"${"d".repeat(5_000)}","input":{"questions":[{"question":"Fine?\u001b[2K\rApprove\u202e deploy?","options":[{"label":"Yes\u001b]0;x\u0007\u200b"}]}]}}}""").events.single()
         assertEquals(2_000, spoof.data.str("description").length, "Every field of the event is bounded")
         val shown = CloudEventView(1, spoof.type, 0, 1, spoof.data).render()
-        assertFalse(shown.any { it == '\u001b' || it == '\r' || it == '\u0007' }, "Escape sequences never reach the approver's terminal")
+        assertFalse(shown.any { it == '\u001b' || it == '\r' || it == '\u0007' || it == '\u202e' || it == '\u200b' }, "Escape sequences and invisible marks never reach the approver's terminal")
+        assertFalse("\"questions\"" in shown, "A question is printed by its indexed lines, not as raw JSON")
+        val nested = adapter.parse("""{"type":"control_request","request_id":"r13","request":{"subtype":"can_use_tool","tool_name":"mcp__db__write","input":{"rows":[${(1..250).joinToString(",")}]}}}""").events.single()
+        assertNull(nested.data["input"], "An input the server would cut (more than 200 entries) is left out with a preview rather than shown cut")
+        adapter.answer("r13", false, null, emptyList())
         adapter.answer("r12", false, null, emptyList())
         val plan = adapter.parse("""{"type":"control_request","request_id":"r11","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"x"},"requires_user_interaction":true}}""").events.single()
         assertEquals(false, plan.data["question"]!!.jsonPrimitive.boolean, "Only AskUserQuestion is a question; another interactive tool is a tool use to approve")
@@ -109,7 +113,10 @@ class CloudAgentTest {
         adapter.parse("""{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}""")
         adapter.parse("""{"type":"result","subtype":"success","is_error":false}""")
         assertTrue(adapter.answer("r4", true, null, emptyList()).lines.isEmpty(), "A request does not outlive its turn")
-        assertTrue(adapter.parse("""{"type":"control_request","request_id":"r5","request":{"subtype":"hook_callback"}}""").events.isEmpty(), "Other control requests are not permission requests")
+        val other = adapter.parse("""{"type":"control_request","request_id":"r5","request":{"subtype":"hook_callback"}}""")
+        assertTrue(other.events.isEmpty(), "Other control requests are not permission requests")
+        val refusal = obj(other.replies.single())["response"]!!.jsonObject
+        assertEquals(listOf("error", "r5"), listOf(refusal.str("subtype"), refusal.str("request_id")), "but get a reply, so Claude Code never waits for one")
     }
 
     @Test fun hostDeliversPermissionAnswersOnlyToTheProcessThatAsked() = runTest {

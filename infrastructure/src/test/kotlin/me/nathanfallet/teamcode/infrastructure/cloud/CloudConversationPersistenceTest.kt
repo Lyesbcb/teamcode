@@ -176,6 +176,8 @@ class CloudConversationPersistenceTest {
         for (part in listOf("\"requestId\":\"req-1\"", "\"behavior\":\"allow\"", "\"authorId\":\"${colleague.member.id}\"", "\"kind\":\"permission\""))
             assertTrue(part in answered.data, answered.data)
         assertFalse("Blue" in answered.data, "The answer's texts stay in the input")
+        val retried = rb.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, listOf(QuestionAnswer(0, listOf(1)))), InputRequest(text, false, "answer-1", "a1", null))
+        assertIs<InputOutcome.Replayed>(retried, "A retry with the same key replays the consumed answer"); assertEquals(answer.input.id, retried.input.id)
 
         // A tool use gated by an `ask` rule: the request is found in the transcript, an administrator decides it, and
         // one that expired without an answer, was answered already or whose turn ended is refused.

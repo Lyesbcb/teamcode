@@ -102,6 +102,8 @@ class CloudConversationRoutesTest {
             return InputOutcome.Accepted(input)
         }
         override suspend fun input(sessionId: String, id: String) = inputs[id]?.takeIf { it.sessionId == sessionId }
+        override suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String) =
+            inputs.values.find { it.sessionId == sessionId && it.authorId == authorId && it.clientKey == clientKey }
         override suspend fun inputs(sessionId: String, beforeId: String?, limit: Int) = CloudInputPage(inputs.values.filter { it.sessionId == sessionId }.reversed().take(limit), null)
         override suspend fun clearWake(sessionId: String) = Unit
         override suspend fun pendingWakes(limit: Int) = emptyList<Pair<String, String>>()
