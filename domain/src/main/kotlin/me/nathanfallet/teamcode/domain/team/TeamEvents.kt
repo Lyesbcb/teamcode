@@ -7,7 +7,7 @@ import me.nathanfallet.teamcode.domain.cloud.CloudSessionState
 enum class TeamEventSubject(val wire: String) { SESSION("session"), RUN("run") }
 
 /**
- * The types of the caller-wide feed. A new kind of event (a session waiting for a human, say) is one entry here and
+ * The types of the caller-wide feed. A new kind of event is one entry here and
  * one `publishTeamEvent` call where it happens: the journal, the stream and the audience rules need no other change.
  * The wire name is the SSE `event:` field and is stored, so it never changes once released.
  */
@@ -23,6 +23,17 @@ enum class TeamEventType(val wire: String, val subject: TeamEventSubject) {
     SESSION_ENDED("cloud.session.ended", TeamEventSubject.SESSION),
     /** `{phase: started | completed | interrupted | failed}` of the session's agent. */
     CLOUD_TURN("cloud.turn", TeamEventSubject.SESSION),
+    /**
+     * The agent waits for a person: `{reason: permission | question, requestId, eventSeq}`, from its `permission.request`.
+     * It stops waiting at [SESSION_ANSWERED] for that request, or at the next `cloud.turn` that ends the turn.
+     */
+    SESSION_WAITING("cloud.session.waiting", TeamEventSubject.SESSION),
+    /**
+     * The wait for a permission request ended with a decision: `{requestId, behavior, reason, eventSeq}`. `reason` is
+     * `answered` (a member's answer reached the agent; `eventSeq` is its `input` event) or `expired` (the runner denied it
+     * at the team's deadline; `behavior` is `deny` and `eventSeq` the `permission.expired` event).
+     */
+    SESSION_ANSWERED("cloud.session.answered", TeamEventSubject.SESSION),
     RUN_STARTED("run.started", TeamEventSubject.RUN),
     /** No heartbeat for [AgentRunService.HEARTBEAT_TTL_MILLIS]; a later heartbeat and another silence emit it again. */
     RUN_STALE("run.stale", TeamEventSubject.RUN),

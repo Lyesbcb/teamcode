@@ -146,7 +146,7 @@ object CloudConversationRules {
 
     /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label index or a sentence each. */
     fun validatePermissionAnswer(answer: PermissionAnswer) {
-        if (!permissionRequestId.matches(answer.requestId))
+        if (!isPermissionRequestId(answer.requestId))
             throw TeamFailure("invalid_permission_answer", 400, "Send the requestId of a permission.request event.")
         val texts = listOfNotNull(answer.message) + answer.answers.mapNotNull { it.text }
         if (answer.answers.size > MAX_PERMISSION_ANSWERS || texts.any { it.isBlank() || it.length > MAX_PERMISSION_TEXT_CHARS || it.any { c -> c.isISOControl() && c != '\n' && c != '\t' && c != '\r' } })
@@ -210,6 +210,7 @@ object CloudConversationRules {
     val TURN_END_PHASES = setOf("completed", "interrupted", "failed")
     /** Printable ASCII without spaces: the agent chooses the shape (Claude Code: a UUID). */
     private val permissionRequestId = Regex("[\\x21-\\x7E]{1,128}")
+    fun isPermissionRequestId(id: String) = permissionRequestId.matches(id)
 
     fun validatePage(limit: Int, after: Long?, before: Long?) {
         if (limit !in 1..MAX_PAGE) throw TeamFailure("invalid_limit", 400, "Use a page size between 1 and $MAX_PAGE.")

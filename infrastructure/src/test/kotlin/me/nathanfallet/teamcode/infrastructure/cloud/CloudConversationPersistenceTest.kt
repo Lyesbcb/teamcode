@@ -1,6 +1,9 @@
 package me.nathanfallet.teamcode.infrastructure.cloud
 
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import me.nathanfallet.teamcode.domain.cloud.*
 import me.nathanfallet.teamcode.domain.cloud.CloudSessionState.*
 import me.nathanfallet.teamcode.domain.team.*
@@ -179,14 +182,40 @@ class CloudConversationPersistenceTest {
         val retried = rb.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, listOf(QuestionAnswer(0, listOf(1)))), InputRequest(text, false, "answer-1", "a1", null))
         assertIs<InputOutcome.Replayed>(retried, "A retry with the same key replays the consumed answer"); assertEquals(answer.input.id, retried.input.id)
 
+        // The team feed says the session waited for a person, then that the answer reached the agent; never the texts.
+        val feed = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
+            0, setOf(TeamEventType.SESSION_WAITING, TeamEventType.SESSION_ANSWERED), 100).events.filter { it.subjectId == s.id }
+        assertEquals(listOf(TeamEventType.SESSION_WAITING, TeamEventType.SESSION_ANSWERED), feed.map { it.type })
+        val (asked, done) = feed.map { Json.parseToJsonElement(it.data).jsonObject }
+        assertEquals(listOf("question", "req-1"), listOf(asked["reason"]!!.jsonPrimitive.content, asked["requestId"]!!.jsonPrimitive.content))
+        assertEquals(listOf("req-1", "allow", "answered", answered.seq.toString()), listOf("requestId", "behavior", "reason", "eventSeq").map { done[it]!!.jsonPrimitive.content })
+        assertFalse(feed.any { "Blue" in it.data || "Red or blue" in it.data })
+
+        // In one batch, a request and the end of its turn reach the feed in transcript order; an id no member could answer is left out.
+        val before = SqlTeamEventStore(ra.database).head(team)
+        rb.agent.events(team, s.id, 1, listOf(
+            RunnerEvent(6, CloudEventType.PERMISSION_REQUEST, """{"requestId":"has space","toolName":"Bash","input":{},"question":false}"""),
+            RunnerEvent(7, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
+        ))
+        val oneBatch = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
+            before, setOf(TeamEventType.SESSION_WAITING, TeamEventType.CLOUD_TURN), 100).events.filter { it.subjectId == s.id }
+        assertEquals(listOf(TeamEventType.SESSION_WAITING, TeamEventType.CLOUD_TURN), oneBatch.map { it.type })
+        val plain = Json.parseToJsonElement(oneBatch.first().data).jsonObject
+        assertEquals("permission", plain["reason"]!!.jsonPrimitive.content); assertNull(plain["requestId"])
+
         // A tool use gated by an `ask` rule: the request is found in the transcript, an administrator decides it, and
         // one that expired without an answer, was answered already or whose turn ended is refused.
         failure("permission_request_answered") { ra.conversation.answer(colleague, s.id, PermissionAnswer("req-1", false, null, emptyList()), InputRequest("""{"requestId":"req-1","behavior":"deny"}""", false, null, null, null)) }
         ra.agent.events(team, s.id, 1, listOf(
-            RunnerEvent(6, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-1","toolName":"Bash","input":{"command":"deploy"},"question":false}"""),
-            RunnerEvent(7, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-2","toolName":"Bash","inputTruncated":true,"question":false}"""),
-            RunnerEvent(8, CloudEventType.PERMISSION_EXPIRED, """{"requestId":"tool-2","deadlineMinutes":5,"message":"No answer within 5 minutes: the request was denied."}"""),
+            RunnerEvent(8, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-1","toolName":"Bash","input":{"command":"deploy"},"question":false}"""),
+            RunnerEvent(9, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-2","toolName":"Bash","inputTruncated":true,"question":false}"""),
+            RunnerEvent(10, CloudEventType.PERMISSION_EXPIRED, """{"requestId":"tool-2","deadlineMinutes":5,"message":"No answer within 5 minutes: the request was denied."}"""),
         ))
+        // A request denied at the deadline ends the wait like an answer: `cloud.session.answered`, behavior deny, reason expired.
+        val expiry = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
+            before, setOf(TeamEventType.SESSION_ANSWERED), 100).events.filter { it.subjectId == s.id }.single().let { Json.parseToJsonElement(it.data).jsonObject }
+        assertEquals(listOf("tool-2", "deny", "expired"), listOf("requestId", "behavior", "reason").map { expiry[it]!!.jsonPrimitive.content })
+        assertEquals(ra.conversations.lastSeq(s.id).toString(), expiry["eventSeq"]!!.jsonPrimitive.content, "It points to the permission.expired event")
         assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1, inputLeftOut = true), ra.conversations.permissionRequest(s.id, "tool-2"))
         assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false, "Red or blue?")), PermissionRequestState.ANSWERED, epoch = 1), rb.conversations.permissionRequest(s.id, "req-1"))
         assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1")?.state)
@@ -197,10 +226,10 @@ class CloudConversationPersistenceTest {
         assertEquals(listOf(denied.input.id), rb.agent.inputs(team, s.id, 1, 0).map { it.id })
         ra.agent.acknowledge(team, s.id, 1, listOf(RunnerInputAck(denied.input.id, true, null)))
         ra.agent.events(team, s.id, 1, listOf(
-            RunnerEvent(9, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-3","toolName":"Bash","input":{},"question":false}"""),
-            RunnerEvent(10, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
-            RunnerEvent(11, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
-            RunnerEvent(12, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
+            RunnerEvent(11, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-3","toolName":"Bash","input":{},"question":false}"""),
+            RunnerEvent(12, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
+            RunnerEvent(13, CloudEventType.TURN, """{"phase":"started"}""", turn = TurnMarker.STARTED),
+            RunnerEvent(14, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
         ))
         failure("permission_request_ended") { ra.conversation.answer(admin, s.id, PermissionAnswer("tool-3", true, null, emptyList()), InputRequest("""{"requestId":"tool-3","behavior":"allow"}""", false, null, null, null)) }
 

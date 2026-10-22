@@ -24,24 +24,34 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     override suspend fun now(): Long = database.query { nowMillis() }
 
     override suspend fun appendRunnerEvents(sessionId: String, epoch: Int, events: List<RunnerEvent>): RunnerEventsAck = database.query {
-        val teamId = lockSession(sessionId)[CloudSessions.teamId]
+        val session = lockSession(sessionId)
+        val teamId = session[CloudSessions.teamId]
         val cursor = cursorOf(sessionId)
         // The cursor survives retention, so a long-lived execution keeps its numbering after old events are purged.
         var through = cursor?.takeIf { it[CloudSessionTranscripts.runnerEpoch] == epoch }?.get(CloudSessionTranscripts.runnerSeq) ?: 0L
         var last = cursor?.get(CloudSessionTranscripts.lastSeq) ?: 0L
         val start = last
         val now = nowMillis()
-        val turns = mutableListOf<Pair<Long, String>>()
+        // Turns, permission requests and their expiries, in transcript order, so a request and what closes it reach the feed in that order.
+        val feed = mutableListOf<Triple<Long, CloudEventType, String>>()
         for (event in events.sortedBy { it.sequence }) {
             if (event.sequence <= through) continue
             if (event.sequence != through + 1) break // A gap: the runner resends from acceptedThrough + 1.
             insertEvent(sessionId, teamId, ++last, epoch, event.sequence, event.type, now, event.data)
-            if (event.type == CloudEventType.TURN) turns += last to event.data
+            if (event.type in FEED_TYPES) feed += Triple(last, event.type, event.data)
             through = event.sequence
         }
         if (last != start) saveCursor(sessionId, cursor != null, last, epoch, through)
         // Last, so the team's cursor lock is taken after every other write of this transaction.
-        for ((seq, data) in turns) publishTurn(sessionId, teamId, seq, data, now)
+        val owner = session[CloudSessions.ownerId]
+        // One batch, however many turns and requests the upload carried.
+        publishTeamEvents(teamId, feed.mapNotNull { (seq, type, data) ->
+            when (type) {
+                CloudEventType.TURN -> turnEvent(sessionId, owner, seq, data, now)
+                CloudEventType.PERMISSION_EXPIRED -> expiredEvent(sessionId, owner, seq, data, now)
+                else -> waitingEvent(sessionId, owner, seq, data, now)
+            }
+        })
         RunnerEventsAck(through, last)
     }
 
@@ -217,7 +227,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     override suspend fun acknowledge(sessionId: String, epoch: Int, acks: List<RunnerInputAck>): List<CloudInput> = database.query {
-        val teamId = lockSession(sessionId)[CloudSessions.teamId]
+        val session = lockSession(sessionId)
+        val teamId = session[CloudSessions.teamId]
         val now = nowMillis()
         acks.distinctBy { it.id }.mapNotNull { ack ->
             val input = CloudSessionInputs.selectAll().where {
@@ -226,6 +237,10 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             }.singleOrNull()?.let(::readInput) ?: return@mapNotNull null
             if (ack.consumed) finish(teamId, input, CloudInputStatus.CONSUMED, null, now)
             else finish(teamId, input, CloudInputStatus.REJECTED, ack.reason ?: "rejected", now)
+        }.also { finished ->
+            // Last, so the team's cursor lock is taken after every other write of this transaction.
+            publishTeamEvents(teamId, finished.filter { it.kind == CloudInputKind.PERMISSION && it.status == CloudInputStatus.CONSUMED }
+                .map { answeredEvent(sessionId, session[CloudSessions.ownerId], it, now) })
         }
     }
 
@@ -375,14 +390,52 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         }
     }
 
+    private val FEED_TYPES = setOf(CloudEventType.TURN, CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED)
+
     /** `cloud.turn` in the team feed: the phase and where to read the transcript, never its text. Called under the session row lock. */
     private val TURN_PHASES = setOf("started", "completed", "interrupted", "failed")
 
-    private fun publishTurn(sessionId: String, teamId: String, seq: Long, data: String, at: Long) {
+    private fun turnEvent(sessionId: String, owner: String, seq: Long, data: String, at: Long): PendingTeamEvent? {
         val phase = try { (Json.parseToJsonElement(data) as? JsonObject)?.get("phase")?.jsonPrimitive?.contentOrNull } catch (_: Exception) { null }
-        if (phase !in TURN_PHASES) return
-        val owner = CloudSessions.select(CloudSessions.ownerId).where { CloudSessions.id eq sessionId }.single()[CloudSessions.ownerId]
-        publishTeamEvent(teamId, TeamEventType.CLOUD_TURN, sessionId, owner, buildJsonObject { put("sessionId", sessionId); put("phase", phase); put("eventSeq", seq) }, at)
+        if (phase !in TURN_PHASES) return null
+        return PendingTeamEvent(TeamEventType.CLOUD_TURN, sessionId, owner, buildJsonObject { put("sessionId", sessionId); put("phase", phase); put("eventSeq", seq) }, at)
+    }
+
+    /** `cloud.session.waiting`: why the agent waits and where the request is, never the tool input or the question. */
+    private fun waitingEvent(sessionId: String, owner: String, seq: Long, data: String, at: Long): PendingTeamEvent {
+        val request = jsonObject(data)
+        val question = request.str("question") == "true"
+        return PendingTeamEvent(TeamEventType.SESSION_WAITING, sessionId, owner, buildJsonObject {
+            put("sessionId", sessionId); put("reason", if (question) "question" else "permission")
+            // Only an id a member can answer with; the runner (and the code in its pod) chose it.
+            request.str("requestId")?.takeIf(CloudConversationRules::isPermissionRequestId)?.let { put("requestId", it) }
+            put("eventSeq", seq)
+        }, at)
+    }
+
+    /** `cloud.session.answered` with `reason: answered`: a member's answer reached the agent. */
+    private fun answeredEvent(sessionId: String, owner: String, input: CloudInput, at: Long): PendingTeamEvent {
+        val answer = jsonObject(input.text)
+        return PendingTeamEvent(TeamEventType.SESSION_ANSWERED, sessionId, owner, buildJsonObject {
+            put("sessionId", sessionId)
+            answer.str("requestId")?.let { put("requestId", it) }
+            answer.str("behavior")?.let { put("behavior", it) }
+            put("reason", "answered")
+            input.eventSeq?.let { put("eventSeq", it) }
+        }, at)
+    }
+
+    /**
+     * `cloud.session.answered` with `behavior: deny, reason: expired`: the runner denied a request nobody answered within
+     * the team's deadline, which ends the wait like an answer. [seq] is the `permission.expired` event.
+     */
+    private fun expiredEvent(sessionId: String, owner: String, seq: Long, data: String, at: Long): PendingTeamEvent {
+        val expired = jsonObject(data)
+        return PendingTeamEvent(TeamEventType.SESSION_ANSWERED, sessionId, owner, buildJsonObject {
+            put("sessionId", sessionId)
+            expired.str("requestId")?.takeIf(CloudConversationRules::isPermissionRequestId)?.let { put("requestId", it) }
+            put("behavior", "deny"); put("reason", "expired"); put("eventSeq", seq)
+        }, at)
     }
 
     private fun saveCursor(sessionId: String, exists: Boolean, last: Long, epoch: Int, through: Long) {
