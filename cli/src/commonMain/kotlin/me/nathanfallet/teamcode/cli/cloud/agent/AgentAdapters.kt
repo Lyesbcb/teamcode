@@ -225,6 +225,14 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                     putJsonObject("response") { put("subtype", "error"); put("request_id", id); put("error", "This control request is not supported by the TeamCode runner.") }
                 }.toString()))
                 val input = request["input"].obj() ?: JsonObject(emptyMap())
+                // An id no member could send back (the server takes 1 to 128 printable ASCII characters) is denied at once.
+                if (!PERMISSION_REQUEST_ID.matches(id)) return AgentOutput(replies = listOf(buildJsonObject {
+                    put("type", "control_response")
+                    putJsonObject("response") {
+                        put("subtype", "success"); put("request_id", id)
+                        putJsonObject("response") { put("behavior", "deny"); put("message", "The request could not be shown to the team: it was denied.") }
+                    }
+                }.toString()))
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
@@ -280,6 +288,8 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
          */
         const val MAX_PERMISSION_FIELD_CHARS = 200
         /** The server's transcript limits and the reasoning keys it drops. */
+        /** The request ids the server accepts in an answer (`CloudConversationRules.validatePermissionAnswer`). */
+        val PERMISSION_REQUEST_ID = Regex("[\\x21-\\x7E]{1,128}")
         const val MAX_KEPT_DEPTH = CloudTranscriptLimits.MAX_DEPTH
         const val MAX_KEPT_ENTRIES = CloudTranscriptLimits.MAX_ENTRIES
         val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS

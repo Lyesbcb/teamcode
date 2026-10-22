@@ -190,7 +190,10 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         }.map(::readInput)
         for (input in stale) {
             // An interrupt or a permission answer concerns the agent process it was delivered to: never offered to another.
-            if (input.kind != CloudInputKind.MESSAGE || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
+            // An interrupt is dropped; a permission answer is offered again to the same execution (the runner acknowledges a repeat without
+            // writing it twice), never to another one.
+            val redelivered = input.kind == CloudInputKind.MESSAGE || (input.kind == CloudInputKind.PERMISSION && input.deliveredEpoch == epoch)
+            if (!redelivered || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
                 val reason = if (input.kind == CloudInputKind.MESSAGE) "delivery_failed" else if (input.deliveredEpoch != epoch) "execution_ended" else "delivery_failed"
                 finish(teamId, input, CloudInputStatus.REJECTED, reason, now)
             } else CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.DELIVERED.wire) }) {

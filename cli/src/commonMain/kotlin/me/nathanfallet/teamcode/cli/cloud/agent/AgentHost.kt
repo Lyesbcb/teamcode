@@ -173,8 +173,7 @@ internal class AgentHost(
             val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
             // Never starts the agent: only the process that asked can take the answer.
             val (child, active, outcome) = lock.withLock {
-                // Stopping: the process that asked is going away, so nothing can take the answer any more.
-                if (stopping) return unavailable
+                // Accepted while draining too: an answer is what lets a turn blocked on a request end before the pause.
                 val child = process ?: return@withLock null
                 val active = adapter ?: return@withLock null
                 // The deadline keeps running until the answer is written: a failed write leaves it as it was.
@@ -310,19 +309,20 @@ internal class AgentHost(
         deadlines[requestId] = child to scope.launch {
             sleep(delayMillis ?: (minutes * 60_000L))
             val message = "No answer within $minutes minute${if (minutes == 1) "" else "s"}: the request was denied."
-            val lines = lock.withLock {
+            val outcome = lock.withLock {
                 deadlines.remove(requestId)
                 // An answer being written: denied only if that write fails.
                 if (requestId in writing) { dueWhileWriting += requestId; return@launch }
                 // Answered, withdrawn, ended with its turn, or another process by now: nothing to deny.
                 if (process !== child) return@launch
-                active.answer(requestId, false, message, emptyList()).lines.ifEmpty { return@launch }.also {
+                active.answer(requestId, false, message, emptyList()).takeIf { it.lines.isNotEmpty() }?.also {
                     // Recorded before the agent reads the denial, so it precedes whatever the agent does next (the end
                     // of its turn in particular).
                     enqueue(CloudEventTypes.PERMISSION_EXPIRED, buildJsonObject { put("requestId", requestId); put("deadlineMinutes", minutes); put("message", message) })
-                }
+                } ?: return@launch
             }
-            write(child, lines)
+            // Not written (the process is going away): the request stays open, like an answer that could not be written.
+            if (!write(child, outcome.lines)) lock.withLock { if (process === child && outcome.input != null) active.reopen(requestId, outcome.input) }
         }
     }
 
