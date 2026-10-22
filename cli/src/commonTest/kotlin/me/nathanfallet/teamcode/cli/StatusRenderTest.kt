@@ -27,14 +27,14 @@ class StatusRenderTest {
               Allocated   41.7K credits (pool share: weight 5 of 12 × 100.0K)
               Used        12.3K
               Reserved    2.0K (2 in flight, 1 waiting)
-              Remaining   27.4K (65%)
+              Remaining   27.4K (65%)  ██████░░░░
               Concurrency 2 / 3
               Group       Developers: 30.0K / 100.0K credits, 2 / 4 active
               Pacing      none
 
             Pool accounts
-            ACCOUNT    PROVIDER   STATE               5H                     WEEKLY                OTHER       USABLE NOW
-            Account 1  anthropic  READY               42% (reset in 2h 10m)  80% (reset in 3d 4h)  fable 100%  yes
+            ACCOUNT    PROVIDER   STATE               5H                                WEEKLY                           OTHER       USABLE NOW
+            Account 1  anthropic  READY               ████░░░░░░ 42% (reset in 2h 10m)  ████████░░ 80% (reset in 3d 4h)  fable 100%  yes
         """.trimIndent(), text.lines().take(14).joinToString("\n"))
         assertTrue(text.contains("no, cooling down until 2026-10-21 00:15 UTC, in 15m"), text)
         assertTrue(text.contains("no, reconnect required"), text)
@@ -59,6 +59,25 @@ class StatusRenderTest {
         val report = StatusReport(GatewayStatus("pool", 0, 0), capacity, null, listOf(PoolAccountStatusView("Evil\u001b[2Jname", "anthropic", "READY", false, true)))
         assertFalse(renderStatus(report, now).contains('\u001b'))
         assertEquals(report, Serialization.json.decodeFromString<StatusReport>(Serialization.json.encodeToString(report)))
+    }
+
+    @Test fun barsFillInProportionAndNeverHideSmallUsage() {
+        assertEquals("░░░░░░░░░░", bar(0.0)); assertEquals("█░░░░░░░░░", bar(.01)); assertEquals("█████░░░░░", bar(.5))
+        assertEquals("██████████", bar(1.0)); assertEquals("██████████", bar(1.7)); assertEquals("░░░░░░░░░░", bar(-.2))
+    }
+
+    @Test fun colorIsOptInAndKeepsColumnsAligned() {
+        val report = StatusReport(GatewayStatus("pool", 0, 0), capacity, null, listOf(
+            PoolAccountStatusView("Account 1", "anthropic", "READY", false, false, "quota_exhausted", windows = listOf(AccountWindowView("seven_day", 1.0, now, now + hour))),
+            PoolAccountStatusView("Account 2", "anthropic", "READY", false, true, windows = listOf(AccountWindowView("five_hour", .1, now, now + hour))),
+        ))
+        val plain = renderStatus(report, now)
+        assertFalse(plain.contains('\u001b'))
+        val colored = renderStatus(report, now, color = true)
+        assertTrue(colored.contains("\u001b[31m██████████ 100%\u001b[0m"), colored)
+        assertTrue(colored.contains("\u001b[32m█░░░░░░░░░ 10%\u001b[0m"), colored)
+        // Without the color codes the colored table is the plain one.
+        assertEquals(plain, colored.replace(Regex("\u001b\\[[0-9;]*m"), ""))
     }
 
     @Test fun durationsAreReadable() {

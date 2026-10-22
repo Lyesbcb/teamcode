@@ -3,6 +3,8 @@ package me.nathanfallet.teamcode.cli.status
 import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.mordant.rendering.AnsiLevel
+import com.github.ajalt.mordant.terminal.Terminal
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -38,7 +40,9 @@ class Status : SuspendingCliktCommand(name = "status") {
     override suspend fun run() {
         sdk(loadConfig()).use { client ->
             val report = readStatusReport(client)
-            echo(if (json) statusJson(report) else renderStatus(report, Clock.System.now().toEpochMilliseconds()))
+            // Mordant detects a terminal and honors NO_COLOR, so redirected output stays free of escape codes.
+            val color = Terminal().terminalInfo.ansiLevel != AnsiLevel.NONE
+            echo(if (json) statusJson(report) else renderStatus(report, Clock.System.now().toEpochMilliseconds(), color))
         }
     }
 }
@@ -76,13 +80,16 @@ private fun unavailable(reason: String?) = when (reason) {
     else -> "unavailable from this server or credential."
 }
 
-/** Plain text, no color: the gateway line, one block for the caller's own allowance, one table for the accounts. */
-internal fun renderStatus(report: StatusReport, now: Long): String = buildString {
+/**
+ * The gateway line, one block for the caller's own allowance, one table for the accounts. Usage is drawn as bars
+ * (`████░░░░░░`), which stay readable without color; [color] adds green, yellow and red on top for a terminal that shows them.
+ */
+internal fun renderStatus(report: StatusReport, now: Long, color: Boolean = false): String = buildString {
     val g = report.gateway
     appendLine("Mode: ${g.mode} | Active: ${g.activeRequests} | Waiting: ${g.queuedRequests} | Completed: ${g.completedRequests}")
     appendLine()
     val c = report.capacity
-    if (c == null) appendLine("Your quota: ${unavailable(report.unavailable["capacity"])}") else quota(c, report.pacing, report.unavailable["pacing"], now)
+    if (c == null) appendLine("Your quota: ${unavailable(report.unavailable["capacity"])}") else quota(c, report.pacing, report.unavailable["pacing"], now, color)
     appendLine()
     val accounts = report.accounts
     when {
@@ -94,14 +101,15 @@ internal fun renderStatus(report: StatusReport, now: Long): String = buildString
                 val five = account.windows.firstOrNull { it.window == "five_hour" }
                 val week = account.windows.firstOrNull { it.window == "seven_day" }
                 val other = account.windows.filter { it.window != "five_hour" && it.window != "seven_day" }
-                    .joinToString(", ") { "${clean(it.window.removePrefix("model:"))} ${percent(it.utilization)}" }
-                listOf(clean(account.label), clean(account.provider), account.state, window(five, now), window(week, now), other.ifEmpty { "-" }, usable(account, now))
+                    .joinToString(", ") { "${clean(it.window.removePrefix("model:"))} ${paint(percent(it.utilization), usageColor(it.utilization), color)}" }
+                listOf(clean(account.label), clean(account.provider), paint(account.state, if (account.state == "READY") GREEN else YELLOW, color),
+                    window(five, now, color), window(week, now, color), other.ifEmpty { "-" }, usable(account, now, color))
             }))
         }
     }
 }.trimEnd()
 
-private fun StringBuilder.quota(c: CapacityView, pacing: DirectiveView?, pacingUnavailable: String?, now: Long) {
+private fun StringBuilder.quota(c: CapacityView, pacing: DirectiveView?, pacingUnavailable: String?, now: Long, color: Boolean) {
     val reserved = c.reservedUnits.coerceIn(0, c.chargedAndReservedUnits)
     val used = c.chargedAndReservedUnits - reserved
     val remaining = (c.dailyUnits - c.chargedAndReservedUnits).coerceAtLeast(0)
@@ -114,7 +122,10 @@ private fun StringBuilder.quota(c: CapacityView, pacing: DirectiveView?, pacingU
     appendLine("  Allocated   ${formatUnits(c.dailyUnits)} credits ($source)")
     appendLine("  Used        ${formatUnits(used)}")
     appendLine("  Reserved    ${formatUnits(reserved)} (${c.activeRequests} in flight, ${c.queuedRequests} waiting)")
-    appendLine("  Remaining   ${formatUnits(remaining)}${if (c.dailyUnits > 0) " (${remaining * 100 / c.dailyUnits}%)" else ""}")
+    val left = if (c.dailyUnits > 0) " (${remaining * 100 / c.dailyUnits}%)" else ""
+    // The bar shows what is left of the day, colored by how much has been spent.
+    val spent = if (c.dailyUnits > 0) c.chargedAndReservedUnits.toDouble() / c.dailyUnits else 0.0
+    appendLine("  Remaining   ${formatUnits(remaining)}$left" + if (c.dailyUnits > 0) "  ${paint(bar(1 - spent), usageColor(spent), color)}" else "")
     appendLine("  Concurrency ${c.activeRequests} / ${c.maxConcurrent}")
     for (group in c.groups) {
         val budget = if (group.dailyUnits == 0L) "no credit cap" else "${formatUnits(group.chargedAndReservedUnits)} / ${formatUnits(group.dailyUnits)} credits"
@@ -125,22 +136,43 @@ private fun StringBuilder.quota(c: CapacityView, pacing: DirectiveView?, pacingU
         "${pacing.pace.lowercase()}: ${if (pacing.maxConcurrent == 0) "no concurrency cap" else "at most ${pacing.maxConcurrent} concurrent"}, ${pacing.minIntervalMillis} ms between requests, until ${at(pacing.expiresAtMillis, now)}")
 }
 
-private fun usable(account: PoolAccountStatusView, now: Long): String {
-    if (account.usable) return "yes"
-    val reason = account.unavailableReason ?: return "no"
+private fun usable(account: PoolAccountStatusView, now: Long, color: Boolean): String {
+    if (account.usable) return paint("yes", GREEN, color)
+    val reason = account.unavailableReason ?: return paint("no", RED, color)
     val until = account.cooldownUntilMillis
-    return if (reason == "cooling_down" && until != null) "no, cooling down until ${at(until, now)}" else "no, ${clean(reason.replace('_', ' '))}"
+    return paint(if (reason == "cooling_down" && until != null) "no, cooling down until ${at(until, now)}" else "no, ${clean(reason.replace('_', ' '))}", RED, color)
 }
 
-private fun window(value: AccountWindowView?, now: Long): String = when {
-    value == null -> "-"
-    value.resetsAtMillis == null -> percent(value.utilization)
-    else -> "${percent(value.utilization)} (reset in ${duration(value.resetsAtMillis!! - now)})"
+private fun window(value: AccountWindowView?, now: Long, color: Boolean): String {
+    if (value == null) return "-"
+    val used = "${bar(value.utilization)} ${percent(value.utilization)}"
+    val reset = value.resetsAtMillis?.let { " (reset in ${duration(it - now)})" } ?: ""
+    return paint(used, usageColor(value.utilization), color) + reset
 }
 
 private fun table(header: List<String>, rows: List<List<String>>): String {
-    val widths = header.indices.map { column -> (rows.map { it[column] } + header[column]).maxOf { it.length } }
-    return (listOf(header) + rows).joinToString("\n") { row -> row.mapIndexed { i, cell -> if (i == row.lastIndex) cell else cell.padEnd(widths[i]) }.joinToString("  ") }
+    // Cells may carry color codes: widths and padding count what is shown.
+    val widths = header.indices.map { column -> (rows.map { it[column] } + header[column]).maxOf { visibleLength(it) } }
+    return (listOf(header) + rows).joinToString("\n") { row ->
+        row.mapIndexed { i, cell -> if (i == row.lastIndex) cell else cell + " ".repeat(widths[i] - visibleLength(cell)) }.joinToString("  ")
+    }
+}
+
+private const val GREEN = "32"
+private const val YELLOW = "33"
+private const val RED = "31"
+private const val BAR_WIDTH = 10
+private val colorCodes = Regex("\u001b\\[[0-9;]*m")
+
+private fun visibleLength(cell: String) = colorCodes.replace(cell, "").length
+private fun paint(text: String, code: String, color: Boolean) = if (color) "\u001b[${code}m$text\u001b[0m" else text
+private fun usageColor(used: Double) = when { used >= .9 -> RED; used >= .7 -> YELLOW; else -> GREEN }
+
+/** A fixed-width bar for a ratio between 0 and 1; a ratio above zero always shows at least one filled cell. */
+internal fun bar(ratio: Double): String {
+    val clamped = ratio.coerceIn(0.0, 1.0)
+    val filled = (clamped * BAR_WIDTH).toInt().let { if (it == 0 && clamped > 0) 1 else it }
+    return "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled)
 }
 
 /** Server text is shown on one line without terminal control characters. */

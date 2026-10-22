@@ -1,5 +1,9 @@
 # Implementation status
 
+## Visual quotas in `teamcode status` (2026-10-22)
+
+`teamcode status` draws the remaining allowance and every account's 5-hour and weekly window as ten-cell bars, with green/yellow/red on a color terminal (mordant detection, so `NO_COLOR` and pipes stay plain). Evidence: `StatusRenderTest` (bar proportions, plain output without escape codes, colored output equal to the plain table once the codes are removed so columns stay aligned) and the CLI JVM status tests pass. Native macOS/Windows output was not run for this change.
+
 ## API keys and status JSON acceptance (2026-10-22)
 
 The roadmap's "API keys and proxy observability for automation" acceptance is proved on `main`; the only code change is a named `statusJson` for the CLI's `--json` view, which already printed the API DTOs.
