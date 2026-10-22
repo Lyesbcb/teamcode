@@ -1,10 +1,21 @@
 package me.nathanfallet.teamcode.domain.cloud
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import me.nathanfallet.teamcode.domain.team.*
 
 /** Validation for clusters, profiles and settings. Persistence revalidates the administrator in its transaction. */
-class CloudAdministrationService(private val store: CloudAdminStore, private val cluster: ClusterPort, val kubeconfigImports: KubeconfigImportService? = null) {
+class CloudAdministrationService(
+    private val store: CloudAdminStore,
+    private val cluster: ClusterPort,
+    val kubeconfigImports: KubeconfigImportService? = null,
+    /** The reads that fill the profile form's lists; without it the form asks for every name. */
+    private val discovery: ClusterDiscoveryPort? = cluster as? ClusterDiscoveryPort,
+) {
     suspend fun clusters(actor: Principal) = admin(actor).let { store.clusters(actor) }
     suspend fun saveCluster(actor: Principal, id: String?, expectedVersion: Int?, input: CloudClusterInput): CloudCluster {
         admin(actor)
@@ -18,6 +29,56 @@ class CloudAdministrationService(private val store: CloudAdminStore, private val
     }
     /** Refuses a storage class that would keep provider volumes after a workspace is deleted. */
     suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>): CloudProfile {
+        verify(actor, name, spec, assignedMemberIds)
+        return store.saveProfile(actor, id, expectedVersion, name, spec, assignedMemberIds)
+    }
+
+    /**
+     * Runs the validation [saveProfile] runs before writing, without publishing (the store's own checks, such as a name
+     * already used, are only met at publication): a draft on the dashboard is checked before it becomes a
+     * version. A draft of an existing profile must still be based on its current version.
+     */
+    suspend fun checkProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) {
+        verify(actor, name, spec, assignedMemberIds)
+        if (id == null) return
+        val current = store.profiles(actor).singleOrNull { it.id == id } ?: throw TeamFailure("not_found", 404, "Profile not found.")
+        if (current.version != expectedVersion)
+            throw TeamFailure("profile_conflict", 409, "Version ${current.version} was published since this draft started from version $expectedVersion. Reload the profile.")
+    }
+
+    /**
+     * What the profile form offers on [clusterId]: the allowed namespaces, then the storage classes and the image pull
+     * secrets of [namespace] (otherwise the first allowed one that is not known to be missing). A read the service account may not make,
+     * or a cluster that cannot be reached, gives no list rather than an error: the form then asks for the name.
+     */
+    suspend fun choices(actor: Principal, clusterId: String, namespace: String?): ClusterChoices {
+        admin(actor)
+        val target = store.clusters(actor).singleOrNull { it.id == clusterId } ?: throw TeamFailure("cluster_not_found", 404, "Cluster not found.")
+        val reads = discovery ?: return ClusterChoices(target, namespace?.takeIf { it in target.allowedNamespaces } ?: target.allowedNamespaces.first(),
+            target.allowedNamespaces.map { NamespaceChoice(it, NamespaceStatus.UNKNOWN) }, ClusterListing.Unavailable, ClusterListing.Unavailable)
+        return coroutineScope {
+            // Up to 32 namespaces: a few reads at a time, so one page load never fans out to the whole list at once.
+            val permits = Semaphore(PARALLEL_READS)
+            val classes = async { listing { reads.storageClasses(target.id).sortedWith(compareBy({ !it.isDefault }, { it.name })) } }
+            val namespaces = target.allowedNamespaces.map { name ->
+                async { permits.withPermit { NamespaceChoice(name, when (val found = listing { listOf(reads.namespaceExists(target.id, name)) }) {
+                    is ClusterListing.Listed -> if (found.items.single()) NamespaceStatus.FOUND else NamespaceStatus.MISSING
+                    else -> NamespaceStatus.UNKNOWN
+                }) } }
+            }.awaitAll()
+            val chosen = namespace?.takeIf { it in target.allowedNamespaces }
+                ?: namespaces.firstOrNull { it.status != NamespaceStatus.MISSING }?.name ?: target.allowedNamespaces.first()
+            val secrets = listing { reads.imagePullSecrets(target.id, chosen).distinct().sorted().take(MAX_LISTED) }
+            ClusterChoices(target, chosen, namespaces, classes.await(), secrets)
+        }
+    }
+
+    private suspend fun <T> listing(read: suspend () -> List<T>): ClusterListing<T> = try { ClusterListing.Listed(read()) }
+        catch (error: CancellationException) { throw error }
+        catch (_: ClusterAccessDeniedException) { ClusterListing.Forbidden }
+        catch (_: Exception) { ClusterListing.Unavailable }
+
+    private suspend fun verify(actor: Principal, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) {
         admin(actor)
         validate(name, spec, assignedMemberIds)
         val target = store.clusters(actor).singleOrNull { it.id == spec.clusterId } ?: throw TeamFailure("cluster_not_found", 404, "Cluster not found.")
@@ -28,7 +89,6 @@ class CloudAdministrationService(private val store: CloudAdminStore, private val
             ?: throw TeamFailure("storage_class_missing", 422, "The workspace storage class does not exist on the cluster.")
         if (storageClass.reclaimPolicy != "Delete")
             throw TeamFailure("storage_class_retains_volumes", 422, "Storage class ${storageClass.name} has reclaimPolicy ${storageClass.reclaimPolicy}; workspaces require reclaimPolicy Delete so deleted sessions leave no provider volume.")
-        return store.saveProfile(actor, id, expectedVersion, name, spec, assignedMemberIds)
     }
     suspend fun settings(actor: Principal) = admin(actor).let { store.settings(actor) }
     suspend fun saveSettings(actor: Principal, settings: CloudSettings): CloudSettings {
@@ -40,6 +100,9 @@ class CloudAdministrationService(private val store: CloudAdminStore, private val
     private fun admin(actor: Principal) = actor.requireAdmin()
 
     companion object {
+        /** Image pull secrets offered at most, the first by name; another one can still be typed in. */
+        const val MAX_LISTED = 200
+        private const val PARALLEL_READS = 4
         private val dnsLabel = Regex("[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
         private val dnsSubdomain = Regex("[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?")
         fun validate(settings: CloudSettings) {
