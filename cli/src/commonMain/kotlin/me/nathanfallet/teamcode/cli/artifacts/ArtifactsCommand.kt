@@ -11,6 +11,7 @@ import me.nathanfallet.teamcode.api.Serialization
 import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.cli.CliUserException
 import me.nathanfallet.teamcode.cli.loadConfig
+import me.nathanfallet.teamcode.cli.platform.hostOs
 import me.nathanfallet.teamcode.cli.sdk
 import me.nathanfallet.teamcode.client.ArtifactConflictException
 import okio.ByteString.Companion.toByteString
@@ -68,6 +69,7 @@ private class ArtifactShow : SuspendingCliktCommand(name = "show") {
         val id = artifactReference(artifact)
         sdk(loadConfig()).use { client ->
             val view = client.artifact(id)
+            if (view.currentVersion < 1) throw CliUserException("${view.title.ifEmpty { id }} has no published version yet: its publication did not finish.")
             val current = client.artifactVersion(id, view.currentVersion)
             val members = client.artifactMembers(id)
             val history = if (versions) client.artifactVersions(id) else null
@@ -91,11 +93,11 @@ private class ArtifactShow : SuspendingCliktCommand(name = "show") {
 
 private class ArtifactPublish : SuspendingCliktCommand(name = "publish") {
     private val page by argument(help = "The page to publish: an .html, .htm or .md file, published under its file name.")
-    private val files by option("--file", help = "Another file: PATH (published at the same relative path) or PUBLISHED=PATH. Repeat as needed.").multiple()
+    private val files by option("--file", help = "Another file: PATH (published at its path relative to the page's directory, so the page's relative links keep working) or PUBLISHED=PATH. Repeat as needed.").multiple()
     private val removed by option("--remove", help = "A published path of the base version to drop. Repeat as needed.").multiple()
     private val artifact by option("--artifact", help = "Publish a new version of this artifact (id or URL) instead of a new artifact.")
     private val baseVersion by option("--base-version", help = "The version your changes start from; refused if another version was published since. Default: the live version.").int()
-    private val title by option("--title", help = "The title; default the page's <title> or first # heading.")
+    private val title by option("--title", help = "The title; default for a new artifact the page's <title> or first # heading, and for a new version the current title.")
     private val description by option("--description", help = "One sentence for the gallery.")
     private val icon by option("--icon", help = "One short lowercase word, such as chart or report.")
     private val access by option("--access", help = "personal (only you and invited members, the default for a new artifact) or team.").choice("personal", "team")
@@ -106,7 +108,7 @@ private class ArtifactPublish : SuspendingCliktCommand(name = "publish") {
         val sources = ArtifactSources(listOf("."))
         val entry = sources.read(page, page.replace('\\', '/').substringAfterLast('/'))
         val others = files.map { spec ->
-            val published = spec.substringBefore('=', spec).replace('\\', '/').removePrefix("./")
+            val published = if ('=' in spec) spec.substringBefore('=').replace('\\', '/').removePrefix("./") else publishedBesidePage(page, spec)
             sources.read(spec.substringAfter('=', spec), published)
         }
         sdk(loadConfig()).use { client ->
@@ -135,6 +137,7 @@ private class ArtifactPull : SuspendingCliktCommand(name = "pull") {
         if (fs.metadataOrNull(target)?.let { !it.isDirectory || fs.list(target).isNotEmpty() } == true) throw CliUserException("$out exists and is not an empty directory.")
         sdk(loadConfig()).use { client ->
             val number = version ?: client.artifact(id).currentVersion
+            if (number < 1) throw CliUserException("This artifact has no published version yet: its publication did not finish.")
             val manifest = client.artifactVersion(id, number)
             manifest.files.forEach { ArtifactLimits.requirePublishedPath(it.path) }
             fs.createDirectories(target)
@@ -193,4 +196,33 @@ private class ArtifactDelete : SuspendingCliktCommand(name = "delete") {
             echo("Deleted $id. Its files are removed from the storage within minutes.")
         }
     }
+}
+
+/**
+ * Where a `--file PATH` is published: relative to the page's directory, as the page itself is published under its file
+ * name, so `publish dist/index.html --file dist/app.js` keeps `./app.js` working. A file outside that directory needs
+ * an explicit `PUBLISHED=PATH`.
+ */
+internal fun publishedBesidePage(page: String, file: String, ignoreCase: Boolean = hostOs() != "linux"): String {
+    val directory = lexical(page).dropLast(1)
+    val path = lexical(file)
+    // Compared as the file system does: without case on Windows and macOS, where `Dist` and `dist` are one directory.
+    val beside = path.size > directory.size && path.take(directory.size).zip(directory).all { (a, b) -> a.equals(b, ignoreCase) }
+    val published = path.drop(directory.size)
+    if (!beside || ".." in published || published.first() == "/" || published.first().endsWith(':'))
+        throw CliUserException("$file is outside the page's directory ${directory.joinToString("/").ifEmpty { "." }}. Say where it is published with PUBLISHED=$file.")
+    return published.joinToString("/")
+}
+
+/** A path's segments with `.`, empty segments and resolvable `..` removed; an absolute path keeps its root (`/`, `C:`) as its first segment. */
+private fun lexical(path: String): List<String> {
+    val slashed = path.replace('\\', '/')
+    val segments = mutableListOf<String>()
+    if (slashed.startsWith('/')) segments += "/"
+    for (segment in slashed.split('/')) when {
+        segment.isEmpty() || segment == "." -> Unit
+        segment == ".." && segments.isNotEmpty() && segments.last() != ".." && segments.last() != "/" && !segments.last().endsWith(':') -> segments.removeAt(segments.lastIndex)
+        else -> segments += segment
+    }
+    return segments
 }
