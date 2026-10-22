@@ -73,7 +73,19 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
-        val from = lastSeqOf(sessionId) - window
+        // A request of the current execution is found by the runner's own index (session, epoch, runner seq) among that
+        // execution's latest requests, however many other events followed it; then its closing events are read from
+        // it onwards. An older request (already ended with its execution) is looked for in the last [window] events.
+        val epoch = CloudSessions.select(CloudSessions.currentEpoch).where { CloudSessions.id eq sessionId }.singleOrNull()?.get(CloudSessions.currentEpoch)
+        val anchor = epoch?.let {
+            CloudSessionEvents.select(CloudSessionEvents.seq, CloudSessionEvents.data).where {
+                (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.epoch eq it) and (CloudSessionEvents.type eq CloudEventType.PERMISSION_REQUEST.wire)
+            }.orderBy(CloudSessionEvents.runnerSeq to SortOrder.DESC).limit(MAX_REQUESTS_SCANNED).firstOrNull { row ->
+                val data = try { Json.parseToJsonElement(row[CloudSessionEvents.data]) as? JsonObject } catch (_: IllegalArgumentException) { null }
+                (data?.get("requestId") as? JsonPrimitive)?.contentOrNull == requestId
+            }?.get(CloudSessionEvents.seq)
+        }
+        val from = if (anchor != null) anchor - 1 else lastSeqOf(sessionId) - window
         // A range of the primary key (session, seq), newest first: what closed a request is seen before the request.
         val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data, CloudSessionEvents.epoch).where {
             (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq greater from) and
@@ -85,7 +97,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             fun text(name: String) = (data[name] as? JsonPrimitive)?.contentOrNull
             when (row[CloudSessionEvents.type]) {
                 // The oldest closing event wins: it is the one the agent saw first.
-                CloudEventType.TURN.wire -> if (text("phase") in TURN_ENDS) state = PermissionRequestState.ENDED
+                CloudEventType.TURN.wire -> if (text("phase") in CloudConversationRules.TURN_END_PHASES) state = PermissionRequestState.ENDED
                 CloudEventType.INPUT.wire -> if (text("requestId") == requestId && text("status") == CloudInputStatus.CONSUMED.wire) state = PermissionRequestState.ANSWERED
                 CloudEventType.PERMISSION_EXPIRED.wire -> if (text("requestId") == requestId) state = PermissionRequestState.EXPIRED
                 else -> if (text("requestId") == requestId) return@query permissionRequestRecord(requestId, data, state).copy(epoch = row[CloudSessionEvents.epoch])
@@ -416,7 +428,8 @@ private fun readEvent(row: ResultRow) = CloudEvent(
     row[CloudSessionEvents.at], row[CloudSessionEvents.epoch], row[CloudSessionEvents.data],
 )
 private val PERMISSION_LOOKUP_TYPES = listOf(CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED, CloudEventType.INPUT, CloudEventType.TURN).map { it.wire }
-private val TURN_ENDS = setOf("completed", "interrupted", "failed")
+/** How many of the current execution's latest requests an answer is matched against. */
+private const val MAX_REQUESTS_SCANNED = 200
 
 /** A stored `permission.request`: whether it is a question, and each question's option count when its input was kept. */
 private fun permissionRequestRecord(requestId: String, data: JsonObject, state: PermissionRequestState): PermissionRequestRecord {

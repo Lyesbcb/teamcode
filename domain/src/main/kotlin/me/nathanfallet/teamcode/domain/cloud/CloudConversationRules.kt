@@ -154,6 +154,8 @@ object CloudConversationRules {
     const val MAX_PERMISSION_INDEX = 64
     /** The longest deadline a team may set for unanswered permission requests: a day. */
     const val MAX_PERMISSION_DEADLINE_MINUTES = 1_440
+    /** The `turn` phases that end a turn, and with it every permission request still open in it. */
+    val TURN_END_PHASES = setOf("completed", "interrupted", "failed")
     /** How far back in a session's transcript an answer looks for its request; an open request belongs to the running turn. */
     const val PERMISSION_LOOKUP_EVENTS = 1_000L
     /** Printable ASCII without spaces: the agent chooses the shape (Claude Code: a UUID). */

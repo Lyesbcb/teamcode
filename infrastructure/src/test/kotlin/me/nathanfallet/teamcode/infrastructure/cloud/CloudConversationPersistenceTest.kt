@@ -190,7 +190,8 @@ class CloudConversationPersistenceTest {
         assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1), ra.conversations.permissionRequest(s.id, "tool-2", 100))
         assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false, "Red or blue?")), PermissionRequestState.ANSWERED, epoch = 1), rb.conversations.permissionRequest(s.id, "req-1", 100))
         assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 100)?.state)
-        assertNull(ra.conversations.permissionRequest(s.id, "req-1", 3), "Only the recent transcript is searched")
+        assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 0)?.state, "A request of the current execution is found however many events followed it")
+        assertNull(ra.conversations.permissionRequest(s.id, "nobody-asked", 100))
         failure("permission_request_expired") { ra.conversation.answer(colleague, s.id, PermissionAnswer("tool-2", true, null, emptyList()), InputRequest("""{"requestId":"tool-2","behavior":"allow"}""", false, null, null, null)) }
         val denied = ra.conversation.answer(admin, s.id, PermissionAnswer("tool-1", false, "Not today.", emptyList()), InputRequest("""{"requestId":"tool-1","behavior":"deny","message":"Not today."}""", false, null, null, null))
         assertIs<InputOutcome.Accepted>(denied)

@@ -135,13 +135,14 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
 
     /**
      * Whether the server stores [element] as is: within its depth, entry and key limits and without the reasoning keys
-     * it drops. Otherwise the event says the input was left out, rather than showing an approver a silently cut one.
+     * it drops (as keys, or as the `type` of a nested object). Otherwise the event says the input was left out, rather
+     * than showing an approver a silently cut one. Secrets the server masks stay masked for the approver, as everywhere
+     * in the transcript; `allow` still returns the original input.
      */
     private fun keptWhole(element: JsonElement, depth: Int): Boolean = when (element) {
-        is JsonObject -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES &&
+        is JsonObject -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && (depth == 0 || element["type"].string() !in DROPPED_KEYS) &&
             element.all { (key, value) -> key.length <= 64 && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
-        is JsonArray -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES &&
-            element.all { it.obj()?.get("type").string() !in DROPPED_KEYS && keptWhole(it, depth + 1) }
+        is JsonArray -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && element.all { keptWhole(it, depth + 1) }
         else -> true
     }
 

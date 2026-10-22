@@ -244,13 +244,19 @@ internal class AgentHost(
             val line = child.readLine() ?: break
             val replies = lock.withLock {
                 val result = active.parse(line)
+                val denials = mutableListOf<String>()
                 result.events.forEach { event ->
-                    enqueue(event.type, event.data)
-                    if (event.type == CloudEventTypes.PERMISSION_REQUEST) (event.data["requestId"] as? JsonPrimitive)?.contentOrNull?.let { expireLater(child, active, it) }
+                    val kept = enqueue(event.type, event.data)
+                    if (event.type != CloudEventTypes.PERMISSION_REQUEST) return@forEach
+                    val requestId = (event.data["requestId"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+                    // A request no member can see (the buffer is full while the server is unreachable) is denied at once
+                    // rather than left blocking the agent.
+                    if (kept) expireLater(child, active, requestId)
+                    else denials += active.answer(requestId, false, "The request could not be shown to the team: it was denied.", emptyList()).lines
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
                 if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) }
-                result.replies
+                result.replies + denials
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.
             if (replies.isNotEmpty()) scope.launch { write(child, replies) }
@@ -309,14 +315,16 @@ internal class AgentHost(
         }
     }
 
-    private fun enqueue(type: String, data: kotlinx.serialization.json.JsonObject) {
+    /** Buffers an event for upload; false when it was dropped. */
+    private fun enqueue(type: String, data: kotlinx.serialization.json.JsonObject): Boolean {
         if (buffer.size >= MAX_BUFFERED) {
             // Never grow without bound while the server is unreachable. Newer events are dropped without a sequence
             // number, so the numbering the server expects has no gap; an overflow event says how many were lost.
             dropped++
-            return
+            return false
         }
         buffer.addLast(RunnerEventView(++sequence, type, data))
+        return true
     }
     private var dropped = 0
 
