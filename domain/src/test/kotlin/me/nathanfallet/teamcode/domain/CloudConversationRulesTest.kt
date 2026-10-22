@@ -86,7 +86,8 @@ class CloudConversationRulesTest {
         fun check(vararg answers: QuestionAnswer) = CloudConversationRules.checkAnswer(question, PermissionAnswer("q1", true, null, answers.toList()), approver = false)
         fun refused(vararg answers: QuestionAnswer) = assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { check(*answers) }.code)
         check(QuestionAnswer(0, listOf(1)), QuestionAnswer(1, listOf(0, 2)))
-        check(QuestionAnswer(1, text = "Purple"))
+        check(QuestionAnswer(0, listOf(0)), QuestionAnswer(1, text = "Purple"))
+        refused(QuestionAnswer(1, text = "Purple")) // each question is answered
         CloudConversationRules.checkAnswer(question, PermissionAnswer("q1", false, "Skip it.", emptyList()), approver = false)
         refused()
         refused(QuestionAnswer(2, listOf(0)))
