@@ -1,5 +1,9 @@
 # Implementation status
 
+## Cost and tokens of each turn in cloud transcripts (2026-10-22)
+
+The Claude Code adapter of the cloud runner keeps what the stream-json `result` line reports: a finished `turn` event carries `totalCostMicros` (Claude Code's running estimate of the conversation's cost, `total_cost_usd`, in micro-dollars), `costMicros` (this turn's share, the difference with the previous `result` of the same process) and the turn's `inputTokens`, `outputTokens`, `cacheCreationInputTokens` and `cacheReadInputTokens`. Claude Code keeps its total across `--resume`, so after a restart in a new pod the first turn has the total but no `costMicros`, rather than a turn cost that would include every earlier turn. `teamcode cloud logs` and `attach` show the turn's cost. Codex turns and the team event feed are unchanged. Evidence: `CloudAgentTest.claudeTurnsCarryTheirCostAndTokens` (CLI JVM tests). The semantics were checked against Claude Code 2.1.308 `-p --input-format stream-json`: `total_cost_usd` grew from 0.0145 to 0.0177 over two turns of one process and continued from 0.0177 in a new process with `--resume`, while `usage` held the turn's own tokens; the fixtures are synthetic. No pod was run.
+
 ## Visual quotas in `teamcode status` (2026-10-22)
 
 `teamcode status` draws the remaining allowance and every account's 5-hour and weekly window as ten-cell bars, with green/yellow/red on a color terminal (mordant detection, so `NO_COLOR` and pipes stay plain). Evidence: `StatusRenderTest` (bar proportions, plain output without escape codes, colored output equal to the plain table once the codes are removed so columns stay aligned) and the CLI JVM status tests pass. Native macOS/Windows output was not run for this change.

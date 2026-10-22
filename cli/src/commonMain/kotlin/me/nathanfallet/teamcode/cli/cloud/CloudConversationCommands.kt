@@ -30,7 +30,7 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.AGENT_MESSAGE -> data.text("text") ?: ""
         CloudEventTypes.TOOL_CALL -> "[tool] ${data.text("name") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd()
         CloudEventTypes.TOOL_RESULT -> "[result${if ((data["isError"] as? JsonPrimitive)?.booleanOrNull == true) ", error" else ""}] ${(data.text("output") ?: "").preview(300)}"
-        CloudEventTypes.TURN -> "-- turn ${data.text("phase") ?: "update"} --"
+        CloudEventTypes.TURN -> "-- turn ${data.text("phase") ?: "update"}${(data["costMicros"] as? JsonPrimitive)?.longOrNull?.let { ", \$${it / 1_000_000}.${(it % 1_000_000).toString().padStart(6, '0')}" } ?: ""} --"
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
