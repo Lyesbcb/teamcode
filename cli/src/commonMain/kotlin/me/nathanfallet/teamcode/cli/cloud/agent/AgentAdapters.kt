@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.cli.cloud.agent
 
+import kotlin.math.roundToLong
 import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
@@ -56,7 +57,8 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * --output-format stream-json --verbose --dangerously-skip-permissions`, resumed with `--resume <session_id>`.
  * Messages written while a turn runs are queued by Claude Code itself; an interrupt is a `control_request`.
  * Thinking blocks are dropped here and never uploaded. Events produced by a subagent keep its parent's tool call id as
- * `parentToolUseId`.
+ * `parentToolUseId`. A finished turn carries Claude Code's own cost estimate and the turn's tokens from its `result`
+ * line.
  */
 class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
     override var conversationId: String? = null; private set
@@ -70,7 +72,14 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         settings.effort?.let { addAll(listOf("--effort", it)) }
         resume?.let { addAll(listOf("--resume", it)) }
     })
-    override fun startup(resume: String?, workingDirectory: String) = emptyList<String>()
+    override fun startup(resume: String?, workingDirectory: String): List<String> {
+        // A resumed conversation starts from the cost it had in the previous process, which this one never saw.
+        reportedCostUsd = if (resume == null) 0.0 else null
+        return emptyList()
+    }
+
+    /** The conversation's cost at the last priced `result`; null while unknown (before [startup], or a resumed conversation's first turn). */
+    private var reportedCostUsd: Double? = null
 
     /** A subagent's lines carry the `tool_use` id of the parent's Agent (Task) call; the main agent's carry null. */
     private fun JsonObjectBuilder.parent(line: JsonObject) { line["parent_tool_use_id"].string()?.let { put("parentToolUseId", it) } }
@@ -124,13 +133,30 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 if (pending > 0) pending--
                 val failed = (value["is_error"] as? JsonPrimitive)?.booleanOrNull == true
                 val interrupted = value["subtype"].string() == "error_during_execution"
+                // `total_cost_usd` is the conversation's running total (kept across `--resume`); `usage` is this turn's.
+                // A total below the previous one (a counter that restarted) gives the turn no cost of its own rather than a wrong one.
+                val totalCostUsd = (value["total_cost_usd"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it >= 0 }
+                val costMicros = totalCostUsd?.let { total -> reportedCostUsd?.takeIf { it <= total }?.let { ((total - it) * 1_000_000).roundToLong() } }
+                val totalCostMicros = totalCostUsd?.let { (it * 1_000_000).roundToLong() }
+                if (totalCostUsd != null) reportedCostUsd = totalCostUsd
+                val usage = value["usage"].obj()
                 AgentOutput(listOf(turn(if (interrupted) "interrupted" else if (failed) "failed" else "completed") {
                     (value["duration_ms"] as? JsonPrimitive)?.longOrNull?.let { put("durationMs", it) }
                     (value["num_turns"] as? JsonPrimitive)?.intOrNull?.let { put("steps", it) }
+                    costMicros?.let { put("costMicros", it) }
+                    totalCostMicros?.let { put("totalCostMicros", it) }
+                    for ((from, to) in USAGE_FIELDS) (usage?.get(from) as? JsonPrimitive)?.longOrNull?.let { put(to, it) }
                 }))
             }
             else -> AgentOutput()
         }
+    }
+
+    private companion object {
+        val USAGE_FIELDS = listOf(
+            "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
+            "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",
+        )
     }
 }
 
