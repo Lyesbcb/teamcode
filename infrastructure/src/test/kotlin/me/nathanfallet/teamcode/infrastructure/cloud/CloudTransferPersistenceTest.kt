@@ -220,6 +220,9 @@ class CloudTransferPersistenceTest {
         assertEquals(PAUSED, ra.store.find(teamId, s.id)!!.state)
         ra.admin.saveSettings(t.admin, CloudSettings(transferPendingInputs = TransferPendingInputs.KEEP))
         val kept = (ra.conversation.send(t.owner, s.id, InputRequest("Keep me", false, null, null, null)) as InputOutcome.Accepted).input
+        val answerAt = ra.store.now()
+        ra.conversations.insertInput(NewInput(CloudInput("kept-answer", teamId, s.id, CloudInputKind.PERMISSION, CloudInputStatus.QUEUED, t.owner.member.id, t.owner.tokenId,
+            """{"requestId":"r1","behavior":"deny"}""", false, clientKey = null, requestDigest = null, createdAt = answerAt), null), CloudConversationRules.MAX_PENDING_INPUTS)
         val direct = rb.transfers.request(t.admin, t.owner.member.id, s.id, CloudTransferRequest(t.admin.member.id, false, false), key("admin-1", "d10")).transfer
         assertEquals(CloudTransferState.ACCEPTED, direct.state)
         assertEquals(Attribution(t.admin.member.id, t.admin.tokenId, t.owner.member.id), direct.initiatedBy)
@@ -230,6 +233,7 @@ class CloudTransferPersistenceTest {
         assertEquals(PAUSED to DesiredState.PAUSED, current.state to current.desiredState, "Without resume the session stays paused")
         assertNotNull(current.expiresAt, "The recipient gets the full paused retention")
         assertEquals(CloudInputStatus.QUEUED, ra.conversation.input(t.admin, s.id, kept.id).status, "The team kept unconsumed messages")
+        assertEquals(CloudInputStatus.CANCELLED to "transferred", ra.conversation.input(t.admin, s.id, "kept-answer").let { it.status to it.reason }, "but never a permission answer: the process that asked is gone")
         ra.admin.saveSettings(t.admin, CloudSettings())
         ra.sessions.delete(t.admin, null, s.id)
     }

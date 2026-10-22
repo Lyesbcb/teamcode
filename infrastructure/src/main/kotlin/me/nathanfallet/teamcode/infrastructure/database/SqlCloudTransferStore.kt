@@ -131,7 +131,8 @@ class SqlCloudTransferStore(private val database: Database) : CloudTransferStore
         val seq = conversations.serverEvent(expected.id, expected.teamId, CloudEventType.TRANSFER, event.toString(), now)
         with(conversations) {
             for (input in conversations.pendingInputs(expected.id)) {
-                if (transfer.pendingInputs == TransferPendingInputs.CANCEL) finish(expected.teamId, input, CloudInputStatus.CANCELLED, "transferred", now)
+                // A permission answer belongs to the agent process that asked, which the pause already ended: never kept.
+                if (transfer.pendingInputs == TransferPendingInputs.CANCEL || input.kind == CloudInputKind.PERMISSION) finish(expected.teamId, input, CloudInputStatus.CANCELLED, "transferred", now)
                 // Kept inputs go to the recipient's next execution: requeued, attempts preserved.
                 else if (input.status == CloudInputStatus.DELIVERED) CloudSessionInputs.update({ CloudSessionInputs.id eq input.id }) { it[status] = CloudInputStatus.QUEUED.wire }
             }

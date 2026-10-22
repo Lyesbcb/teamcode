@@ -2,8 +2,10 @@ package me.nathanfallet.teamcode.cli.cloud
 
 import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.core.Context
+import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.long
 import kotlin.time.Instant
@@ -20,7 +22,46 @@ import me.nathanfallet.teamcode.client.TeamCodeClient
 import me.nathanfallet.teamcode.client.TeamCodeException
 
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+/**
+ * Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) and
+ * invisible format characters (bidirectional overrides, zero-width marks, line separators) become spaces.
+ */
+private fun String.printable(): String = buildString {
+    var i = 0
+    while (i < this@printable.length) {
+        val c = this@printable[i]
+        val low = this@printable.getOrNull(i + 1)
+        if (c.isHighSurrogate() && low != null && low.isLowSurrogate()) {
+            // Supplementary characters are checked by code point: the tag characters and the other invisible ones there.
+            val point = 0x10000 + ((c.code - 0xD800) shl 10) + (low.code - 0xDC00)
+            if (HIDDEN_SUPPLEMENTARY.any { point in it }) append("  ") else append(c).append(low)
+            i += 2; continue
+        }
+        // A zero-width joiner only joins emoji, so it is kept; the blank-looking fillers are hidden like format characters.
+        append(if (c != '\u200D' && (c.isISOControl() || c.category in HIDDEN || c.isSurrogate() || c in BLANK_FILLERS)) ' ' else c)
+        i++
+    }
+}
+/** Letters and symbols that render as nothing (Hangul fillers, the braille blank, Khmer inherent vowels). */
+private val BLANK_FILLERS = setOf('\u115F', '\u1160', '\u3164', '\uFFA0', '\u2800', '\u17B4', '\u17B5')
+/** The format characters outside the basic plane (Unicode 15). */
+private val HIDDEN_SUPPLEMENTARY = listOf(0x110BD..0x110BD, 0x110CD..0x110CD, 0x13430..0x1343F, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE007F, 0xE0100..0xE01EF)
+/** Agent text quoted, so a label cannot pass for more options or indexes. */
+private fun String.quoted() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+private fun JsonElement?.isTrue() = (this as? JsonPrimitive)?.booleanOrNull == true
+private val HIDDEN = setOf(CharCategory.FORMAT, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR, CharCategory.SPACE_SEPARATOR)
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
+
+/**
+ * A question request's questions and options in full, each with the index `teamcode cloud answer --answer` takes:
+ * `? 0: "Red or blue?" (0: "Red" / 1: "Blue")`, marked `several` when more than one option may be chosen.
+ */
+private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.get("questions") as? JsonArray).orEmpty().withIndex().joinToString("") { (index, element) ->
+    val question = element as? JsonObject ?: JsonObject(emptyMap())
+    val options = (question["options"] as? JsonArray).orEmpty().mapIndexed { option, it -> "$option: ${(((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull ?: "").quoted()}" }
+    val several = (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
+    "\n    ? $index: " + (question.text("question") ?: "").quoted().printable() + (if (options.isEmpty()) "" else " (${options.joinToString(" / ").printable()})") + if (several) " several" else ""
+}
 
 /** Micro-dollars as `$0.003253`; null for a negative amount, which no runner reports. */
 internal fun dollars(micros: Long): String? = if (micros < 0) null else "$" + "${micros / 1_000_000}.${(micros % 1_000_000).toString().padStart(6, '0')}"
@@ -39,10 +80,22 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.TURN -> "-- turn ${data.text("phase") ?: "update"}${(data["costMicros"] as? JsonPrimitive)?.longOrNull?.let(::dollars)?.let { ", $it" } ?: ""} --"
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
-        CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
+        CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]" +
+            // A permission answer says which request it answered, how, and who decided.
+            (data.text("requestId")?.let { request ->
+                val by = data.text("authorId")?.printable() ?: "?"
+                if (data.text("status") == "consumed") " ${data.text("behavior") ?: "answer"} ${request.printable()} by $by" else " (an answer to ${request.printable()} by $by, not applied)"
+            } ?: "")
+        CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
+            // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
+            // A question is shown by the indexed lines that follow, not as raw JSON.
+            // An input left out of the event shows its preview instead, and can only be denied (the server refuses allow).
+            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut; too large to approve, deny only)" } ?: ""}".printable().trimEnd() + if (data["question"].isTrue()) questions(data["input"]) else ""
+        CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }
-    return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}$body"
+    // Every line is agent text: escape sequences never reach the terminal, so none can rewrite a request shown above.
+    return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}${body.lines().joinToString("\n") { it.printable() }}"
 }
 
 private fun CloudInputView.line() = listOfNotNull(id, kind, status, reason, if (woke) "woke the session" else null).joinToString("\t")
@@ -139,6 +192,30 @@ internal class CloudInterrupt : SuspendingCliktCommand(name = "interrupt") {
     override fun help(context: Context) = "Stop the agent's current turn. Queued messages stay queued."
     private val id by argument()
     override suspend fun run() { echo(sdk(loadConfig()).use { it.interruptCloudSession(id, Uuid.random().toString()) }.line()) }
+}
+
+internal class CloudAnswer : SuspendingCliktCommand(name = "answer") {
+    override fun help(context: Context) = "Answer a permission request of the agent (a [permission] or [question] line of the transcript): allow or deny it, " +
+        "or answer its questions by the indexes printed under it. A tool use is answered by the session owner or an administrator only."
+    private val id by argument()
+    private val request by argument("REQUEST_ID")
+    private val behavior by argument("allow|deny").choice("allow", "deny")
+    private val message by option("--message", help = "Why it was denied; the agent reads it.")
+    private val answers by option("--answer", help = "QUESTION=OPTION[,OPTION...] by index, from 0, for a question request (repeatable); needs allow.").multiple()
+    private val texts by option("--answer-text", help = "QUESTION=TEXT: a free answer to the question at that index (repeatable); needs allow.").multiple()
+    override suspend fun run() {
+        val parsed = answers.map { value ->
+            val (question, options) = indexed(value, "--answer QUESTION=OPTION[,OPTION...]")
+            CloudQuestionAnswer(question, options.split(',').map { it.trim().toIntOrNull()?.takeIf { index -> index >= 0 } ?: throw UsageError("Use --answer QUESTION=OPTION[,OPTION...] with option indexes from 0.") })
+        } + texts.map { value -> indexed(value, "--answer-text QUESTION=TEXT").let { (question, text) -> CloudQuestionAnswer(question, text = text) } }
+        val answer = AnswerCloudPermissionRequest(request, behavior, message, parsed.sortedBy { it.question }.takeIf { it.isNotEmpty() })
+        echo(sdk(loadConfig()).use { it.answerCloudPermission(id, answer, Uuid.random().toString()) }.line())
+    }
+    private fun indexed(value: String, usage: String): Pair<Int, String> {
+        val split = value.indexOf('=')
+        val question = value.take(split.coerceAtLeast(0)).trim().toIntOrNull()?.takeIf { split > 0 && it >= 0 } ?: throw UsageError("Use $usage with a question index from 0.")
+        return question to value.drop(split + 1)
+    }
 }
 
 /**

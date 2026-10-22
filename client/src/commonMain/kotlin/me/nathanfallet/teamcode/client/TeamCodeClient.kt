@@ -505,6 +505,15 @@ class TeamCodeClient(
         idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
         return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/interrupt", null as Unit?) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
     }
+    /**
+     * Answers a `permission.request` event (`cloud.permissions.v1`): allow or deny it, or answer its questions by
+     * question and option index ([CloudQuestionAnswer]). [idempotencyKey] makes a retry answer once.
+     */
+    suspend fun answerCloudPermission(id: String, answer: AnswerCloudPermissionRequest, idempotencyKey: String? = null): CloudInputView {
+        identifier(id)
+        idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
+        return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/permissions", answer) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
+    }
     suspend fun cloudInputs(id: String, before: String? = null, limit: Int = 50): CloudInputPageView {
         identifier(id); before?.let(::identifier); require(limit in 1..200)
         return coded(HttpMethod.Get, "/api/v1/cloud/sessions/$id/messages", null as Unit?) { url { before?.let { parameters.append("before", it) }; parameters.append("limit", limit.toString()) } }

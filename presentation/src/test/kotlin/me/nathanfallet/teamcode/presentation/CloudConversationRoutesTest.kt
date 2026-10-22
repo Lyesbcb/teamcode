@@ -38,7 +38,8 @@ class CloudConversationRoutesTest {
         override suspend fun profile(teamId: String, profileId: String) = profile
         override suspend fun profileVersion(teamId: String, profileId: String, version: Int) = profile.spec
         override suspend fun cluster(teamId: String, clusterId: String) = CloudCluster("cluster-id", "default", "lab", "https://k8s.example.test", listOf("teamcode"), 10, "standard", 1, 0, null, 1, 1)
-        override suspend fun settings(teamId: String) = CloudSettings()
+        var settings = CloudSettings()
+        override suspend fun settings(teamId: String) = settings
         override suspend fun insert(session: CloudSession, actor: CloudActor, idempotency: IdempotencyRequest?, retainedLimit: Int) =
             CloudCreateOutcome.Created(session.copy(generation = 1).also { sessions[it.id] = it })
         override suspend fun find(teamId: String, id: String) = sessions[id]
@@ -84,11 +85,23 @@ class CloudConversationRoutesTest {
             return CloudEventPage(page, all.firstOrNull()?.seq, all.lastOrNull()?.seq ?: 0, page.lastOrNull()?.seq?.takeIf { it < (all.lastOrNull()?.seq ?: 0) }, null)
         }
         override suspend fun lastSeq(sessionId: String) = events.filter { it.sessionId == sessionId }.maxOfOrNull { it.seq } ?: 0
+        /** The requests a test says are in the transcript (the MySQL lookup is covered in infrastructure). */
+        val requests = mutableMapOf<String, PermissionRequestRecord>()
+        /** The session as the store's lock would read it (the sessions fake of the test). */
+        var sessionOf: (String) -> CloudSession? = { null }
         override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome {
             val input = new.input
             inputs.values.find { it.sessionId == input.sessionId && it.authorId == input.authorId && it.clientKey != null && it.clientKey == input.clientKey }?.let {
                 if (it.requestDigest != input.requestDigest) throw TeamFailure("idempotency_conflict", 422, "conflict")
                 return InputOutcome.Replayed(it)
+            }
+            new.permissionCheck?.let { check ->
+                val session = sessionOf(input.sessionId)!!
+                check(AnswerContext(new.permissionRequestId?.let(requests::get), session.state, session.desiredState, session.currentEpoch))
+            }
+            new.permissionRequestId?.let { requestId ->
+                if (inputs.values.any { it.sessionId == input.sessionId && it.kind == CloudInputKind.PERMISSION && !it.status.final && "\"requestId\":\"$requestId\"" in it.text.orEmpty() })
+                    throw TeamFailure("permission_request_answered", 409, "pending")
             }
             inputs[input.id] = input
             return InputOutcome.Accepted(input)
@@ -153,7 +166,7 @@ class CloudConversationRoutesTest {
     /** A real server: the test engine buffers a streamed response until it completes, which an endless stream never does. */
     @Test fun transcriptMessagesStreamAndRunnerAgentChannel() = runBlocking {
         val store = Sessions(listOf(admin, colleague, other))
-        val conversations = Conversations()
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
         val access = CloudAccessService(conversations, store)
         val service = CloudConversationService(conversations, store, access, sleep = { delay(20) })
         val sessions = CloudSessionService(store, access = access, initialMessages = service)
@@ -181,7 +194,7 @@ class CloudConversationRoutesTest {
             store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
 
             val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
-            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1").all { it in features })
+            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1", "cloud.permissions.v1").all { it in features })
 
             // An initial message of the full 32,000 characters fits the creation body and is queued (replay: CloudIdlePersistenceTest).
             val longest = "é".repeat(CloudConversationRules.MAX_MESSAGE_CHARS)
@@ -222,11 +235,57 @@ class CloudConversationRoutesTest {
             val runner = sdk("projected-pod-token-1")
             val member = sdk("colleague")
             try {
-                assertEquals(RunnerAgentView("claude", null, "opus", null, "none"), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)))
+                assertEquals(RunnerAgentView("claude", null, "opus", null, "none", permissionRelay = true), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)),
+                    "This server takes permission requests, so the runner relays them, without a deadline by default")
+                store.settings = CloudSettings(permissionDeadlineMinutes = 15)
+                assertEquals(15, runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)).permissionDeadlineMinutes, "The team's deadline reaches the runner")
+                store.settings = CloudSettings()
                 val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
                 assertEquals(ack.id, delivered.id); assertEquals("Fix the retry", delivered.text)
                 runner.runnerAcknowledge(RunnerInputAckRequest("default", "s1", 1, listOf(RunnerInputAckView(ack.id, "consumed"))))
                 assertEquals("consumed", member.cloudInput("s1", ack.id).status)
+
+                // A permission answer reaches the runner as the fixed JSON it parses; a bad behavior or a read-only key is refused.
+                suspend fun answer(token: String, body: String) = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth(token); contentType(ContentType.Application.Json); setBody(body) }
+                conversations.requests["req-1"] = PermissionRequestRecord("req-1", question = true, listOf(QuestionShape(2, false), QuestionShape(3, true)), epoch = 1)
+                conversations.requests["tool-1"] = PermissionRequestRecord("tool-1", question = false, null, epoch = 1)
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"maybe"}""").status)
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"deny","answers":[{"question":0,"options":[1]}]}""").status, "Answers go with allow")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[2]},{"question":1,"options":[0]}]}""").status, "An option the question does not have")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[1]}]}""").status, "Each question is answered")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[0,1]},{"question":1,"options":[0]}]}""").status, "One option for a single-choice question")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[0]},{"question":2,"text":"Green"}]}""").status, "A question the request does not have")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"tool-1","behavior":"allow","answers":[{"question":0,"options":[0]}]}""").status, "A tool use takes no answers")
+                assertEquals(HttpStatusCode.Conflict, answer("colleague", """{"requestId":"req-9","behavior":"allow"}""").status, "No such request in the transcript")
+                assertEquals(HttpStatusCode.Forbidden, answer("colleague-read", """{"requestId":"req-1","behavior":"allow"}""").status)
+                assertEquals(HttpStatusCode.NotFound, answer("other", """{"requestId":"req-1","behavior":"allow"}""").status)
+                // A member the policy lets send messages answers a question, but approving a tool use stays the owner's or an administrator's.
+                conversations.policy = CloudAccessPolicy(1, listOf(CloudAccessRule(CloudAccessSubject.MemberSubject(other.id), setOf(CloudPermission.TRANSCRIPT, CloudPermission.MESSAGE), CloudAccessScope.TEAM)))
+                val refused = answer("other", """{"requestId":"tool-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.Forbidden, refused.status); assertTrue("permission_answer_denied" in refused.bodyAsText())
+                assertEquals(HttpStatusCode.Forbidden, answer("other", """{"requestId":"tool-1","behavior":"deny"}""").status, "Denying is the owner's decision too")
+                assertEquals(HttpStatusCode.Accepted, answer("other", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[0]},{"question":1,"options":[0,2]}]}""").status)
+                conversations.policy = CloudAccessPolicy.DEFAULT
+                val second = answer("colleague", """{"requestId":"req-1","behavior":"deny"}""")
+                assertEquals(HttpStatusCode.Conflict, second.status, "One answer per request at a time"); assertTrue("permission_request_answered" in second.bodyAsText())
+                assertEquals(HttpStatusCode.Accepted, answer("admin", """{"requestId":"tool-1","behavior":"deny","message":"Not today."}""").status, "An administrator decides a tool use")
+                conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, PermissionRequestState.EXPIRED, epoch = 1)
+                val expired = answer("colleague", """{"requestId":"old-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.Conflict, expired.status, "An expired request was already denied"); assertTrue("permission_request_expired" in expired.bodyAsText())
+                conversations.requests["big-1"] = PermissionRequestRecord("big-1", question = false, null, epoch = 1, inputLeftOut = true)
+                val unseen = answer("colleague", """{"requestId":"big-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.BadRequest, unseen.status, "Nobody approves an input nobody could read"); assertTrue("permission_input_unseen" in unseen.bodyAsText())
+                assertEquals(HttpStatusCode.Accepted, answer("colleague", """{"requestId":"big-1","behavior":"deny"}""").status, "but it can be denied")
+                conversations.inputs.values.removeIf { it.kind == CloudInputKind.PERMISSION }
+                val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1")
+                assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)
+                assertEquals(answered.id, member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1").id, "Replayed")
+                assertEquals(422, assertFailsWith<TeamCodeException> { member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "deny"), "answer-1") }.statusCode)
+                val relayed = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
+                assertEquals("permission", relayed.kind)
+                assertEquals("""{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[1]},{"question":1,"text":"Purple"}]}""", relayed.text, "By index, sorted by question")
+                assertEquals(HttpStatusCode.Accepted, answer("colleague", """{"requestId":"tool-1","behavior":"allow"}""").status, "The owner decides a tool use")
+                runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0))
                 val events = listOf(
                     RunnerEventView(1, "turn", buildJsonObject { put("phase", "started") }),
                     RunnerEventView(2, "message.agent", buildJsonObject {
@@ -264,6 +323,7 @@ class CloudConversationRoutesTest {
                 assertEquals(listOf(3L, 4L, 5L), seen)
                 assertEquals(CloudSessionState.TERMINATED, store.sessions.getValue("s1").state)
                 assertEquals(409, assertFailsWith<TeamCodeException> { member.attachCloudSession("s1") }.statusCode, "An ended session cannot be attached")
+                assertEquals(409, assertFailsWith<TeamCodeException> { member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-2", "allow")) }.statusCode, "Nothing waits in an ended session")
 
                 // team:read reads another member's session, transcript, inputs and stream, and cannot write or delegate.
                 val auditor = sdk("admin-read")
@@ -275,7 +335,7 @@ class CloudConversationRoutesTest {
                     assertEquals(CloudStreamEnd.ENDED, withTimeout(20_000) { auditor.followCloudEvents("s1", 0) { replayed += it.seq } })
                     assertEquals(listOf(1L, 2L, 3L, 4L, 5L), replayed)
                 } finally { auditor.close() }
-                for (path in listOf("messages", "interrupt", "attachments", "pause", "resume"))
+                for (path in listOf("messages", "interrupt", "permissions", "attachments", "pause", "resume"))
                     assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/cloud/sessions/s1/$path") { bearerAuth("admin-read"); contentType(ContentType.Application.Json); setBody("""{"text":"hi"}""") }.status, path)
                 assertEquals(HttpStatusCode.Forbidden, send("admin-read", """{"text":"hi"}""", onBehalf = "colleague-id").status)
                 assertEquals(HttpStatusCode.NotFound, send("admin-read-write", """{"text":"hi"}""").status, "team:read adds no write right to cloud:write")
@@ -286,7 +346,7 @@ class CloudConversationRoutesTest {
 
     @Test fun attachmentsAndPolicyFollowMemberAndGroupRules() = testApplication {
         val store = Sessions(listOf(admin, colleague, other))
-        val conversations = Conversations()
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
         val groups = object : CloudGroupDirectory {
             override suspend fun groupsOf(teamId: String, memberId: String) = if (memberId == other.id) setOf("reviewers") else emptySet()
             override suspend fun exists(teamId: String, groupId: String) = groupId == "reviewers"

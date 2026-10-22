@@ -2,7 +2,10 @@ package me.nathanfallet.teamcode.infrastructure.database
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -63,6 +66,40 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
 
+    /** The request [NewInput.permissionCheck] sees, read on its own (tests). */
+    internal suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
+
+    /**
+     * Through the index (session, type, seq): the newest of the session's latest requests whose stored event starts
+     * with this `requestId` (the runner writes it first, so only that head is read), then the first event of each
+     * closing kind after it. Each query is bounded; none reads another request's input.
+     */
+    private fun findPermissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? {
+        val head = CloudSessionEvents.data.substring(1, REQUEST_HEAD_CHARS)
+        val expected = "{\"requestId\":" + JsonPrimitive(requestId)
+        val anchor = CloudSessionEvents.select(CloudSessionEvents.seq, head).where {
+            (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.type eq CloudEventType.PERMISSION_REQUEST.wire)
+        }.orderBy(CloudSessionEvents.seq to SortOrder.DESC).limit(MAX_REQUESTS_SCANNED).firstOrNull { row ->
+            row[head].removePrefix(expected).let { rest -> rest.length < row[head].length && (rest.startsWith(",") || rest.startsWith("}")) }
+        }?.get(CloudSessionEvents.seq) ?: return null
+        val asked = CloudSessionEvents.select(CloudSessionEvents.data, CloudSessionEvents.epoch)
+            .where { (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq eq anchor) }.single()
+        val data = jsonObject(asked[CloudSessionEvents.data]) ?: return null
+        fun closing(type: CloudEventType, scanned: Int, closes: (JsonObject) -> Boolean): Long? =
+            CloudSessionEvents.select(CloudSessionEvents.seq, CloudSessionEvents.data).where {
+                (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.type eq type.wire) and (CloudSessionEvents.seq greater anchor)
+            }.orderBy(CloudSessionEvents.seq to SortOrder.ASC).limit(scanned)
+                .firstOrNull { row -> jsonObject(row[CloudSessionEvents.data])?.let(closes) == true }?.get(CloudSessionEvents.seq)
+        // The request's turn ends at the first turn event after it that is an end; the oldest closing event wins (the agent saw it first).
+        // Messages queued during the turn add `started` markers before its end: those are skipped.
+        val ended = closing(CloudEventType.TURN, MAX_CLOSING_SCANNED) { it.str("phase") in CloudConversationRules.TURN_END_PHASES }
+        val answered = closing(CloudEventType.INPUT, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId && it.str("status") == CloudInputStatus.CONSUMED.wire }
+        val expired = closing(CloudEventType.PERMISSION_EXPIRED, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId }
+        val state = listOfNotNull(ended?.let { it to PermissionRequestState.ENDED }, answered?.let { it to PermissionRequestState.ANSWERED }, expired?.let { it to PermissionRequestState.EXPIRED })
+            .minByOrNull { it.first }?.second ?: PermissionRequestState.OPEN
+        return permissionRequestRecord(requestId, data, state).copy(epoch = asked[CloudSessionEvents.epoch])
+    }
+
     override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome = database.query {
         val input = new.input
         val session = lockSession(input.sessionId)
@@ -81,13 +118,28 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 return@query InputOutcome.Replayed(readInput(existing))
             }
         }
+        new.permissionCheck?.invoke(AnswerContext(new.permissionRequestId?.let { findPermissionRequest(input.sessionId, it) }, state, desired, session[CloudSessions.currentEpoch]))
         val expected = new.expectedLastEventSeq
         if (expected != null && lastSeqOf(input.sessionId) > expected)
             throw TeamFailure("stale_view", 409, "The transcript has newer events than expectedLastEventSeq. Read them first.")
+        // A permission answer has its own small bound: messages queued behind a waiting turn must not block the answer that ends it.
+        val answering = input.kind == CloudInputKind.PERMISSION
         val pending = CloudSessionInputs.selectAll().where {
-            (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
+            (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire)) and
+                (if (answering) CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire else CloudSessionInputs.kind neq CloudInputKind.PERMISSION.wire)
         }.count()
-        if (pending >= pendingLimit) throw TeamFailure("too_many_pending_inputs", 429, "The session already has $pendingLimit pending inputs. Wait for the agent to consume them.")
+        val limit = if (answering) CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS else pendingLimit
+        // One answer per request at a time, decided under the session lock: a second one would only be rejected later by the runner.
+        new.permissionRequestId?.let { requestId ->
+            val answered = CloudSessionInputs.select(CloudSessionInputs.text).where {
+                (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire) and
+                    (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
+            }.limit(CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS).any { row ->
+                jsonObject(row[CloudSessionInputs.text]).str("requestId") == requestId
+            }
+            if (answered) throw TeamFailure("permission_request_answered", 409, "This permission request already has an answer on its way to the agent.")
+        }
+        if (pending >= limit) throw TeamFailure("too_many_pending_inputs", 429, "The session already has $limit pending ${if (answering) "permission answers" else "inputs"}. Wait for the agent to consume them.")
         val sleeping = desired == DesiredState.PAUSED || state == CloudSessionState.PAUSING || state == CloudSessionState.PAUSED || session[CloudSessions.blockedCode] != null
         val now = nowMillis()
         val stored = input.copy(createdAt = now)
@@ -138,17 +190,24 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 ((CloudSessionInputs.deliveredEpoch neq epoch) or (CloudSessionInputs.deliveredAt less (now - CloudConversationRules.REDELIVERY_MILLIS)))
         }.map(::readInput)
         for (input in stale) {
-            if (input.kind == CloudInputKind.INTERRUPT || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
+            // An interrupt or a permission answer concerns the agent process it was delivered to: never offered to another.
+            // An interrupt is dropped; a permission answer is offered again to the same execution (the runner acknowledges a repeat without
+            // writing it twice), never to another one.
+            val redelivered = input.kind == CloudInputKind.MESSAGE || (input.kind == CloudInputKind.PERMISSION && input.deliveredEpoch == epoch)
+            if (!redelivered || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
                 val reason = if (input.kind == CloudInputKind.MESSAGE) "delivery_failed" else if (input.deliveredEpoch != epoch) "execution_ended" else "delivery_failed"
                 finish(teamId, input, CloudInputStatus.REJECTED, reason, now)
             } else CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.DELIVERED.wire) }) {
                 it[status] = CloudInputStatus.QUEUED.wire
             }
         }
-        val queued = CloudSessionInputs.selectAll().where { (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }
-            .orderBy(CloudSessionInputs.createdAt to SortOrder.ASC, CloudSessionInputs.id to SortOrder.ASC).limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput)
-        // Interrupts first: they concern the turn running now, not the queue behind it.
-        val chosen = (queued.filter { it.kind == CloudInputKind.INTERRUPT } + queued.filter { it.kind == CloudInputKind.MESSAGE }).take(limit)
+        fun queued(urgent: Boolean) = CloudSessionInputs.selectAll().where {
+            (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) and
+                (if (urgent) CloudSessionInputs.kind neq CloudInputKind.MESSAGE.wire else CloudSessionInputs.kind eq CloudInputKind.MESSAGE.wire)
+        }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC, CloudSessionInputs.id to SortOrder.ASC).limit(limit).map(::readInput)
+        // Interrupts and permission answers first, read on their own so a full message queue never hides them:
+        // they concern the turn running now, not the queue behind it.
+        val chosen = queued(urgent = true).let { urgent -> if (urgent.size >= limit) urgent else urgent + queued(urgent = false).take(limit - urgent.size) }
         chosen.map { input ->
             CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }) {
                 it[status] = CloudInputStatus.DELIVERED.wire; it[deliveredAt] = now; it[deliveredEpoch] = epoch; it[attempts] = input.attempts + 1
@@ -181,7 +240,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             val teamId = lockSession(sessionId)[CloudSessions.teamId]
             CloudSessionInputs.selectAll().where {
                 (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
-            }.limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput).forEach { finish(teamId, it, CloudInputStatus.CANCELLED, "session_ended", now); changed++ }
+            }.limit(MAX_PENDING_ALL).map(::readInput).forEach { finish(teamId, it, CloudInputStatus.CANCELLED, "session_ended", now); changed++ }
         }
         changed
     }
@@ -272,6 +331,13 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             put("inputId", input.id); put("authorId", input.authorId); put("text", CloudConversationRules.bound(input.text.orEmpty()))
         } else buildJsonObject {
             put("inputId", input.id); put("kind", input.kind.wire); put("status", status.wire); reason?.let { put("reason", it) }
+            if (input.kind == CloudInputKind.PERMISSION) {
+                // Who answered which request, and how; the answer's texts stay in the input.
+                put("authorId", input.authorId)
+                val answer = jsonObject(input.text)
+                answer.str("requestId")?.let { put("requestId", it) }
+                answer.str("behavior")?.let { put("behavior", it) }
+            }
         }
         val type = if (status == CloudInputStatus.CONSUMED && input.kind == CloudInputKind.MESSAGE) CloudEventType.USER_MESSAGE else CloudEventType.INPUT
         val cursor = cursorOf(input.sessionId)
@@ -298,7 +364,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     /** Queued and delivered inputs of a session, oldest first; the caller holds the session row lock. */
     internal fun pendingInputs(sessionId: String): List<CloudInput> = CloudSessionInputs.selectAll().where {
         (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
-    }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC).limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput)
+    }.orderBy(CloudSessionInputs.createdAt to SortOrder.ASC).limit(MAX_PENDING_ALL).map(::readInput)
 
     /** The caller holds the session row lock, so sequences are dense; [saveCursor] records the new last sequence. */
     private fun insertEvent(sessionId: String, teamId: String, seq: Long, epoch: Int, runnerSeq: Long?, type: CloudEventType, at: Long, data: String) {
@@ -328,7 +394,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     private fun lockSession(sessionId: String): ResultRow =
-        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode)
+        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode, CloudSessions.currentEpoch)
             .where { CloudSessions.id eq sessionId }.forUpdate().singleOrNull() ?: throw TeamFailure("not_found", 404, "Cloud session not found.")
 
     private fun ownerChanged() = TeamFailure("session_busy", 409, "The cloud session changed owner. Retry the request.")
@@ -358,9 +424,32 @@ private fun readEvent(row: ResultRow) = CloudEvent(
     row[CloudSessionEvents.sessionId], row[CloudSessionEvents.seq], CloudEventType.parse(row[CloudSessionEvents.type]) ?: CloudEventType.STATUS,
     row[CloudSessionEvents.at], row[CloudSessionEvents.epoch], row[CloudSessionEvents.data],
 )
+/** How many of the session's latest requests an answer is matched against. */
+private const val MAX_REQUESTS_SCANNED = 200
+/** Every input a session may hold pending: messages and interrupts, plus permission answers under their own bound. */
+private const val MAX_PENDING_ALL = CloudConversationRules.MAX_PENDING_INPUTS + CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS
+/** How many later `turn`, `input` or `permission.expired` events are read to find the one that closed a request. */
+private const val MAX_CLOSING_SCANNED = 200
+/** Enough of a stored `permission.request` for its leading `requestId` (at most 128 characters, escaped). */
+private const val REQUEST_HEAD_CHARS = 300
+
+/** Stored JSON text (an event's data, a permission answer) as an object; null when absent or not an object. */
+private fun jsonObject(text: String?): JsonObject? = text?.let { try { Json.parseToJsonElement(it) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+private fun JsonObject?.str(name: String): String? = (this?.get(name) as? JsonPrimitive)?.contentOrNull
+
+/** A stored `permission.request`: whether it is a question, and each question's option count when its input was kept. */
+private fun permissionRequestRecord(requestId: String, data: JsonObject, state: PermissionRequestState): PermissionRequestRecord {
+    val questions = ((data["input"] as? JsonObject)?.get("questions") as? JsonArray)?.map { question ->
+        val shape = question as? JsonObject
+        QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true,
+            (shape?.get("question") as? JsonPrimitive)?.contentOrNull)
+    }
+    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, state,
+        inputLeftOut = (data["inputTruncated"] as? JsonPrimitive)?.booleanOrNull == true || data["input"] !is JsonObject)
+}
 private fun readInput(row: ResultRow) = CloudInput(
     id = row[CloudSessionInputs.id], teamId = row[CloudSessionInputs.teamId], sessionId = row[CloudSessionInputs.sessionId],
-    kind = if (row[CloudSessionInputs.kind] == CloudInputKind.INTERRUPT.wire) CloudInputKind.INTERRUPT else CloudInputKind.MESSAGE,
+    kind = CloudInputKind.parse(row[CloudSessionInputs.kind]) ?: CloudInputKind.MESSAGE,
     status = CloudInputStatus.parse(row[CloudSessionInputs.status]), authorId = row[CloudSessionInputs.authorId], credentialId = row[CloudSessionInputs.credentialId],
     text = row[CloudSessionInputs.text], wake = row[CloudSessionInputs.wake], clientKey = row[CloudSessionInputs.clientKey], requestDigest = row[CloudSessionInputs.requestDigest],
     createdAt = row[CloudSessionInputs.createdAt], deliveredAt = row[CloudSessionInputs.deliveredAt], deliveredEpoch = row[CloudSessionInputs.deliveredEpoch],

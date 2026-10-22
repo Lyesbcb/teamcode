@@ -3,6 +3,18 @@ package me.nathanfallet.teamcode.api.models
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
+/**
+ * What the server keeps of runner event data: the nesting depth from the event, the entries per object or array, the
+ * key length, and the reasoning keys (or object types) it drops. Shared by the server's sanitizer and the runner, which
+ * leaves a permission request's input out rather than letting the server cut it.
+ */
+object CloudTranscriptLimits {
+    const val MAX_DEPTH = 16
+    const val MAX_ENTRIES = 200
+    const val MAX_KEY_CHARS = 64
+    val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+}
+
 /** Normalized transcript event types. Clients must tolerate unknown types and unknown `data` fields. */
 object CloudEventTypes {
     const val USER_MESSAGE = "message.user"
@@ -14,7 +26,17 @@ object CloudEventTypes {
     const val ERROR = "error"
     /** Server-written: an input changed status (`data.inputId`, `data.status`). */
     const val INPUT = "input"
-    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT)
+    /**
+     * The agent waits for a person before using a tool (`data.requestId`, `toolName`, `input`, `question`); answered
+     * with `POST /cloud/sessions/{id}/permissions`. It stays open until that answer is consumed or the turn ends.
+     */
+    const val PERMISSION_REQUEST = "permission.request"
+    /**
+     * Runner-written: no answer came within the team's deadline, so the request was denied (`data.requestId`,
+     * `deadlineMinutes`, `message`, the text the agent read).
+     */
+    const val PERMISSION_EXPIRED = "permission.expired"
+    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT, PERMISSION_REQUEST, PERMISSION_EXPIRED)
 }
 
 /**
@@ -50,6 +72,27 @@ data class SendCloudMessageRequest(
     val clientMessageId: String? = null,
     val expectedLastEventSeq: Long? = null,
 )
+
+/**
+ * `POST /cloud/sessions/{id}/permissions`: the answer to the `permission.request` event [requestId]. [behavior] is
+ * `allow` or `deny`; [message] tells the agent why it was denied. [answers] answers a question (`AskUserQuestion`),
+ * one entry per answered question, by index; it needs `allow`.
+ */
+@Serializable
+data class AnswerCloudPermissionRequest(
+    val requestId: String,
+    val behavior: String,
+    val message: String? = null,
+    val answers: List<CloudQuestionAnswer>? = null,
+)
+
+/**
+ * The answer to the question at index [question] (0-based, in the request's `input.questions`): the chosen [options]
+ * by index (0-based, in that question's `options`; several only for a `multiSelect` question), or free [text]. Send
+ * one or the other.
+ */
+@Serializable
+data class CloudQuestionAnswer(val question: Int, val options: List<Int> = emptyList(), val text: String? = null)
 
 /** Input acknowledgement levels, in order. `cancelled` and `rejected` are final like `consumed`. */
 object CloudInputStatuses {
@@ -121,8 +164,15 @@ data class CloudAccessPolicyView(val version: Int = 0, val rules: List<CloudAcce
 /** Runner channel for the agent: configuration, batched events, input long-poll and acknowledgements. */
 @Serializable
 data class RunnerAgentRequest(val teamId: String, val sessionId: String, val epoch: Int)
+/**
+ * [permissionRelay]: the server takes `permission.request` events and their answers, so the runner may relay them.
+ * [permissionDeadlineMinutes]: how long a request waits for an answer before the runner denies it; 0 waits without a deadline.
+ */
 @Serializable
-data class RunnerAgentView(val kind: String, val version: String? = null, val model: String? = null, val effort: String? = null, val conversation: String)
+data class RunnerAgentView(
+    val kind: String, val version: String? = null, val model: String? = null, val effort: String? = null, val conversation: String,
+    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0,
+)
 /** [sequence] is the runner's own counter for this epoch, starting at 1; a retried batch is deduplicated on it. */
 @Serializable
 data class RunnerEventView(val sequence: Long, val type: String, val data: JsonObject)

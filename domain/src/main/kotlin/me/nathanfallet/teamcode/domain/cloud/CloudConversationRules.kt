@@ -144,6 +144,73 @@ object CloudConversationRules {
             throw TeamFailure("invalid_message", 400, "Send a message of 1–$MAX_MESSAGE_CHARS characters without control characters.")
     }
 
+    /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label index or a sentence each. */
+    fun validatePermissionAnswer(answer: PermissionAnswer) {
+        if (!permissionRequestId.matches(answer.requestId))
+            throw TeamFailure("invalid_permission_answer", 400, "Send the requestId of a permission.request event.")
+        val texts = listOfNotNull(answer.message) + answer.answers.mapNotNull { it.text }
+        if (answer.answers.size > MAX_PERMISSION_ANSWERS || texts.any { it.isBlank() || it.length > MAX_PERMISSION_TEXT_CHARS || it.any { c -> c.isISOControl() && c != '\n' && c != '\t' && c != '\r' } })
+            throw TeamFailure("invalid_permission_answer", 400, "Send at most $MAX_PERMISSION_ANSWERS answers and texts of 1–$MAX_PERMISSION_TEXT_CHARS characters.")
+        if (answer.answers.isNotEmpty() && !answer.allow) throw TeamFailure("invalid_permission_answer", 400, "Answers go with behavior allow.")
+        if (answer.answers.map { it.question }.toSet().size != answer.answers.size || answer.answers.any { it.question !in 0 until MAX_PERMISSION_INDEX })
+            throw TeamFailure("invalid_permission_answer", 400, "Answer each question once, by its index (0 to ${MAX_PERMISSION_INDEX - 1}).")
+        if (answer.answers.any { (it.options.isEmpty()) == (it.text == null) || it.options.toSet().size != it.options.size || it.options.any { option -> option !in 0 until MAX_PERMISSION_INDEX } })
+            throw TeamFailure("invalid_permission_answer", 400, "Answer a question with distinct option indexes (0 to ${MAX_PERMISSION_INDEX - 1}) or with a text, not both.")
+    }
+
+    /**
+     * Who may answer [request], and whether [answer] fits it. Approving or denying a tool use gated by an `ask` rule
+     * is the session owner's or an administrator's decision ([approver]); a question is answered by anyone who may
+     * send messages to the session, which the caller already passed. Answers need a question request, and their
+     * indexes must exist in it when its input is known.
+     */
+    fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean, currentEpoch: Int = request.epoch) {
+        // Who may decide comes first, so someone who may not learns nothing about the request's state.
+        if (!request.question && !approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
+        // An execution that ended (a pause, a new pod) took its open requests with it.
+        when (if (request.epoch != currentEpoch && request.state == PermissionRequestState.OPEN) PermissionRequestState.ENDED else request.state) {
+            PermissionRequestState.OPEN -> Unit
+            PermissionRequestState.EXPIRED -> throw TeamFailure("permission_request_expired", 409, "This permission request expired without an answer and was denied.")
+            PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
+            PermissionRequestState.ENDED -> throw TeamFailure("permission_request_ended", 409, "The turn of this permission request has ended.")
+        }
+        // Nobody may approve what nobody could read: an input too large for the transcript can only be denied.
+        if (answer.allow && request.inputLeftOut)
+            throw TeamFailure("permission_input_unseen", 400, "This request's input was too large to show in the transcript, so it can only be denied.")
+        if (!request.question) {
+            if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")
+            return
+        }
+        if (answer.allow && answer.answers.isEmpty()) throw TeamFailure("invalid_permission_answer", 400, "Answer at least one question, or deny the request.")
+        val questions = request.questions ?: return
+        val texts = answer.answers.mapNotNull { questions.getOrNull(it.question)?.text }
+        if (texts.toSet().size != texts.size) throw TeamFailure("invalid_permission_answer", 400, "Two of these questions have the same text; answer only one of them.")
+        for (item in answer.answers) {
+            val shape = questions.getOrNull(item.question) ?: throw TeamFailure("invalid_permission_answer", 400, "The request has ${questions.size} questions, numbered from 0.")
+            if (item.options.any { it >= shape.options } || (item.options.size > 1 && !shape.multiSelect))
+                throw TeamFailure("invalid_permission_answer", 400, "Question ${item.question} has ${shape.options} options, numbered from 0" + if (shape.multiSelect) "." else ", and takes one.")
+        }
+        // Claude Code reads one answer per question text: every one of them is answered (a repeated text once).
+        val asked = questions.mapIndexed { index, shape -> shape.text ?: "#$index" }.toSet()
+        if (answer.allow && answer.answers.map { questions[it.question].text ?: "#${it.question}" }.toSet() != asked)
+            throw TeamFailure("invalid_permission_answer", 400, "Answer each of the request's questions, or deny it.")
+    }
+    const val MAX_PERMISSION_ANSWERS = 16
+    /**
+     * Pending permission answers a session holds at most. They have their own bound, outside [MAX_PENDING_INPUTS]: a
+     * queue full of messages waiting for the turn to end must never block the answer that lets it end.
+     */
+    const val MAX_PENDING_PERMISSION_ANSWERS = 16
+    const val MAX_PERMISSION_TEXT_CHARS = 4_000
+    /** Question and option indexes stay below this bound (Claude Code asks at most 4 questions of 4 options). */
+    const val MAX_PERMISSION_INDEX = 64
+    /** The longest deadline a team may set for unanswered permission requests: a day. */
+    const val MAX_PERMISSION_DEADLINE_MINUTES = 1_440
+    /** The `turn` phases that end a turn, and with it every permission request still open in it. */
+    val TURN_END_PHASES = setOf("completed", "interrupted", "failed")
+    /** Printable ASCII without spaces: the agent chooses the shape (Claude Code: a UUID). */
+    private val permissionRequestId = Regex("[\\x21-\\x7E]{1,128}")
+
     fun validatePage(limit: Int, after: Long?, before: Long?) {
         if (limit !in 1..MAX_PAGE) throw TeamFailure("invalid_limit", 400, "Use a page size between 1 and $MAX_PAGE.")
         if (after != null && before != null) throw TeamFailure("invalid_cursor", 400, "Send after or before, not both.")

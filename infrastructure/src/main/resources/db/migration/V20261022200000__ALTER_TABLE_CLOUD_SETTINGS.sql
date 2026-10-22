@@ -1,0 +1,1 @@
+ALTER TABLE cloud_settings ADD permission_deadline_minutes INT DEFAULT 0 NOT NULL;

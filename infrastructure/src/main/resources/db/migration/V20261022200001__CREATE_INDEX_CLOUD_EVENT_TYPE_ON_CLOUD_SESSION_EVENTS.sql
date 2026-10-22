@@ -1,0 +1,1 @@
+CREATE INDEX cloud_event_type ON cloud_session_events (session_id, `type`, seq);

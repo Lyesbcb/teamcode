@@ -86,6 +86,32 @@ class CloudConversationService(
         return store.insertInput(NewInput(input, null, session.ownerId), CloudConversationRules.MAX_PENDING_INPUTS)
     }
 
+    /**
+     * Answers a `permission.request` of the running agent. Like an interrupt it concerns the running turn: it is
+     * delivered before queued messages, never wakes a session, and needs a running agent. [request] carries the
+     * answer as the runner reads it ([PermissionAnswer] encoded by the transport layer).
+     *
+     * Everyone with the `message` permission may answer a question; a tool use gated by an `ask` rule is approved or
+     * denied by the session owner or a cloud administrator only ([CloudConversationRules.checkAnswer]).
+     */
+    suspend fun answer(principal: Principal, id: String, answer: PermissionAnswer, request: InputRequest): InputOutcome {
+        CloudConversationRules.validatePermissionAnswer(answer)
+        val session = open(principal, id, CloudPermission.MESSAGE)
+        val approver = session.ownerId == principal.member.id || principal.isCloudAdministrator
+        val input = newInput(principal, session, CloudInputKind.PERMISSION, request.text, request.copy(wake = false))
+        // Checked by the store under the session lock, after an idempotent retry was replayed (a retry of an answer
+        // already consumed gets its acknowledgement back) and atomically with the insert (two members answering at
+        // once: the second sees the first).
+        val check = { context: AnswerContext ->
+            if ((context.state != READY && context.state != ACTIVE) || context.desiredState != DesiredState.RUNNING)
+                throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
+            val asked = context.request
+                ?: throw TeamFailure("unknown_permission_request", 409, "No permission request with this id waits in the session's recent transcript.")
+            CloudConversationRules.checkAnswer(asked, answer, approver, context.currentEpoch)
+        }
+        return store.insertInput(NewInput(input, null, session.ownerId, permissionRequestId = answer.requestId, permissionCheck = check), CloudConversationRules.MAX_PENDING_INPUTS)
+    }
+
     suspend fun inputs(principal: Principal, id: String, beforeId: String?, limit: Int): CloudInputPage {
         if (limit !in 1..CloudConversationRules.MAX_PAGE) throw TeamFailure("invalid_limit", 400, "Use a page size between 1 and ${CloudConversationRules.MAX_PAGE}.")
         val session = open(principal, id, CloudPermission.TRANSCRIPT)

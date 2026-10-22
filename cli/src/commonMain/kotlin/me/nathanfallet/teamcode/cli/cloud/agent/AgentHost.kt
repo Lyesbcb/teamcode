@@ -6,9 +6,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.put
 import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.cli.launch.agentLaunch
@@ -85,6 +87,12 @@ internal class AgentHost(
     private var reader: Job? = null
     private var resumed: String? = null
     private var stopping = false
+    /** Deadline timers of open permission requests, by request id, with the process that asked; guarded by [lock]. */
+    private val deadlines = mutableMapOf<String, Pair<AgentProcess, Job>>()
+    /** Requests whose answer is being written: their deadline stays until the write succeeds. Under [lock]. */
+    private val writing = mutableSetOf<String>()
+    /** Requests whose deadline passed while their answer was being written: denied at once if that write fails. Under [lock]. */
+    private val dueWhileWriting = mutableSetOf<String>()
     private lateinit var scope: CoroutineScope
 
     /** Runs input delivery and uploads until cancelled or fenced. */
@@ -101,6 +109,12 @@ internal class AgentHost(
     /** Finishes the running turn before [deadline] (interrupting it when needed), stops the agent and flushes the transcript. Returns whether the stop was clean. */
     override suspend fun drain(deadline: Long?): Boolean {
         stopping = true
+        // No answer reaches a pausing session: its open requests are denied now, so a turn waiting on one can end.
+        lock.withLock {
+            val child = process; val active = adapter
+            if (child == null || active == null) null
+            else child to active.openPermissions().flatMap { id -> deadlines.remove(id)?.second?.cancel(); active.answer(id, false, PAUSE_DENIAL, emptyList()).lines }
+        }?.let { (child, lines) -> if (lines.isNotEmpty()) write(child, lines) }
         val limit = (deadline ?: (now() + DEFAULT_DRAIN_MILLIS)) - SAFETY_MARGIN_MILLIS
         suspend fun running() = lock.withLock { adapter?.turnActive == true && process?.exitCode() == null }
         while (now() < limit && running()) sleep(250)
@@ -124,6 +138,7 @@ internal class AgentHost(
         stopping = true
         process?.stop(1_000)
         reader?.cancel()
+        lock.withLock { cancelDeadlines(null) }
     }
 
     private suspend fun inputLoop() {
@@ -155,6 +170,34 @@ internal class AgentHost(
             if (child == null || lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "no_turn")
             return if (write(child, lines)) consumed else unavailable
         }
+        if (input.kind == "permission") {
+            val answer = input.text?.let { text -> try { Json.parseToJsonElement(text) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+            val requestId = (answer?.get("requestId") as? JsonPrimitive)?.contentOrNull ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
+            val answers = try { answer["answers"]?.let { stateJson.decodeFromJsonElement<List<CloudQuestionAnswer>>(it) }.orEmpty() }
+                catch (_: IllegalArgumentException) { return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input") }
+            val allow = (answer["behavior"] as? JsonPrimitive)?.contentOrNull == "allow"
+            val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
+            // Never starts the agent: only the process that asked can take the answer.
+            val (child, active, outcome) = lock.withLock {
+                val child = process ?: return@withLock null
+                val active = adapter ?: return@withLock null
+                // The deadline keeps running until the answer is written: a failed write leaves it as it was.
+                Triple(child, active, active.answer(requestId, allow, message, answers)).also { if (it.third.lines.isNotEmpty()) writing += requestId }
+            } ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, AnswerOutcome.UNKNOWN)
+            if (outcome.lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, outcome.refusal ?: AnswerOutcome.UNKNOWN)
+            val written = write(child, outcome.lines)
+            lock.withLock {
+                writing -= requestId
+                val due = dueWhileWriting.remove(requestId)
+                if (written) deadlines.remove(requestId)?.second?.cancel()
+                // Not written: the request stays open for another answer, with its deadline; one that passed meanwhile denies it now.
+                else if (process === child && outcome.input != null) {
+                    active.reopen(requestId, outcome.input)
+                    if (due) expireLater(child, active, requestId, delayMillis = 0)
+                }
+            }
+            return if (written) consumed else unavailable
+        }
         val text = input.text ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
         val (child, lines) = lock.withLock {
             // Stopping for a pause: the message stays queued on the server for the next execution, never lost.
@@ -180,7 +223,9 @@ internal class AgentHost(
     private suspend fun ensureStarted(): AgentAdapter {
         adapter?.let { current -> if (process?.exitCode() == null) return current }
         reader?.cancel()
-        val config = settings ?: retrying { channel.agent() }.let { AgentSettings(it.kind, it.version, it.model, it.effort) }.also { settings = it }
+        // That reader's tail, which cancels its process's timers, may never run now.
+        cancelDeadlines(null)
+        val config = settings ?: retrying { channel.agent() }.let { AgentSettings(it.kind, it.version, it.model, it.effort, it.permissionRelay, it.permissionDeadlineMinutes) }.also { settings = it }
         val stored = state.read()
         val resume = stored?.takeIf { it.kind == config.kind && it.version == config.version }?.conversationId
         if (stored != null && resume == null) {
@@ -220,8 +265,20 @@ internal class AgentHost(
             val line = child.readLine() ?: break
             val replies = lock.withLock {
                 val result = active.parse(line)
-                result.events.forEach { enqueue(it.type, it.data) }
-                result.replies
+                val denials = mutableListOf<String>()
+                result.events.forEach { event ->
+                    val kept = enqueue(event.type, event.data)
+                    if (event.type != CloudEventTypes.PERMISSION_REQUEST) return@forEach
+                    val requestId = (event.data["requestId"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+                    // A request no member can see (the buffer is full while the server is unreachable) is denied at once
+                    // rather than left blocking the agent, and so is one raised while the session pauses (no answer reaches it).
+                    if (stopping) denials += active.answer(requestId, false, PAUSE_DENIAL, emptyList()).lines
+                    else if (kept) expireLater(child, active, requestId)
+                    else denials += active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines
+                }
+                // A request withdrawn or ended with its turn needs no timer any more.
+                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) && it !in writing }
+                result.replies + denials
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.
             if (replies.isNotEmpty()) scope.launch { write(child, replies) }
@@ -233,6 +290,7 @@ internal class AgentHost(
         }
         val code = child.stop(1_000)
         lock.withLock {
+            cancelDeadlines(child)
             if (process === child) {
                 val failedResume = resumed != null && active.conversationId == null
                 if (failedResume) {
@@ -247,14 +305,52 @@ internal class AgentHost(
         }
     }
 
-    private fun enqueue(type: String, data: kotlinx.serialization.json.JsonObject) {
+    /**
+     * With a team deadline, denies the request [requestId] when it is still open after it: the agent reads why, and
+     * the transcript gets a `permission.expired` event. Called under [lock].
+     */
+    private fun expireLater(child: AgentProcess, active: AgentAdapter, requestId: String, delayMillis: Long? = null) {
+        val minutes = settings?.permissionDeadlineMinutes?.takeIf { it > 0 } ?: return
+        deadlines.remove(requestId)?.second?.cancel()
+        deadlines[requestId] = child to scope.launch {
+            sleep(delayMillis ?: (minutes * 60_000L))
+            val message = "No answer within $minutes minute${if (minutes == 1) "" else "s"}: the request was denied."
+            val outcome = lock.withLock {
+                deadlines.remove(requestId)
+                // An answer being written: denied only if that write fails.
+                if (requestId in writing) { dueWhileWriting += requestId; return@launch }
+                // Answered, withdrawn, ended with its turn, or another process by now: nothing to deny.
+                if (process !== child) return@launch
+                active.answer(requestId, false, message, emptyList()).takeIf { it.lines.isNotEmpty() }?.also {
+                    // Recorded before the agent reads the denial, so it precedes whatever the agent does next (the end
+                    // of its turn in particular).
+                    enqueue(CloudEventTypes.PERMISSION_EXPIRED, buildJsonObject { put("requestId", requestId); put("deadlineMinutes", minutes); put("message", message) })
+                } ?: return@launch
+            }
+            // Not written (the process is going away): the request stays open, like an answer that could not be written.
+            if (!write(child, outcome.lines)) lock.withLock { if (process === child && outcome.input != null) active.reopen(requestId, outcome.input) }
+        }
+    }
+
+    /** Cancels the deadline timers of [child] (every process when null) whose request id matches [which]. Called under [lock]. */
+    private fun cancelDeadlines(child: AgentProcess?, which: (String) -> Boolean = { true }) {
+        val iterator = deadlines.entries.iterator()
+        while (iterator.hasNext()) {
+            val (id, timer) = iterator.next()
+            if ((child == null || timer.first === child) && which(id)) { timer.second.cancel(); iterator.remove() }
+        }
+    }
+
+    /** Buffers an event for upload; false when it was dropped. */
+    private fun enqueue(type: String, data: kotlinx.serialization.json.JsonObject): Boolean {
         if (buffer.size >= MAX_BUFFERED) {
             // Never grow without bound while the server is unreachable. Newer events are dropped without a sequence
             // number, so the numbering the server expects has no gap; an overflow event says how many were lost.
             dropped++
-            return
+            return false
         }
         buffer.addLast(RunnerEventView(++sequence, type, data))
+        return true
     }
     private var dropped = 0
 
@@ -304,10 +400,16 @@ internal class AgentHost(
         val rejected = batch.single()
         if (rejected.isRejectionMarker()) { sleep(UPLOAD_MILLIS * 4); return false }
         log("The server refused one transcript event; replacing it with a marker.")
-        lock.withLock {
+        val denial = lock.withLock {
             val index = buffer.indexOfFirst { it.sequence == rejected.sequence }
             if (index >= 0) buffer[index] = RunnerEventView(rejected.sequence, CloudEventTypes.ERROR, buildJsonObject { put("code", REJECTED_CODE); put("type", rejected.type) })
+            // A request no member will see is denied rather than left blocking the agent.
+            val requestId = (rejected.data["requestId"] as? JsonPrimitive)?.contentOrNull
+            val child = process; val active = adapter
+            if (rejected.type != CloudEventTypes.PERMISSION_REQUEST || requestId == null || child == null || active == null) null
+            else { deadlines.remove(requestId)?.second?.cancel(); child to active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines }
         }
+        denial?.let { (child, lines) -> if (lines.isNotEmpty()) write(child, lines) }
         return true
     }
 
@@ -350,6 +452,10 @@ internal class AgentHost(
         const val MAX_BATCH_BYTES = 1_000_000
         private const val REJECTED_CODE = "transcript_event_rejected"
         const val MAX_BUFFERED = 5_000
+        /** What the agent reads when its request could not be recorded for the team. */
+        const val UNSEEN_DENIAL = "The request could not be shown to the team: it was denied."
+        /** What the agent reads when the session pauses while its request waits. */
+        const val PAUSE_DENIAL = "The session is pausing: the request was denied."
         const val MAX_HANDLED = 1_000
         const val DEFAULT_DRAIN_MILLIS = 10 * 60_000L
         const val SAFETY_MARGIN_MILLIS = 60_000L

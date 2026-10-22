@@ -18,10 +18,10 @@ class CloudConversation(val service: CloudConversationService, val access: Cloud
 
 private const val MESSAGE_BODY_BYTES = 256 * 1024
 private const val RUNNER_BODY_BYTES = 2 * 1024 * 1024
-private const val MAX_JSON_DEPTH = 16
-private const val MAX_JSON_ARRAY = 200
+private const val MAX_JSON_DEPTH = CloudTranscriptLimits.MAX_DEPTH
+private const val MAX_JSON_ARRAY = CloudTranscriptLimits.MAX_ENTRIES
 /** Keys whose values are model reasoning or its signature; never stored even if an adapter forwards them. */
-private val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+private val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS
 
 internal fun CloudEvent.view() = CloudEventView(seq, type.wire, at, epoch, Serialization.json.parseToJsonElement(data).jsonObject)
 private fun CloudEventPage.view() = CloudEventPageView(events.map { it.view() }, firstSeq, lastSeq, nextAfter, nextBefore)
@@ -172,6 +172,26 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
             call.respondInput(service.interrupt(call.principal, call.sessionId(), InputRequest(null, false, key, key?.let { digest("interrupt") }, null)))
         }
 
+        post("/sessions/{id}/permissions") {
+            call.refuseOnBehalf()
+            val body = call.boundedJson<AnswerCloudPermissionRequest>(64 * 1024)
+            val allow = when (body.behavior) { "allow" -> true; "deny" -> false; else -> throw TeamFailure("invalid_permission_answer", 400, "Use behavior allow or deny.") }
+            val answer = PermissionAnswer(body.requestId, allow, body.message, body.answers.orEmpty().map { QuestionAnswer(it.question, it.options, it.text) })
+            // The runner reads this text: the answer exactly as validated, in a fixed shape (answers by question index).
+            val text = buildJsonObject {
+                put("requestId", answer.requestId); put("behavior", body.behavior); answer.message?.let { put("message", it) }
+                if (answer.answers.isNotEmpty()) putJsonArray("answers") {
+                    for (item in answer.answers.sortedBy { it.question }) addJsonObject {
+                        put("question", item.question)
+                        if (item.options.isNotEmpty()) putJsonArray("options") { item.options.forEach { add(it) } }
+                        item.text?.let { put("text", it) }
+                    }
+                }
+            }.toString()
+            val key = call.clientKey(null)
+            call.respondInput(service.answer(call.principal, call.sessionId(), answer, InputRequest(text, false, key, key?.let { digest("permission\n$text") }, null)))
+        }
+
         post("/sessions/{id}/attachments") { call.respond(HttpStatusCode.Created, service.attach(call.principal, call.sessionId()).view()) }
         post("/sessions/{id}/attachments/{attachment}/renew") { call.respond(service.renew(call.principal, call.sessionId(), call.childId("attachment")).view()) }
         delete("/sessions/{id}/attachments/{attachment}") {
@@ -189,7 +209,7 @@ internal fun Route.cloudRunnerConversationRoutes(channel: CloudRunnerChannel, co
         val body = call.boundedJson<RunnerAgentRequest>(4_096)
         val pod = channel.authenticate(call.token(), body.teamId, body.sessionId, body.epoch)
         val agent = runner.agent(pod.teamId, pod.sessionId, pod.epoch)
-        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire))
+        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = agent.permissionRelay, permissionDeadlineMinutes = agent.permissionDeadlineMinutes))
     }
     post(RUNNER_PATH + "events") {
         val body = call.boundedJson<RunnerEventsRequest>(RUNNER_BODY_BYTES)
@@ -230,7 +250,7 @@ internal object CloudTranscriptSanitizer {
     }
     fun turn(type: CloudEventType, data: JsonObject): TurnMarker? = if (type != CloudEventType.TURN) null else when ((data["phase"] as? JsonPrimitive)?.contentOrNull) {
         "started" -> TurnMarker.STARTED
-        "completed", "interrupted", "failed" -> TurnMarker.ENDED
+        in CloudConversationRules.TURN_END_PHASES -> TurnMarker.ENDED
         else -> null
     }
     fun conversation(type: CloudEventType, data: JsonObject): ConversationResume? = if (type != CloudEventType.STATUS) null
@@ -239,7 +259,7 @@ internal object CloudTranscriptSanitizer {
     private fun sanitize(element: JsonElement, depth: Int): JsonElement = when (element) {
         is JsonObject -> if (depth >= MAX_JSON_DEPTH) JsonPrimitive(CloudConversationRules.TRUNCATION_MARK) else JsonObject(
             element.entries.asSequence().filter { (key, value) -> key !in DROPPED_KEYS && !(value is JsonObject && (value["type"] as? JsonPrimitive)?.contentOrNull in DROPPED_KEYS) }
-                .take(MAX_JSON_ARRAY).associate { (key, value) -> key.take(64) to sanitize(value, depth + 1) })
+                .take(MAX_JSON_ARRAY).associate { (key, value) -> key.take(CloudTranscriptLimits.MAX_KEY_CHARS) to sanitize(value, depth + 1) })
         is JsonArray -> if (depth >= MAX_JSON_DEPTH) JsonPrimitive(CloudConversationRules.TRUNCATION_MARK) else JsonArray(
             element.filterNot { it is JsonObject && (it["type"] as? JsonPrimitive)?.contentOrNull in DROPPED_KEYS }.take(MAX_JSON_ARRAY).map { sanitize(it, depth + 1) })
         is JsonPrimitive -> if (element.isString) JsonPrimitive(CloudConversationRules.bound(element.content)) else element

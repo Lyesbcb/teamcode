@@ -203,8 +203,8 @@ data class CloudClusterChoicesView(
 
 /**
  * Persistent administrator settings; the retention and limit fields are required so a partial update cannot reset the others.
- * `pausedRetentionDays = null` keeps paused workspaces indefinitely. The transfer fields are always present in responses;
- * in a `PUT`, an absent (null) transfer field keeps the stored value, so a client written before transfers existed does not reset the policy.
+ * `pausedRetentionDays = null` keeps paused workspaces indefinitely. The transfer fields and [permissionDeadlineMinutes] are always
+ * present in responses; in a `PUT`, an absent (null) one keeps the stored value, so a client written before they existed does not reset them.
  */
 @Serializable
 data class CloudSettingsView(
@@ -220,6 +220,11 @@ data class CloudSettingsView(
     val transferOfferDays: Int? = null,
     /** `cancel` or `keep`: unconsumed messages when a session changes owner. */
     val transferPendingInputs: String? = null,
+    /**
+     * Minutes a permission request of a cloud agent waits for an answer before it is denied (1 to 1440); 0 waits
+     * without a deadline (the default). Absent (null) in a `PUT` keeps the stored value.
+     */
+    val permissionDeadlineMinutes: Int? = null,
 )
 
 /**
