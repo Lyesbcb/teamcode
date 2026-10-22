@@ -1,5 +1,9 @@
 # Implementation status
 
+## Subagent steps under their parent in cloud transcripts (2026-10-22)
+
+The Claude Code adapter of the cloud runner keeps `parent_tool_use_id` from stream-json: `message.agent`, `tool.call` and `tool.result` events produced by a subagent carry `parentToolUseId`, the `id` of the parent's `Agent` tool call, so a client can nest a subagent's steps under that call instead of interleaving them with the main agent's. Main-agent events and Codex events are unchanged. Evidence: `CloudAgentTest.claudeSubagentEventsKeepTheirParentToolCall` (CLI JVM tests). The field shape was checked against Claude Code 2.1.308 stream-json output (a subagent's `assistant` and `user` lines carry the parent `Agent` call id, the main agent's carry null); no pod was run for this change.
+
 ## Visual quotas in `teamcode status` (2026-10-22)
 
 `teamcode status` draws the remaining allowance and every account's 5-hour and weekly window as ten-cell bars, with green/yellow/red on a color terminal (mordant detection, so `NO_COLOR` and pipes stay plain). Evidence: `StatusRenderTest` (bar proportions, plain output without escape codes, colored output equal to the plain table once the codes are removed so columns stay aligned) and the CLI JVM status tests pass. Native macOS/Windows output was not run for this change.
