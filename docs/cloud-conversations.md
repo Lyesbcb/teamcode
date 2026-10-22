@@ -16,6 +16,7 @@ This page is the contract for talking to a [cloud session](cloud-sessions.md): t
 | Caller-wide SSE feed: sessions and local runs, per member or team-wide, resumable (`cloud.events.v1`) | Implemented, see [the event feed](#event-feed) |
 | Webhooks: team-wide subscriptions, HMAC signature, retries with backoff, delivery log, test button (`team.webhooks.v1`) | Implemented, see [webhooks](webhooks.md) |
 | Transfer: leases removed, unconsumed messages cancelled or kept, `transfer` event | Implemented, see [transfer](cloud-sessions.md#transfer) |
+| Permission requests relayed to members (`ask` rules, questions), answered through the API (`cloud.permissions.v1`) | Implemented for Claude Code, see [permission requests](#permission-requests) |
 
 The capabilities are advertised with `cloud.sessions.v1`, while cloud sessions are on in the stored [runtime](cloud-sessions.md#runtime-on-off-runner-image-and-pod-callback).
 
@@ -23,7 +24,7 @@ The capabilities are advertised with `cloud.sessions.v1`, while cloud sessions a
 
 The runner (`teamcode cloud runner`) starts the session's agent with the first message, through the exec supervisor of the pod's agent container (its own UID, no runner token), as one long-lived process with streaming input, in bypass mode inside the sandboxed pod:
 
-- **Claude Code**: `claude -p --input-format stream-json --output-format stream-json --verbose --dangerously-skip-permissions [--model M] [--effort E] [--resume ID]`. Each message is a `user` line on stdin; Claude Code queues messages sent during a turn. An interrupt is a `control_request` with subtype `interrupt`.
+- **Claude Code**: `claude -p --input-format stream-json --output-format stream-json --verbose --dangerously-skip-permissions [--permission-prompt-tool stdio] [--model M] [--effort E] [--resume ID]` (the prompt tool when the server relays [permission requests](#permission-requests)). Each message is a `user` line on stdin; Claude Code queues messages sent during a turn. An interrupt is a `control_request` with subtype `interrupt`.
 - **Codex**: `codex app-server` (JSON-RPC lines without the `jsonrpc` member): `initialize`, `initialized`, then `thread/start` or `thread/resume` with `approvalPolicy: never` and `sandbox: danger-full-access` (the app-server form of `--dangerously-bypass-approvals-and-sandbox`). A message during a turn is `turn/steer`, otherwise `turn/start`; a steer that arrives after the turn ended starts the next turn instead of being lost. An interrupt is `turn/interrupt`. Server requests (approvals) are refused, since bypass mode should produce none.
 
 The agent kind, version, model and effort come from the session (`POST /cloud/runner/agent`). Its inference goes through the runner's loopback proxy, authenticated to the gateway with the execution's `tcex_` credential (see [inference from the pod](cloud-sessions.md#inference-from-the-pod)); the agent only holds the proxy's local token. The conversation id is kept in `$HOME/.teamcode/cloud-agent.json` on the workspace volume; a new pod resumes it only when the agent kind and version are unchanged. Otherwise, or when the resume fails, a fresh conversation starts and `resume.conversation` becomes `transcript_only` (`resumable` once the agent reported its id). The agent runs in `TEAMCODE_CLOUD_WORKDIR` (default `/workspace`) and never inherits the runner's `TEAMCODE_*` variables.
@@ -59,7 +60,8 @@ Events, in `cloud_session_events`:
 | `turn` | `{phase: started, completed, interrupted, failed, durationMs?, steps?}` |
 | `status` | `{agent, conversation?, conversationId?, model?, exitCode?}` |
 | `error` | `{code, message}` |
-| `input` | `{inputId, kind, status, reason}`, server-written when an input is cancelled or rejected |
+| `permission.request` | `{requestId, toolName, input, question, toolUseId?, description?, reason?}`, see [permission requests](#permission-requests) |
+| `input` | `{inputId, kind, status, reason}`, server-written when an input is cancelled or rejected, or a permission answer consumed (then with `requestId`, `behavior` and `authorId`) |
 | `transfer` | `{transferId, fromMemberId, toMemberId, atEpoch}`, server-written when the session changed owner |
 
 Clients must tolerate unknown types and unknown fields. `seq` starts at 1 and increases by one per session; `epoch` is the producing execution (0 for server events).
@@ -87,6 +89,14 @@ Acknowledgement levels: `queued`, `delivered` (handed to the runner), `consumed`
 
 `TeamCode-On-Behalf-Of` is refused on these routes (`400 on_behalf_unsupported`): a message is always written by the authenticated member.
 
+## Permission requests
+
+Bypass mode skips Claude Code's ordinary permission checks, but two things still wait for a person: a tool use matched by an `ask` permission rule (from the settings in the image or the repository, or a hook that answers `ask`), and a question to the user (`AskUserQuestion`). Without a prompt tool, Claude Code in print mode refuses the first ("Claude requested permissions to use Bash, but you haven't granted it yet") and does not offer the second. When the server advertises `cloud.permissions.v1` it sets `permissionRelay` in `POST /cloud/runner/agent`, and the runner starts Claude Code with `--permission-prompt-tool stdio`: each `can_use_tool` control request becomes a `permission.request` event and the agent waits.
+
+`POST /cloud/sessions/{id}/permissions` with `{requestId, behavior: allow or deny, message?, answers?}` (body at most 64 KiB, `Idempotency-Key` accepted) answers it and returns `202` with the input view (kind `permission`). `deny` passes `message` to the agent; `allow` with `answers` (question text to the chosen label or free text, at most 16) answers a question. It needs the `message` permission, never wakes a session, is refused with `409 nothing_to_answer` unless the session is `ready` or `active`, and is delivered before queued messages. Only the agent process that asked can take it: an answer to a request that is no longer open is `rejected` with `unknown_permission_request`, and one delivered to an execution that ended with `execution_ended`. A request is open until its answer is consumed or its turn ends (a `turn` event). While it waits the turn is running, so the session stays `active`; a pause interrupts it like any long turn.
+
+Codex sessions keep refusing approval requests: their bypass mode produces none.
+
 ## Attach
 
 `POST /cloud/sessions/{id}/attachments` takes a 60-second lease (`201`), renewed with `POST .../attachments/{attachment}/renew` (`409 attachment_expired` once lost) and released with `DELETE .../attachments/{attachment}`. Attaching needs the `attach` and `transcript` permissions; the lease lists what the member may do (`transcript`, `message`). An ended session cannot be attached (`409`). A change of owner removes every lease of the session; the former owner's `teamcode cloud attach` then stops with "Access to this session was revoked." A live lease keeps the session from the [idle pause](cloud-sessions.md#idle-pause), and the end of a lease (detach or expiry) counts as its last activity; ended leases are kept a day for that, then purged.
@@ -111,6 +121,7 @@ Groups come from a `CloudGroupDirectory`. TeamCode has no groups yet, so group r
 teamcode cloud logs SESSION [--after SEQ] [--tail N] [--follow] [--json]
 teamcode cloud send SESSION TEXT|- [--no-wake] [--idempotency-key KEY] [--wait] [--json]
 teamcode cloud interrupt SESSION
+teamcode cloud answer SESSION REQUEST_ID allow|deny [--message TEXT] [--answer QUESTION=ANSWER]...
 teamcode cloud attach SESSION [--tail N] [--read-only] [--no-wake]
 ```
 
@@ -155,6 +166,6 @@ Migrations `V20261020100009*`: `cloud_settings.transcript_retention_days`, `clou
 
 - `CloudConversationPersistenceTest` (real MySQL 8.4, two connection pools): migration drift; idempotent messages and replay; interrupts delivered first; acknowledgements and transcript order; runner event deduplication and gaps; turn markers moving `ready` and `active`; conversation resumability; backward paging and `stale_view`; follow; masking; the access policy (default, member and group rules, creation denied including on behalf, audit); wake while pausing through the sweeper; redelivery on a new epoch and within the same execution; numbering kept after a full purge; `wake: false` and synchronous wake; the pending cap; cancellation of a terminated session's inputs and the end of the stream; retention purge and validation.
 - `CloudConversationRoutesTest` (a real local server for the stream): capabilities; service keys refused; another member's session invisible; on-behalf refused; idempotency header and body alias, replay header and conflict; the runner agent channel through the projected token (configuration, delivery, consumed acknowledgement, sanitized and deduplicated events, fencing, invalid types); SSE resume after `Last-Event-ID` with each event once and in order, ending with the session; access policy validation and administrator-only routes; read-only attachments from a group rule; renew, detach and expiry.
-- `CloudAgentTest`: Claude and Codex adapter lines (flags, bypass, resume, thinking dropped, steer retry, resume fallback, approvals refused); the host starting lazily, acknowledging (and re-acknowledging a redelivered input without writing it twice), uploading in order, storing and resuming the conversation, leaving messages unacknowledged while draining, interrupting a long turn before the deadline, never resuming another agent version, and stopping when fenced; the runner loop heartbeating during the drain and reporting an interrupted drain.
+- `CloudAgentTest`: Claude and Codex adapter lines (flags, bypass, resume, thinking dropped, permission requests relayed, answered once, withdrawn or ended with their turn; answers delivered only to the process that asked, steer retry, resume fallback, approvals refused); the host starting lazily, acknowledging (and re-acknowledging a redelivered input without writing it twice), uploading in order, storing and resuming the conversation, leaving messages unacknowledged while draining, interrupting a long turn before the deadline, never resuming another agent version, and stopping when fenced; the runner loop heartbeating during the drain and reporting an interrupted drain.
 - `CloudConversationRulesTest`: credential shapes masked; ordinary text (`task-management-…`, `max_tokens=4096`) kept; bounds.
 - `AgentProcessTest` (JVM and native macOS): line pipes to a real `/bin/sh` child, removed variables, bounded long lines that never eat the next line, exit code.

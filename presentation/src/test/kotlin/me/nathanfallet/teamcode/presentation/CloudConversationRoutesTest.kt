@@ -181,7 +181,7 @@ class CloudConversationRoutesTest {
             store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
 
             val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
-            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1").all { it in features })
+            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1", "cloud.permissions.v1").all { it in features })
 
             // An initial message of the full 32,000 characters fits the creation body and is queued (replay: CloudIdlePersistenceTest).
             val longest = "é".repeat(CloudConversationRules.MAX_MESSAGE_CHARS)
@@ -222,11 +222,26 @@ class CloudConversationRoutesTest {
             val runner = sdk("projected-pod-token-1")
             val member = sdk("colleague")
             try {
-                assertEquals(RunnerAgentView("claude", null, "opus", null, "none"), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)))
+                assertEquals(RunnerAgentView("claude", null, "opus", null, "none", permissionRelay = true), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)),
+                    "This server takes permission requests, so the runner relays them")
                 val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
                 assertEquals(ack.id, delivered.id); assertEquals("Fix the retry", delivered.text)
                 runner.runnerAcknowledge(RunnerInputAckRequest("default", "s1", 1, listOf(RunnerInputAckView(ack.id, "consumed"))))
                 assertEquals("consumed", member.cloudInput("s1", ack.id).status)
+
+                // A permission answer reaches the runner as the fixed JSON it parses; a bad behavior or a read-only key is refused.
+                suspend fun answer(token: String, body: String) = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth(token); contentType(ContentType.Application.Json); setBody(body) }
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"maybe"}""").status)
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"deny","answers":{"Q":"A"}}""").status, "Answers go with allow")
+                assertEquals(HttpStatusCode.Forbidden, answer("colleague-read", """{"requestId":"req-1","behavior":"allow"}""").status)
+                assertEquals(HttpStatusCode.NotFound, answer("other", """{"requestId":"req-1","behavior":"allow"}""").status)
+                val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = mapOf("Red or blue?" to "Blue")), "answer-1")
+                assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)
+                assertEquals(answered.id, member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = mapOf("Red or blue?" to "Blue")), "answer-1").id, "Replayed")
+                assertEquals(422, assertFailsWith<TeamCodeException> { member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "deny"), "answer-1") }.statusCode)
+                val relayed = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
+                assertEquals("permission", relayed.kind)
+                assertEquals("""{"requestId":"req-1","behavior":"allow","answers":{"Red or blue?":"Blue"}}""", relayed.text)
                 val events = listOf(
                     RunnerEventView(1, "turn", buildJsonObject { put("phase", "started") }),
                     RunnerEventView(2, "message.agent", buildJsonObject {
@@ -264,6 +279,7 @@ class CloudConversationRoutesTest {
                 assertEquals(listOf(3L, 4L, 5L), seen)
                 assertEquals(CloudSessionState.TERMINATED, store.sessions.getValue("s1").state)
                 assertEquals(409, assertFailsWith<TeamCodeException> { member.attachCloudSession("s1") }.statusCode, "An ended session cannot be attached")
+                assertEquals(409, assertFailsWith<TeamCodeException> { member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-2", "allow")) }.statusCode, "Nothing waits in an ended session")
 
                 // team:read reads another member's session, transcript, inputs and stream, and cannot write or delegate.
                 val auditor = sdk("admin-read")
@@ -275,7 +291,7 @@ class CloudConversationRoutesTest {
                     assertEquals(CloudStreamEnd.ENDED, withTimeout(20_000) { auditor.followCloudEvents("s1", 0) { replayed += it.seq } })
                     assertEquals(listOf(1L, 2L, 3L, 4L, 5L), replayed)
                 } finally { auditor.close() }
-                for (path in listOf("messages", "interrupt", "attachments", "pause", "resume"))
+                for (path in listOf("messages", "interrupt", "permissions", "attachments", "pause", "resume"))
                     assertEquals(HttpStatusCode.Forbidden, client.post("/api/v1/cloud/sessions/s1/$path") { bearerAuth("admin-read"); contentType(ContentType.Application.Json); setBody("""{"text":"hi"}""") }.status, path)
                 assertEquals(HttpStatusCode.Forbidden, send("admin-read", """{"text":"hi"}""", onBehalf = "colleague-id").status)
                 assertEquals(HttpStatusCode.NotFound, send("admin-read-write", """{"text":"hi"}""").status, "team:read adds no write right to cloud:write")

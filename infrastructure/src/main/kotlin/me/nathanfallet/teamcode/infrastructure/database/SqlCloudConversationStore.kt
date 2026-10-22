@@ -3,6 +3,7 @@ package me.nathanfallet.teamcode.infrastructure.database
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -138,7 +139,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 ((CloudSessionInputs.deliveredEpoch neq epoch) or (CloudSessionInputs.deliveredAt less (now - CloudConversationRules.REDELIVERY_MILLIS)))
         }.map(::readInput)
         for (input in stale) {
-            if (input.kind == CloudInputKind.INTERRUPT || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
+            // An interrupt or a permission answer concerns the agent process it was delivered to: never offered to another.
+            if (input.kind != CloudInputKind.MESSAGE || input.attempts >= CloudConversationRules.MAX_ATTEMPTS) {
                 val reason = if (input.kind == CloudInputKind.MESSAGE) "delivery_failed" else if (input.deliveredEpoch != epoch) "execution_ended" else "delivery_failed"
                 finish(teamId, input, CloudInputStatus.REJECTED, reason, now)
             } else CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.DELIVERED.wire) }) {
@@ -147,8 +149,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         }
         val queued = CloudSessionInputs.selectAll().where { (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }
             .orderBy(CloudSessionInputs.createdAt to SortOrder.ASC, CloudSessionInputs.id to SortOrder.ASC).limit(CloudConversationRules.MAX_PENDING_INPUTS).map(::readInput)
-        // Interrupts first: they concern the turn running now, not the queue behind it.
-        val chosen = (queued.filter { it.kind == CloudInputKind.INTERRUPT } + queued.filter { it.kind == CloudInputKind.MESSAGE }).take(limit)
+        // Interrupts and permission answers first: they concern the turn running now, not the queue behind it.
+        val chosen = (queued.filter { it.kind != CloudInputKind.MESSAGE } + queued.filter { it.kind == CloudInputKind.MESSAGE }).take(limit)
         chosen.map { input ->
             CloudSessionInputs.update({ (CloudSessionInputs.id eq input.id) and (CloudSessionInputs.status eq CloudInputStatus.QUEUED.wire) }) {
                 it[status] = CloudInputStatus.DELIVERED.wire; it[deliveredAt] = now; it[deliveredEpoch] = epoch; it[attempts] = input.attempts + 1
@@ -272,6 +274,13 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             put("inputId", input.id); put("authorId", input.authorId); put("text", CloudConversationRules.bound(input.text.orEmpty()))
         } else buildJsonObject {
             put("inputId", input.id); put("kind", input.kind.wire); put("status", status.wire); reason?.let { put("reason", it) }
+            if (input.kind == CloudInputKind.PERMISSION) {
+                // Who answered which request, and how; the answer's texts stay in the input.
+                put("authorId", input.authorId)
+                val answer = input.text?.let { try { Json.parseToJsonElement(it) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+                (answer?.get("requestId") as? JsonPrimitive)?.contentOrNull?.let { put("requestId", it) }
+                (answer?.get("behavior") as? JsonPrimitive)?.contentOrNull?.let { put("behavior", it) }
+            }
         }
         val type = if (status == CloudInputStatus.CONSUMED && input.kind == CloudInputKind.MESSAGE) CloudEventType.USER_MESSAGE else CloudEventType.INPUT
         val cursor = cursorOf(input.sessionId)
@@ -360,7 +369,7 @@ private fun readEvent(row: ResultRow) = CloudEvent(
 )
 private fun readInput(row: ResultRow) = CloudInput(
     id = row[CloudSessionInputs.id], teamId = row[CloudSessionInputs.teamId], sessionId = row[CloudSessionInputs.sessionId],
-    kind = if (row[CloudSessionInputs.kind] == CloudInputKind.INTERRUPT.wire) CloudInputKind.INTERRUPT else CloudInputKind.MESSAGE,
+    kind = CloudInputKind.parse(row[CloudSessionInputs.kind]) ?: CloudInputKind.MESSAGE,
     status = CloudInputStatus.parse(row[CloudSessionInputs.status]), authorId = row[CloudSessionInputs.authorId], credentialId = row[CloudSessionInputs.credentialId],
     text = row[CloudSessionInputs.text], wake = row[CloudSessionInputs.wake], clientKey = row[CloudSessionInputs.clientKey], requestDigest = row[CloudSessionInputs.requestDigest],
     createdAt = row[CloudSessionInputs.createdAt], deliveredAt = row[CloudSessionInputs.deliveredAt], deliveredEpoch = row[CloudSessionInputs.deliveredEpoch],

@@ -6,6 +6,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -155,6 +156,17 @@ internal class AgentHost(
             if (child == null || lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "no_turn")
             return if (write(child, lines)) consumed else unavailable
         }
+        if (input.kind == "permission") {
+            val answer = input.text?.let { text -> try { Json.parseToJsonElement(text) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+            val requestId = (answer?.get("requestId") as? JsonPrimitive)?.contentOrNull ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
+            val answers = (answer["answers"] as? JsonObject)?.mapNotNull { (question, value) -> (value as? JsonPrimitive)?.contentOrNull?.let { question to it } }?.toMap().orEmpty()
+            val allow = (answer["behavior"] as? JsonPrimitive)?.contentOrNull == "allow"
+            val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
+            // Never starts the agent: only the process that asked can take the answer.
+            val (child, lines) = lock.withLock { process?.let { it to adapter?.answer(requestId, allow, message, answers).orEmpty() } } ?: (null to emptyList())
+            if (child == null || lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "unknown_permission_request")
+            return if (write(child, lines)) consumed else unavailable
+        }
         val text = input.text ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
         val (child, lines) = lock.withLock {
             // Stopping for a pause: the message stays queued on the server for the next execution, never lost.
@@ -180,7 +192,7 @@ internal class AgentHost(
     private suspend fun ensureStarted(): AgentAdapter {
         adapter?.let { current -> if (process?.exitCode() == null) return current }
         reader?.cancel()
-        val config = settings ?: retrying { channel.agent() }.let { AgentSettings(it.kind, it.version, it.model, it.effort) }.also { settings = it }
+        val config = settings ?: retrying { channel.agent() }.let { AgentSettings(it.kind, it.version, it.model, it.effort, it.permissionRelay) }.also { settings = it }
         val stored = state.read()
         val resume = stored?.takeIf { it.kind == config.kind && it.version == config.version }?.conversationId
         if (stored != null && resume == null) {

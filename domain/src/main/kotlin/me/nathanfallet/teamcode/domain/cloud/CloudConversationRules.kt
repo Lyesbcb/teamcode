@@ -72,6 +72,19 @@ object CloudConversationRules {
             throw TeamFailure("invalid_message", 400, "Send a message of 1–$MAX_MESSAGE_CHARS characters without control characters.")
     }
 
+    /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label or a sentence each. */
+    fun validatePermissionAnswer(answer: PermissionAnswer) {
+        if (!permissionRequestId.matches(answer.requestId))
+            throw TeamFailure("invalid_permission_answer", 400, "Send the requestId of a permission.request event.")
+        val texts = listOfNotNull(answer.message) + answer.answers.keys + answer.answers.values
+        if (answer.answers.size > MAX_PERMISSION_ANSWERS || texts.any { it.isBlank() || it.length > MAX_PERMISSION_TEXT_CHARS || it.any { c -> c.isISOControl() && c != '\n' } })
+            throw TeamFailure("invalid_permission_answer", 400, "Send at most $MAX_PERMISSION_ANSWERS answers and texts of 1–$MAX_PERMISSION_TEXT_CHARS characters.")
+        if (answer.answers.isNotEmpty() && !answer.allow) throw TeamFailure("invalid_permission_answer", 400, "Answers go with behavior allow.")
+    }
+    const val MAX_PERMISSION_ANSWERS = 16
+    const val MAX_PERMISSION_TEXT_CHARS = 4_000
+    private val permissionRequestId = Regex("[A-Za-z0-9._:-]{1,128}")
+
     fun validatePage(limit: Int, after: Long?, before: Long?) {
         if (limit !in 1..MAX_PAGE) throw TeamFailure("invalid_limit", 400, "Use a page size between 1 and $MAX_PAGE.")
         if (after != null && before != null) throw TeamFailure("invalid_cursor", 400, "Send after or before, not both.")

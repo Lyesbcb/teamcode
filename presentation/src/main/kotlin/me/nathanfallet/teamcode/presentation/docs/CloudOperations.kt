@@ -400,6 +400,27 @@ private fun ApiCatalog.cloudConversation() {
             conflict("No agent is running (`nothing_to_interrupt`), or the session is not running (`session_not_running`).")
         }
     }
+    post("/api/v1/cloud/sessions/{id}/permissions") {
+        operationId = "answerCloudPermission"; tag(ApiTags.CLOUD_CONVERSATION)
+        summary = "Answer a permission request"
+        description = "Answers a `permission.request` event of the running agent: `allow` or `deny` the tool use (with a `message` for the agent), " +
+            "or answer a question (`AskUserQuestion`) with `answers` by question text. Delivered before queued messages; never wakes a session. " +
+            "Consumed when the agent took it; rejected with `unknown_permission_request` when that request is no longer open, " +
+            "or `execution_ended` when the agent process that asked has stopped. Requires the `message` permission. Capability `cloud.permissions.v1`."
+        parameters {
+            sessionId()
+            headerText("Idempotency-Key", IDEMPOTENCY_TEXT)
+        }
+        body<AnswerCloudPermissionRequest>("The request id, the behavior and an optional message or answers (at most 64 KiB).")
+        responses {
+            ok<CloudInputView>("Accepted.", HttpStatusCode.Accepted)
+            badRequest("An invalid answer, key, or `TeamCode-On-Behalf-Of` was sent (`invalid_permission_answer`, `invalid_idempotency_key`, `on_behalf_unsupported`).")
+            notFound("No such session (`not_found`).")
+            conflict("No agent is running (`nothing_to_answer`), or the session is not running (`session_not_running`).")
+            error(HttpStatusCode.UnprocessableEntity, "The key was used with another answer (`idempotency_conflict`).")
+            error(HttpStatusCode.PayloadTooLarge, "The body exceeds 64 KiB (`payload_too_large`).")
+        }
+    }
     post("/api/v1/cloud/sessions/{id}/attachments") {
         operationId = "attachCloudSession"; tag(ApiTags.CLOUD_CONVERSATION)
         summary = "Attach to a session"

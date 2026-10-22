@@ -48,6 +48,70 @@ class CloudAgentTest {
         assertTrue(adapter.parse("not json").events.isEmpty(), "Stray output is ignored")
     }
 
+    @Test fun claudeRelaysPermissionRequestsAndTheirAnswers() {
+        assertFalse("--permission-prompt-tool" in ClaudeStreamJsonAdapter(claude).command(null).arguments, "Only a server that takes the requests gets them")
+        val adapter = ClaudeStreamJsonAdapter(claude.copy(permissionRelay = true))
+        val arguments = adapter.command(null).arguments
+        assertEquals(listOf("--dangerously-skip-permissions", "--permission-prompt-tool", "stdio"), arguments.subList(arguments.indexOf("--dangerously-skip-permissions"), arguments.indexOf("--dangerously-skip-permissions") + 3))
+        adapter.message("Touch it, then ask me")
+
+        val ask = adapter.parse("""{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch c.txt"},"description":"Create c.txt","decision_reason_type":"rule","tool_use_id":"t1","permission_suggestions":[{"type":"addRules"}]}}""").events.single()
+        assertEquals(CloudEventTypes.PERMISSION_REQUEST, ask.type)
+        assertEquals(listOf("r1", "Bash", "t1", "Create c.txt", "rule"), listOf("requestId", "toolName", "toolUseId", "description", "reason").map { ask.data.str(it) })
+        assertEquals("touch c.txt", ask.data["input"]!!.jsonObject.str("command")); assertEquals(false, ask.data["question"]!!.jsonPrimitive.boolean)
+        assertNull(ask.data["permission_suggestions"], "Only the request itself is uploaded")
+        val denied = obj(adapter.answer("r1", false, "Use echo instead.", emptyMap()).single())
+        assertEquals("control_response", denied.str("type"))
+        val deniedResponse = denied["response"]!!.jsonObject
+        assertEquals("r1", deniedResponse.str("request_id"))
+        assertEquals(buildJsonObject { put("behavior", "deny"); put("message", "Use echo instead.") }, deniedResponse["response"])
+        assertTrue(adapter.answer("r1", true, null, emptyMap()).isEmpty(), "A request is answered once")
+
+        val question = adapter.parse("""{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Red or blue?","options":[{"label":"Red"},{"label":"Blue"}]}]},"tool_use_id":"t2","requires_user_interaction":true}}""").events.single()
+        assertEquals(true, question.data["question"]!!.jsonPrimitive.boolean)
+        val allowed = obj(adapter.answer("r2", true, null, mapOf("Red or blue?" to "Blue")).single())["response"]!!.jsonObject["response"]!!.jsonObject
+        assertEquals("allow", allowed.str("behavior"))
+        val updated = allowed["updatedInput"]!!.jsonObject
+        assertEquals("Blue", updated["answers"]!!.jsonObject.str("Red or blue?")); assertNotNull(updated["questions"], "The original input is passed back")
+
+        adapter.parse("""{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}""")
+        adapter.parse("""{"type":"control_cancel_request","request_id":"r3"}""")
+        assertTrue(adapter.answer("r3", true, null, emptyMap()).isEmpty(), "A withdrawn request takes no answer")
+        adapter.parse("""{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}""")
+        adapter.parse("""{"type":"result","subtype":"success","is_error":false}""")
+        assertTrue(adapter.answer("r4", true, null, emptyMap()).isEmpty(), "A request does not outlive its turn")
+        assertTrue(adapter.parse("""{"type":"control_request","request_id":"r5","request":{"subtype":"hook_callback"}}""").events.isEmpty(), "Other control requests are not permission requests")
+    }
+
+    @Test fun hostDeliversPermissionAnswersOnlyToTheProcessThatAsked() = runTest {
+        val channel = FakeChannel().apply { relay = true }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val job = launch { host(channel, MemoryState(), started).run() }
+        val answer = """{"requestId":"r1","behavior":"allow","answers":{"Red or blue?":"Blue"}}"""
+        channel.inputs.send(listOf(RunnerInputView("p-0", "permission", answer, 1)))
+        until { channel.acks.isNotEmpty() }
+        assertEquals(RunnerInputAckView("p-0", CloudInputStatuses.REJECTED, "unknown_permission_request"), channel.acks.single())
+        assertTrue(started.isEmpty(), "An answer never starts the agent")
+
+        channel.inputs.send(listOf(RunnerInputView("m-1", "message", "Ask me", 1)))
+        until { started.isNotEmpty() }
+        val (command, process) = started.single()
+        assertTrue("--permission-prompt-tool" in command.arguments)
+        process.output.send("""{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]},"requires_user_interaction":true}}""")
+        until { channel.uploaded.any { it.type == CloudEventTypes.PERMISSION_REQUEST } }
+        channel.inputs.send(listOf(RunnerInputView("p-1", "permission", answer, 1), RunnerInputView("p-2", "permission", "not json", 1)))
+        until { channel.acks.size == 4 }
+        assertEquals(listOf(CloudInputStatuses.CONSUMED, CloudInputStatuses.REJECTED), channel.acks.takeLast(2).map { it.status })
+        assertEquals("invalid_input", channel.acks.last().reason)
+        val response = obj(process.written.last())
+        assertEquals("r1", response["response"]!!.jsonObject.str("request_id"))
+        assertEquals("Blue", response["response"]!!.jsonObject["response"]!!.jsonObject["updatedInput"]!!.jsonObject["answers"]!!.jsonObject.str("Red or blue?"))
+        channel.inputs.send(listOf(RunnerInputView("p-3", "permission", answer, 1)))
+        until { channel.acks.size == 5 }
+        assertEquals("unknown_permission_request", channel.acks.last().reason, "Answered once")
+        job.cancel()
+    }
+
     @Test fun codexAppServerHoldsSteersRetriesAndFallsBack() {
         val adapter = CodexAppServerAdapter(codex, "1.0")
         val startup = adapter.startup("th-old", "/workspace").map(::obj)
@@ -108,7 +172,8 @@ class CloudAgentTest {
         /** Refuses, like a 413, any batch that holds the original event at a sequence listed here; its marker passes. */
         val poisoned = mutableSetOf<Long>()
         var attempts = 0
-        override suspend fun agent() = RunnerAgentView("claude", "2.1", "opus", null, "none")
+        var relay = false
+        override suspend fun agent() = RunnerAgentView("claude", "2.1", "opus", null, "none", permissionRelay = relay)
         override suspend fun events(events: List<RunnerEventView>): RunnerEventsAckView {
             // An Error, not an Exception: the host cannot swallow it, so a retry loop without pause fails the test.
             if (++attempts > 10_000) throw AssertionError("The host retries the upload without pause")

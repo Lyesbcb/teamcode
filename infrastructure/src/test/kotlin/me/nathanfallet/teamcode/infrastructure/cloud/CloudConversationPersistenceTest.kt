@@ -153,6 +153,24 @@ class CloudConversationPersistenceTest {
         ra.agent.acknowledge(team, s.id, 1, listOf(RunnerInputAck(secret.input.id, true, null)))
         val masked = ra.conversation.events(colleague, s.id, null, Long.MAX_VALUE, 1).events.single()
         assertFalse(masked.data.contains("ghp_a")); assertTrue(masked.data.contains(CloudConversationRules.MASK))
+
+        // A permission request from the runner, then its answer: delivered before a message queued earlier, never
+        // waking anything, and recorded with who answered which request and how.
+        ra.agent.events(team, s.id, 1, listOf(RunnerEvent(5, CloudEventType.PERMISSION_REQUEST, """{"requestId":"req-1","toolName":"AskUserQuestion","input":{},"question":true}""")))
+        val waiting = ra.conversation.send(colleague, s.id, InputRequest("After the question", true, null, null, null))
+        val text = """{"requestId":"req-1","behavior":"allow","answers":{"Red or blue?":"Blue"}}"""
+        failure("invalid_permission_answer") { ra.conversation.answer(colleague, s.id, PermissionAnswer("req 1", true, null, emptyMap()), InputRequest(text, false, null, null, null)) }
+        val answer = rb.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, mapOf("Red or blue?" to "Blue")), InputRequest(text, false, "answer-1", "a1", null))
+        assertIs<InputOutcome.Accepted>(answer); assertEquals(CloudInputKind.PERMISSION, answer.input.kind); assertFalse(answer.input.woke)
+        val both = rb.agent.inputs(team, s.id, 1, 0)
+        assertEquals(listOf(CloudInputKind.PERMISSION, CloudInputKind.MESSAGE), both.map { it.kind }, "The answer concerns the running turn")
+        assertEquals(text, both.first().text)
+        ra.agent.acknowledge(team, s.id, 1, listOf(RunnerInputAck(answer.input.id, true, null), RunnerInputAck(waiting.input.id, true, null)))
+        val answered = ra.conversation.events(colleague, s.id, null, Long.MAX_VALUE, 2).events.first()
+        assertEquals(CloudEventType.INPUT, answered.type)
+        for (part in listOf("\"requestId\":\"req-1\"", "\"behavior\":\"allow\"", "\"authorId\":\"${colleague.member.id}\"", "\"kind\":\"permission\""))
+            assertTrue(part in answered.data, answered.data)
+        assertFalse("Blue" in answered.data, "The answer's texts stay in the input")
     }
 
     private suspend fun accessPolicy(ra: Replica, rb: Replica, admin: Principal, colleague: Principal, other: Principal, groups: Groups, profile: CloudProfile, s: CloudSession) {

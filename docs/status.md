@@ -1,5 +1,11 @@
 # Implementation status
 
+## Permission requests relayed from cloud sessions (2026-10-22)
+
+Claude Code in a cloud session runs in bypass mode, which leaves two things that need a person: a tool use matched by an `ask` permission rule, and a question (`AskUserQuestion`). The runner now starts it with `--permission-prompt-tool stdio` when the server says it relays them (`permissionRelay` in `POST /cloud/runner/agent`, capability `cloud.permissions.v1`): each `can_use_tool` control request becomes a `permission.request` event, and `POST /api/v1/cloud/sessions/{id}/permissions` (`teamcode cloud answer`) allows, denies or answers it. The answer is an input of the new kind `permission`, delivered before queued messages and only to the agent process that asked; its consumption is recorded in the transcript with the request, the behavior and its author. No migration (the input kind and event type columns already fit). Codex is unchanged.
+
+Behavior checked against Claude Code 2.1.308 under `--dangerously-skip-permissions`: with the prompt tool, an `ask` rule on `Bash(touch:*)` and an `AskUserQuestion` call each arrived as `can_use_tool`; a deny's message reached the model as the tool result, and an allow with `updatedInput.answers` answered the question. Without it, the same rule refused the tool and `AskUserQuestion` was not available. Evidence: `CloudAgentTest.claudeRelaysPermissionRequestsAndTheirAnswers` and `hostDeliversPermissionAnswersOnlyToTheProcessThatAsked` (CLI JVM tests), `CloudConversationRoutesTest` (capability, runner flag, validation, scopes, idempotency, delivery as the runner's JSON, refusal on an ended session), `CloudConversationPersistenceTest` (MySQL, run in CI only: no Docker on the authoring machine; ordering before a queued message and the recorded answer). No pod was run.
+
 ## Visual quotas in `teamcode status` (2026-10-22)
 
 `teamcode status` draws the remaining allowance and every account's 5-hour and weekly window as ten-cell bars, with green/yellow/red on a color terminal (mordant detection, so `NO_COLOR` and pipes stay plain). Evidence: `StatusRenderTest` (bar proportions, plain output without escape codes, colored output equal to the plain table once the codes are removed so columns stay aligned) and the CLI JVM status tests pass. Native macOS/Windows output was not run for this change.

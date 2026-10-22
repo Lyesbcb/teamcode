@@ -22,7 +22,7 @@ import me.nathanfallet.teamcode.client.TeamCodeException
 /** `teamcode cloud`: sessions that run on the team's Kubernetes cluster. */
 class Cloud : SuspendingNoOpCliktCommand(name = "cloud") {
     override fun help(context: Context) = "Create and manage cloud sessions on your team's cluster. Requires an interactive login."
-    init { subcommands(CloudCreate(), CloudProfiles(), CloudList(), CloudShow(), CloudPause(), CloudResume(), CloudDelete(), CloudLogs(), CloudSend(), CloudInterrupt(), CloudAttach(), CloudTransfer(), CloudTransfers(), CloudRunner(), CloudAgentSupervisor(), CloudCredential(), CloudInstallSkills(), CloudInstallSkills(hooks = true)) }
+    init { subcommands(CloudCreate(), CloudProfiles(), CloudList(), CloudShow(), CloudPause(), CloudResume(), CloudDelete(), CloudLogs(), CloudSend(), CloudInterrupt(), CloudAnswer(), CloudAttach(), CloudTransfer(), CloudTransfers(), CloudRunner(), CloudAgentSupervisor(), CloudCredential(), CloudInstallSkills(), CloudInstallSkills(hooks = true)) }
 }
 
 private fun CloudSessionView.line() = listOf(id, state + (phase?.let { " ($it)" } ?: ""), name, "epoch $currentEpoch", "updated ${Instant.fromEpochMilliseconds(updatedAt)}").joinToString("\t")

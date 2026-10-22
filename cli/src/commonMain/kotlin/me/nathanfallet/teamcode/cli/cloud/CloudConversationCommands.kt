@@ -4,6 +4,7 @@ import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.long
 import kotlin.time.Instant
@@ -34,6 +35,8 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
+        CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
+            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd()
         else -> "[$type] $data"
     }
     return "$time #$seq $body"
@@ -127,6 +130,24 @@ internal class CloudInterrupt : SuspendingCliktCommand(name = "interrupt") {
     override fun help(context: Context) = "Stop the agent's current turn. Queued messages stay queued."
     private val id by argument()
     override suspend fun run() { echo(sdk(loadConfig()).use { it.interruptCloudSession(id, Uuid.random().toString()) }.line()) }
+}
+
+internal class CloudAnswer : SuspendingCliktCommand(name = "answer") {
+    override fun help(context: Context) = "Answer a permission request of the agent (a [permission] or [question] line of the transcript): allow or deny it, or answer its questions."
+    private val id by argument()
+    private val request by argument("REQUEST_ID")
+    private val behavior by argument("allow|deny").choice("allow", "deny")
+    private val message by option("--message", help = "Why it was denied; the agent reads it.")
+    private val answers by option("--answer", help = "QUESTION=ANSWER for a question request (repeatable); needs allow.").multiple()
+    override suspend fun run() {
+        val parsed = answers.associate { value ->
+            val split = value.indexOf('=')
+            require(split > 0) { "Use --answer QUESTION=ANSWER." }
+            value.take(split) to value.drop(split + 1)
+        }
+        val answer = AnswerCloudPermissionRequest(request, behavior, message, parsed.takeIf { it.isNotEmpty() })
+        echo(sdk(loadConfig()).use { it.answerCloudPermission(id, answer, Uuid.random().toString()) }.line())
+    }
 }
 
 /**

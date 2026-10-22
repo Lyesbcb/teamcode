@@ -86,6 +86,20 @@ class CloudConversationService(
         return store.insertInput(NewInput(input, null, session.ownerId), CloudConversationRules.MAX_PENDING_INPUTS)
     }
 
+    /**
+     * Answers a `permission.request` of the running agent. Like an interrupt it concerns the running turn: it is
+     * delivered before queued messages, never wakes a session, and needs a running agent. [request] carries the
+     * answer as the runner reads it ([PermissionAnswer] encoded by the transport layer).
+     */
+    suspend fun answer(principal: Principal, id: String, answer: PermissionAnswer, request: InputRequest): InputOutcome {
+        CloudConversationRules.validatePermissionAnswer(answer)
+        val session = open(principal, id, CloudPermission.MESSAGE)
+        if (session.state != READY && session.state != ACTIVE)
+            throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
+        val input = newInput(principal, session, CloudInputKind.PERMISSION, request.text, request.copy(wake = false))
+        return store.insertInput(NewInput(input, null, session.ownerId), CloudConversationRules.MAX_PENDING_INPUTS)
+    }
+
     suspend fun inputs(principal: Principal, id: String, beforeId: String?, limit: Int): CloudInputPage {
         if (limit !in 1..CloudConversationRules.MAX_PAGE) throw TeamFailure("invalid_limit", 400, "Use a page size between 1 and ${CloudConversationRules.MAX_PAGE}.")
         val session = open(principal, id, CloudPermission.TRANSCRIPT)

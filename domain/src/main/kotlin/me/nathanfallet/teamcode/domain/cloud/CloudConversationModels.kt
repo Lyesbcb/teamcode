@@ -4,6 +4,8 @@ package me.nathanfallet.teamcode.domain.cloud
 enum class CloudEventType(val wire: String) {
     USER_MESSAGE("message.user"), AGENT_MESSAGE("message.agent"), TOOL_CALL("tool.call"), TOOL_RESULT("tool.result"),
     TURN("turn"), STATUS("status"), ERROR("error"),
+    /** The agent waits for a person before using a tool; answered by a [CloudInputKind.PERMISSION] input. */
+    PERMISSION_REQUEST("permission.request"),
     /** Written by the server when an input is consumed, cancelled or rejected. */
     INPUT("input"),
     /** Written by the server when the session changed owner: `{transferId, fromMemberId, toMemberId, atEpoch}`. */
@@ -24,7 +26,15 @@ enum class TurnMarker { STARTED, ENDED }
 data class RunnerEvent(val sequence: Long, val type: CloudEventType, val data: String, val turn: TurnMarker? = null, val conversation: ConversationResume? = null)
 data class CloudEventPage(val events: List<CloudEvent>, val firstSeq: Long?, val lastSeq: Long, val nextAfter: Long?, val nextBefore: Long?)
 
-enum class CloudInputKind(val wire: String) { MESSAGE("message"), INTERRUPT("interrupt") }
+enum class CloudInputKind(val wire: String) {
+    MESSAGE("message"), INTERRUPT("interrupt"),
+    /** The answer to a `permission.request`; its text is the encoded answer, read by the runner. */
+    PERMISSION("permission");
+    companion object { fun parse(value: String) = entries.singleOrNull { it.wire == value } }
+}
+
+/** A member's answer to the `permission.request` [requestId]: [answers] (a question's answers) need [allow]. */
+data class PermissionAnswer(val requestId: String, val allow: Boolean, val message: String?, val answers: Map<String, String>)
 enum class CloudInputStatus(val wire: String) {
     QUEUED("queued"), DELIVERED("delivered"), CONSUMED("consumed"), CANCELLED("cancelled"), REJECTED("rejected");
     val final get() = this == CONSUMED || this == CANCELLED || this == REJECTED

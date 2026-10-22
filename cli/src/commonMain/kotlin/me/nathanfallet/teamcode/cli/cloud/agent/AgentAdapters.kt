@@ -12,8 +12,8 @@ data class AgentOutput(val events: List<AgentEvent> = emptyList(), val replies: 
 
 data class AgentCommand(val command: String, val arguments: List<String>)
 
-/** Agent settings from the server (`runner/agent`). */
-data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?)
+/** Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their answers. */
+data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false)
 
 /**
  * One long-lived agent process with streaming input. Adapters are pure translators between TeamCode inputs and an
@@ -32,6 +32,11 @@ interface AgentAdapter {
     /** Lines interrupting the current turn, or empty when no turn runs. */
     fun interrupt(): List<String>
     fun parse(line: String): AgentOutput
+    /**
+     * Lines answering the open permission request [requestId] (`allow` with optional question [answers], or deny with
+     * [message]); empty when no such request is open, so the answer is rejected.
+     */
+    fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> = emptyList()
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -56,6 +61,11 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * --output-format stream-json --verbose --dangerously-skip-permissions`, resumed with `--resume <session_id>`.
  * Messages written while a turn runs are queued by Claude Code itself; an interrupt is a `control_request`.
  * Thinking blocks are dropped here and never uploaded.
+ *
+ * With [AgentSettings.permissionRelay], Claude Code also gets `--permission-prompt-tool stdio`. Bypass mode still
+ * skips ordinary permission checks; what remains, an `ask` permission rule or a question to the user
+ * (`AskUserQuestion`), arrives as a `can_use_tool` control request. It becomes a `permission.request` event, and the
+ * member's answer a `control_response`. A request is open until it is answered or its turn ends.
  */
 class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
     override var conversationId: String? = null; private set
@@ -65,6 +75,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
 
     override fun command(resume: String?) = AgentCommand("claude", buildList {
         addAll(listOf("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"))
+        if (settings.permissionRelay) addAll(listOf("--permission-prompt-tool", "stdio"))
         settings.model?.let { addAll(listOf("--model", it)) }
         settings.effort?.let { addAll(listOf("--effort", it)) }
         resume?.let { addAll(listOf("--resume", it)) }
@@ -72,6 +83,24 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     override fun startup(resume: String?, workingDirectory: String) = emptyList<String>()
 
     private val started = mutableListOf<AgentEvent>()
+    /** Open permission requests by request id, with the tool input an `allow` passes back. */
+    private val permissions = mutableMapOf<String, JsonObject>()
+
+    override fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> {
+        val input = permissions.remove(requestId) ?: return emptyList()
+        return listOf(buildJsonObject {
+            put("type", "control_response")
+            putJsonObject("response") {
+                put("subtype", "success"); put("request_id", requestId)
+                putJsonObject("response") {
+                    if (allow) {
+                        put("behavior", "allow")
+                        put("updatedInput", if (answers.isEmpty()) input else JsonObject(input + ("answers" to buildJsonObject { answers.forEach { (question, value) -> put(question, value) } })))
+                    } else { put("behavior", "deny"); put("message", message ?: "A team member denied this request.") }
+                }
+            }
+        }.toString())
+    }
     override fun takeEvents(): List<AgentEvent> = started.toList().also { started.clear() }
 
     override fun message(text: String): List<String> {
@@ -115,7 +144,25 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                     put("isError", (content["is_error"] as? JsonPrimitive)?.booleanOrNull ?: false)
                 })
             })
+            "control_request" -> {
+                val request = value["request"].obj()?.takeIf { it["subtype"].string() == "can_use_tool" }
+                val id = value["request_id"].string()
+                if (request == null || id == null) return AgentOutput()
+                val input = request["input"].obj() ?: JsonObject(emptyMap())
+                permissions[id] = input
+                AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
+                    put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool"); put("input", input)
+                    request["tool_use_id"].string()?.let { put("toolUseId", it) }
+                    request["description"].string()?.let { put("description", it) }
+                    put("question", (request["requires_user_interaction"] as? JsonPrimitive)?.booleanOrNull == true)
+                    request["decision_reason_type"].string()?.let { put("reason", it) }
+                })))
+            }
+            // Claude Code withdrew a request (its turn was interrupted): an answer to it is rejected.
+            "control_cancel_request" -> { value["request_id"].string()?.let(permissions::remove); AgentOutput() }
             "result" -> {
+                // A request cannot outlive its turn.
+                permissions.clear()
                 if (pending > 0) pending--
                 val failed = (value["is_error"] as? JsonPrimitive)?.booleanOrNull == true
                 val interrupted = value["subtype"].string() == "error_during_execution"
