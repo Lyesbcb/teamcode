@@ -109,6 +109,12 @@ internal class AgentHost(
     /** Finishes the running turn before [deadline] (interrupting it when needed), stops the agent and flushes the transcript. Returns whether the stop was clean. */
     override suspend fun drain(deadline: Long?): Boolean {
         stopping = true
+        // No answer reaches a pausing session: its open requests are denied now, so a turn waiting on one can end.
+        lock.withLock {
+            val child = process; val active = adapter
+            if (child == null || active == null) null
+            else child to active.openPermissions().flatMap { id -> deadlines.remove(id)?.second?.cancel(); active.answer(id, false, PAUSE_DENIAL, emptyList()).lines }
+        }?.let { (child, lines) -> if (lines.isNotEmpty()) write(child, lines) }
         val limit = (deadline ?: (now() + DEFAULT_DRAIN_MILLIS)) - SAFETY_MARGIN_MILLIS
         suspend fun running() = lock.withLock { adapter?.turnActive == true && process?.exitCode() == null }
         while (now() < limit && running()) sleep(250)
@@ -173,7 +179,6 @@ internal class AgentHost(
             val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
             // Never starts the agent: only the process that asked can take the answer.
             val (child, active, outcome) = lock.withLock {
-                // Accepted while draining too: an answer is what lets a turn blocked on a request end before the pause.
                 val child = process ?: return@withLock null
                 val active = adapter ?: return@withLock null
                 // The deadline keeps running until the answer is written: a failed write leaves it as it was.
@@ -448,6 +453,8 @@ internal class AgentHost(
         const val MAX_BUFFERED = 5_000
         /** What the agent reads when its request could not be recorded for the team. */
         const val UNSEEN_DENIAL = "The request could not be shown to the team: it was denied."
+        /** What the agent reads when the session pauses while its request waits. */
+        const val PAUSE_DENIAL = "The session is pausing: the request was denied."
         const val MAX_HANDLED = 1_000
         const val DEFAULT_DRAIN_MILLIS = 10 * 60_000L
         const val SAFETY_MARGIN_MILLIS = 60_000L

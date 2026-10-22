@@ -59,6 +59,8 @@ interface AgentAdapter {
     fun permissionOpen(requestId: String): Boolean = false
     /** Opens [requestId] again after its answer could not be written, so another answer (or the deadline) can close it. */
     fun reopen(requestId: String, input: JsonObject) {}
+    /** The permission requests still waiting for an answer. */
+    fun openPermissions(): Set<String> = emptySet()
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -122,7 +124,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
     override fun permissionOpen(requestId: String) = requestId in permissions
-    override fun reopen(requestId: String, input: JsonObject) { permissions[requestId] = input }
+    // A request whose turn ended meanwhile stays closed.
+    override fun reopen(requestId: String, input: JsonObject) { if (turnActive) permissions[requestId] = input }
+    override fun openPermissions() = permissions.keys.toSet()
 
     override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
         val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
@@ -287,9 +291,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
          * whole (at most about 15 KB of input or 8 KB of preview, plus 8 KB of description) stays well under the server's 60 KB.
          */
         const val MAX_PERMISSION_FIELD_CHARS = 200
-        /** The server's transcript limits and the reasoning keys it drops. */
         /** The request ids the server accepts in an answer (`CloudConversationRules.validatePermissionAnswer`). */
         val PERMISSION_REQUEST_ID = Regex("[\\x21-\\x7E]{1,128}")
+        /** The server's transcript limits and the reasoning keys it drops. */
         const val MAX_KEPT_DEPTH = CloudTranscriptLimits.MAX_DEPTH
         const val MAX_KEPT_ENTRIES = CloudTranscriptLimits.MAX_ENTRIES
         val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS

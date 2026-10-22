@@ -175,6 +175,23 @@ class CloudAgentTest {
         job.cancel()
     }
 
+    @Test fun hostDeniesOpenRequestsWhenTheSessionPauses() = runTest {
+        val channel = FakeChannel().apply { relay = true }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val host = host(channel, MemoryState(), started)
+        val job = launch { host.run() }
+        channel.inputs.send(listOf(RunnerInputView("m-1", "message", "Deploy it", 1)))
+        until { started.isNotEmpty() }
+        val process = started.single().second
+        process.output.send("""{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"deploy"}}}""")
+        until { channel.uploaded.any { it.type == CloudEventTypes.PERMISSION_REQUEST } }
+        val draining = launch { host.drain(null) }
+        until { process.written.any { "\"r1\"" in it } }
+        val denial = obj(process.written.first { "\"r1\"" in it })["response"]!!.jsonObject["response"]!!.jsonObject
+        assertEquals("The session is pausing: the request was denied.", denial.str("message"), "No answer reaches a pausing session, so the turn is let go at once")
+        draining.cancel(); job.cancel()
+    }
+
     @Test fun hostDeniesARequestTheServerRefusedToRecord() = runTest {
         val channel = FakeChannel().apply { relay = true }
         val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()

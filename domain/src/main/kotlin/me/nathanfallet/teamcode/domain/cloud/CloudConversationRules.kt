@@ -121,6 +121,8 @@ object CloudConversationRules {
      * indexes must exist in it when its input is known.
      */
     fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean, currentEpoch: Int = request.epoch) {
+        // Who may decide comes first, so someone who may not learns nothing about the request's state.
+        if (!request.question && !approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
         // An execution that ended (a pause, a new pod) took its open requests with it.
         when (if (request.epoch != currentEpoch && request.state == PermissionRequestState.OPEN) PermissionRequestState.ENDED else request.state) {
             PermissionRequestState.OPEN -> Unit
@@ -132,7 +134,6 @@ object CloudConversationRules {
         if (answer.allow && request.inputLeftOut)
             throw TeamFailure("permission_input_unseen", 400, "This request's input was too large to show in the transcript, so it can only be denied.")
         if (!request.question) {
-            if (!approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
             if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")
             return
         }
@@ -145,6 +146,10 @@ object CloudConversationRules {
             if (item.options.any { it >= shape.options } || (item.options.size > 1 && !shape.multiSelect))
                 throw TeamFailure("invalid_permission_answer", 400, "Question ${item.question} has ${shape.options} options, numbered from 0" + if (shape.multiSelect) "." else ", and takes one.")
         }
+        // Claude Code reads one answer per question text: every one of them is answered (a repeated text once).
+        val asked = questions.mapIndexed { index, shape -> shape.text ?: "#$index" }.toSet()
+        if (answer.allow && answer.answers.map { questions[it.question].text ?: "#${it.question}" }.toSet() != asked)
+            throw TeamFailure("invalid_permission_answer", 400, "Answer each of the request's questions, or deny it.")
     }
     const val MAX_PERMISSION_ANSWERS = 16
     /**

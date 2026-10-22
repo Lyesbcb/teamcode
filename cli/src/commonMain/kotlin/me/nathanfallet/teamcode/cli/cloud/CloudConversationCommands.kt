@@ -45,11 +45,11 @@ private fun String.printable(): String = buildString {
 /** Letters and symbols that render as nothing (Hangul fillers, the braille blank, Khmer inherent vowels). */
 private val BLANK_FILLERS = setOf('\u115F', '\u1160', '\u3164', '\uFFA0', '\u2800', '\u17B4', '\u17B5')
 /** The format characters outside the basic plane (Unicode 15). */
-private val HIDDEN_SUPPLEMENTARY = listOf(0x110BD..0x110BD, 0x110CD..0x110CD, 0x13430..0x1343F, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE007F)
+private val HIDDEN_SUPPLEMENTARY = listOf(0x110BD..0x110BD, 0x110CD..0x110CD, 0x13430..0x1343F, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE007F, 0xE0100..0xE01EF)
 /** Agent text quoted, so a label cannot pass for more options or indexes. */
 private fun String.quoted() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 private fun JsonElement?.isTrue() = (this as? JsonPrimitive)?.booleanOrNull == true
-private val HIDDEN = setOf(CharCategory.FORMAT, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR)
+private val HIDDEN = setOf(CharCategory.FORMAT, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR, CharCategory.SPACE_SEPARATOR)
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
 /**
@@ -82,7 +82,10 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]" +
             // A permission answer says which request it answered, how, and who decided.
-            (data.text("requestId")?.let { " ${data.text("behavior") ?: "answer"} ${it.printable()} by ${data.text("authorId")?.printable() ?: "?"}" } ?: "")
+            (data.text("requestId")?.let { request ->
+                val by = data.text("authorId")?.printable() ?: "?"
+                if (data.text("status") == "consumed") " ${data.text("behavior") ?: "answer"} ${request.printable()} by $by" else " (an answer to ${request.printable()} by $by, not applied)"
+            } ?: "")
         CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
             // A question is shown by the indexed lines that follow, not as raw JSON.
@@ -91,7 +94,8 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }
-    return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}$body"
+    // Every line is agent text: escape sequences never reach the terminal, so none can rewrite a request shown above.
+    return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}${body.lines().joinToString("\n") { it.printable() }}"
 }
 
 private fun CloudInputView.line() = listOfNotNull(id, kind, status, reason, if (woke) "woke the session" else null).joinToString("\t")
