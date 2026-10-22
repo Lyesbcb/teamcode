@@ -20,17 +20,14 @@ interface CloudConversationStore {
     /** Ascending page: events after [after] (forward), or the newest ones before [before] (backward). */
     suspend fun events(sessionId: String, after: Long?, before: Long?, limit: Int): CloudEventPage
     suspend fun lastSeq(sessionId: String): Long
-    /**
-     * The newest `permission.request` [requestId] among the session's latest requests, with what closed it since (an
-     * answer consumed, a `permission.expired`, the end of its turn); null when there is none.
-     */
-    suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord?
 
     /**
      * Inserts an input under the session row lock: refuses a session that is ending, a stale view, more than
      * [pendingLimit] queued or delivered inputs, and replays an existing idempotency key (or refuses a different
      * request with the same key). A permission answer's [NewInput.permissionCheck] runs after the replay, under the
-     * same lock, with the request as the transcript has it then.
+     * same lock, with the request as the transcript has it then: the newest `permission.request` with that id among
+     * the session's latest requests, with what closed it since (an answer consumed, a `permission.expired`, the end of
+     * its turn), or null.
      */
     suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome
     suspend fun input(sessionId: String, id: String): CloudInput?

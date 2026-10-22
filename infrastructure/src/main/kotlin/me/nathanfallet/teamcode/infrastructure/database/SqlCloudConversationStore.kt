@@ -66,7 +66,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
 
-    override suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
+    /** The request [NewInput.permissionCheck] sees, read on its own (tests and diagnostics). */
+    suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
 
     /**
      * Through the index (session, type, seq): the newest of the session's latest requests whose stored event starts

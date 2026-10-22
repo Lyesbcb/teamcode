@@ -37,10 +37,13 @@ private fun String.printable(): String = buildString {
             if (HIDDEN_SUPPLEMENTARY.any { point in it }) append("  ") else append(c).append(low)
             i += 2; continue
         }
-        append(if (c.isISOControl() || c.category in HIDDEN || c.isSurrogate()) ' ' else c)
+        // A zero-width joiner only joins emoji, so it is kept; the blank-looking fillers are hidden like format characters.
+        append(if (c != '\u200D' && (c.isISOControl() || c.category in HIDDEN || c.isSurrogate() || c in BLANK_FILLERS)) ' ' else c)
         i++
     }
 }
+/** Letters and symbols that render as nothing (Hangul fillers, the braille blank, Khmer inherent vowels). */
+private val BLANK_FILLERS = setOf('\u115F', '\u1160', '\u3164', '\uFFA0', '\u2800', '\u17B4', '\u17B5')
 /** The format characters outside the basic plane (Unicode 15). */
 private val HIDDEN_SUPPLEMENTARY = listOf(0x110BD..0x110BD, 0x110CD..0x110CD, 0x13430..0x1343F, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE007F)
 /** Agent text quoted, so a label cannot pass for more options or indexes. */
@@ -77,7 +80,9 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.TURN -> "-- turn ${data.text("phase") ?: "update"}${(data["costMicros"] as? JsonPrimitive)?.longOrNull?.let(::dollars)?.let { ", $it" } ?: ""} --"
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
-        CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
+        CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]" +
+            // A permission answer says which request it answered, how, and who decided.
+            (data.text("requestId")?.let { " ${data.text("behavior") ?: "answer"} ${it.printable()} by ${data.text("authorId")?.printable() ?: "?"}" } ?: "")
         CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
             // A question is shown by the indexed lines that follow, not as raw JSON.

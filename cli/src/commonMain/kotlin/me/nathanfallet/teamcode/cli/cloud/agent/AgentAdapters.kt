@@ -5,6 +5,7 @@ import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
 import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
+import me.nathanfallet.teamcode.api.models.CloudTranscriptLimits
 
 /** A normalized transcript event before upload. The server masks and bounds it again. */
 data class AgentEvent(val type: String, val data: JsonObject)
@@ -20,8 +21,10 @@ data class AgentCommand(val command: String, val arguments: List<String>)
  */
 data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0)
 
-/** The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]). */
-/** [input] is the request's tool input, to [AgentAdapter.reopen] it when [lines] could not be written. */
+/**
+ * The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]);
+ * [input] is the request's tool input, to [AgentAdapter.reopen] it when [lines] could not be written.
+ */
 data class AnswerOutcome(val lines: List<String>, val refusal: String? = null, val input: JsonObject? = null) {
     companion object {
         const val UNKNOWN = "unknown_permission_request"
@@ -147,7 +150,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
      */
     private fun keptWhole(element: JsonElement, depth: Int): Boolean = when (element) {
         is JsonObject -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && (depth == 0 || element["type"].string() !in DROPPED_KEYS) &&
-            element.all { (key, value) -> key.length <= 64 && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
+            element.all { (key, value) -> key.length <= CloudTranscriptLimits.MAX_KEY_CHARS && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
         is JsonArray -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && element.all { keptWhole(it, depth + 1) }
         else -> true
     }
@@ -273,10 +276,10 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         const val PERMISSION_PREVIEW_CHARS = 2_000
         /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
         const val MAX_PERMISSION_FIELD_CHARS = 200
-        /** The server's transcript limits (depth 16 from the event, 200 entries) and the reasoning keys it drops. */
-        const val MAX_KEPT_DEPTH = 16
-        const val MAX_KEPT_ENTRIES = 200
-        val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
+        /** The server's transcript limits and the reasoning keys it drops. */
+        const val MAX_KEPT_DEPTH = CloudTranscriptLimits.MAX_DEPTH
+        const val MAX_KEPT_ENTRIES = CloudTranscriptLimits.MAX_ENTRIES
+        val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS
         val USAGE_FIELDS = listOf(
             "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
             "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",

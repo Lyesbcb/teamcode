@@ -94,6 +94,9 @@ class CloudAgentTest {
         adapter.answer("r15", false, null, emptyList())
         val forged = adapter.parse("""{"type":"control_request","request_id":"r16","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"deploy","questions":[{"question":"Fine?","options":[{"label":"Yes"}]}]}}}""").events.single()
         assertFalse("\n    ?" in CloudEventView(1, forged.type, 0, 1, forged.data).render(), "Only a question request gets indexed question lines")
+        assertEquals("00:00:00 #1 [permission p1 consumed] allow r16 by m1", CloudEventView(1, CloudEventTypes.INPUT, 0, 1, buildJsonObject {
+            put("inputId", "p1"); put("kind", "permission"); put("status", "consumed"); put("requestId", "r16"); put("behavior", "allow"); put("authorId", "m1")
+        }).render(), "An answer's notice says which request, how and who")
         adapter.answer("r16", false, null, emptyList())
         val reasoning = adapter.parse("""{"type":"control_request","request_id":"r14","request":{"subtype":"can_use_tool","tool_name":"mcp__notes__save","input":{"note":{"type":"thinking","text":"x"}}}}""").events.single()
         assertNull(reasoning.data["input"], "A nested object the server drops is left out too")
@@ -165,6 +168,23 @@ class CloudAgentTest {
         channel.inputs.send(listOf(RunnerInputView("p-3", "permission", answer, 1)))
         until { channel.acks.size == 7 }
         assertEquals("unknown_permission_request", channel.acks.last().reason, "Answered once (after the unwritten answer left it open)")
+        job.cancel()
+    }
+
+    @Test fun hostDeniesARequestTheServerRefusedToRecord() = runTest {
+        val channel = FakeChannel().apply { relay = true }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val job = launch { host(channel, MemoryState(), started).run() }
+        channel.inputs.send(listOf(RunnerInputView("m-1", "message", "Deploy it", 1)))
+        until { started.isNotEmpty() && channel.acks.isNotEmpty() }
+        delay(5_000)
+        val process = started.single().second
+        channel.poisoned += channel.uploaded.size + 1L
+        process.output.send("""{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"deploy"}}}""")
+        until { process.written.any { "\"r1\"" in it } }
+        val denial = obj(process.written.last())["response"]!!.jsonObject
+        assertEquals("deny", denial["response"]!!.jsonObject.str("behavior"), "A request no member can see is denied, not left waiting")
+        assertEquals("transcript_event_rejected", channel.uploaded.last().data["code"]!!.jsonPrimitive.content)
         job.cancel()
     }
 

@@ -173,17 +173,20 @@ internal class AgentHost(
                 if (stopping) return unavailable
                 val child = process ?: return@withLock null
                 val active = adapter ?: return@withLock null
-                val outcome = active.answer(requestId, allow, message, answers)
-                if (outcome.lines.isNotEmpty()) deadlines.remove(requestId)?.second?.cancel()
-                Triple(child, active, outcome)
+                // The deadline keeps running until the answer is written: a failed write leaves it as it was.
+                Triple(child, active, active.answer(requestId, allow, message, answers))
             } ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, AnswerOutcome.UNKNOWN)
             if (outcome.lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, outcome.refusal ?: AnswerOutcome.UNKNOWN)
-            if (write(child, outcome.lines)) return consumed
-            // Not written: the request stays open for another answer, and its deadline runs again.
+            val written = write(child, outcome.lines)
             lock.withLock {
-                if (process === child && outcome.input != null) { active.reopen(requestId, outcome.input); expireLater(child, active, requestId) }
+                if (written) deadlines.remove(requestId)?.second?.cancel()
+                // Not written: the request stays open for another answer, with its deadline (rearmed only if it fired meanwhile).
+                else if (process === child && outcome.input != null) {
+                    active.reopen(requestId, outcome.input)
+                    if (requestId !in deadlines) expireLater(child, active, requestId)
+                }
             }
-            return unavailable
+            return if (written) consumed else unavailable
         }
         val text = input.text ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
         val (child, lines) = lock.withLock {
@@ -260,7 +263,7 @@ internal class AgentHost(
                     // A request no member can see (the buffer is full while the server is unreachable) is denied at once
                     // rather than left blocking the agent.
                     if (kept) expireLater(child, active, requestId)
-                    else denials += active.answer(requestId, false, "The request could not be shown to the team: it was denied.", emptyList()).lines
+                    else denials += active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
                 if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) }
@@ -383,10 +386,16 @@ internal class AgentHost(
         val rejected = batch.single()
         if (rejected.isRejectionMarker()) { sleep(UPLOAD_MILLIS * 4); return false }
         log("The server refused one transcript event; replacing it with a marker.")
-        lock.withLock {
+        val denial = lock.withLock {
             val index = buffer.indexOfFirst { it.sequence == rejected.sequence }
             if (index >= 0) buffer[index] = RunnerEventView(rejected.sequence, CloudEventTypes.ERROR, buildJsonObject { put("code", REJECTED_CODE); put("type", rejected.type) })
+            // A request no member will see is denied rather than left blocking the agent.
+            val requestId = (rejected.data["requestId"] as? JsonPrimitive)?.contentOrNull
+            val child = process; val active = adapter
+            if (rejected.type != CloudEventTypes.PERMISSION_REQUEST || requestId == null || child == null || active == null) null
+            else { deadlines.remove(requestId)?.second?.cancel(); child to active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines }
         }
+        denial?.let { (child, lines) -> if (lines.isNotEmpty()) write(child, lines) }
         return true
     }
 
@@ -429,6 +438,8 @@ internal class AgentHost(
         const val MAX_BATCH_BYTES = 1_000_000
         private const val REJECTED_CODE = "transcript_event_rejected"
         const val MAX_BUFFERED = 5_000
+        /** What the agent reads when its request could not be recorded for the team. */
+        const val UNSEEN_DENIAL = "The request could not be shown to the team: it was denied."
         const val MAX_HANDLED = 1_000
         const val DEFAULT_DRAIN_MILLIS = 10 * 60_000L
         const val SAFETY_MARGIN_MILLIS = 60_000L

@@ -87,7 +87,6 @@ class CloudConversationRoutesTest {
         override suspend fun lastSeq(sessionId: String) = events.filter { it.sessionId == sessionId }.maxOfOrNull { it.seq } ?: 0
         /** The requests a test says are in the transcript (the MySQL lookup is covered in infrastructure). */
         val requests = mutableMapOf<String, PermissionRequestRecord>()
-        override suspend fun permissionRequest(sessionId: String, requestId: String) = requests[requestId]
         /** The session as the store's lock would read it (the sessions fake of the test). */
         var sessionOf: (String) -> CloudSession? = { null }
         override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome {
