@@ -211,7 +211,7 @@ data class CloudSettings(
     val transferPendingInputs: TransferPendingInputs = TransferPendingInputs.CANCEL,
     /**
      * Minutes a cloud agent's permission request waits for an answer before the runner denies it; 0 (the default)
-     * waits without a deadline. Read by each agent process when it starts.
+     * waits without a deadline. Read by the runner once per execution.
      */
     val permissionDeadlineMinutes: Int = 0,
 )

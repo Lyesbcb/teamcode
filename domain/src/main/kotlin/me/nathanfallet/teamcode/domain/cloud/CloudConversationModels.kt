@@ -43,9 +43,19 @@ data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(
 /**
  * A `permission.request` as the transcript holds it. [question]: a question to the user (`AskUserQuestion`) rather
  * than a tool use gated by an `ask` rule. [questions]: each question's shape, null when the input was left out of the
- * event. [expired]: the runner already denied it for want of an answer.
+ * event. [state]: what the later transcript says about it.
  */
-data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val expired: Boolean)
+data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN)
+enum class PermissionRequestState {
+    /** Nothing closed it yet (the runner may still have, without telling: a withdrawal). */
+    OPEN,
+    /** The agent consumed an answer to it. */
+    ANSWERED,
+    /** The runner denied it at the team's deadline (`permission.expired`). */
+    EXPIRED,
+    /** Its turn ended (a later `turn` event that completed, interrupted or failed it). */
+    ENDED,
+}
 data class QuestionShape(val options: Int, val multiSelect: Boolean)
 enum class CloudInputStatus(val wire: String) {
     QUEUED("queued"), DELIVERED("delivered"), CONSUMED("consumed"), CANCELLED("cancelled"), REJECTED("rejected");

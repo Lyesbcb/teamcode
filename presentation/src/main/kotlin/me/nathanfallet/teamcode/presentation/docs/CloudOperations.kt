@@ -422,7 +422,8 @@ private fun ApiCatalog.cloudConversation() {
             error(HttpStatusCode.Forbidden, "The caller may not send messages (`cloud_permission_denied`), or a tool use is answered by someone other than the owner or an administrator (`permission_answer_denied`).")
             notFound("No such session (`not_found`).")
             conflict("No agent is running (`nothing_to_answer`), the session is not running (`session_not_running`), no such request is in the recent " +
-                "transcript (`unknown_permission_request`), or it expired without an answer (`permission_request_expired`).")
+                "transcript (`unknown_permission_request`), or it is closed: answered (`permission_request_answered`), expired without an answer " +
+                "(`permission_request_expired`) or ended with its turn (`permission_request_ended`).")
             error(HttpStatusCode.UnprocessableEntity, "The key was used with another answer (`idempotency_conflict`).")
             error(HttpStatusCode.PayloadTooLarge, "The body exceeds 64 KiB (`payload_too_large`).")
         }

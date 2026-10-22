@@ -176,20 +176,27 @@ class CloudConversationPersistenceTest {
         assertFalse("Blue" in answered.data, "The answer's texts stay in the input")
 
         // A tool use gated by an `ask` rule: the request is found in the transcript, an administrator decides it, and
-        // one that expired without an answer is refused.
+        // one that expired without an answer, was answered already or whose turn ended is refused.
+        failure("permission_request_answered") { ra.conversation.answer(colleague, s.id, PermissionAnswer("req-1", false, null, emptyList()), InputRequest("""{"requestId":"req-1","behavior":"deny"}""", false, null, null, null)) }
         ra.agent.events(team, s.id, 1, listOf(
             RunnerEvent(6, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-1","toolName":"Bash","input":{"command":"deploy"},"question":false}"""),
             RunnerEvent(7, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-2","toolName":"Bash","inputTruncated":true,"question":false}"""),
             RunnerEvent(8, CloudEventType.PERMISSION_EXPIRED, """{"requestId":"tool-2","deadlineMinutes":5,"message":"No answer within 5 minutes: the request was denied."}"""),
         ))
-        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, expired = true), ra.conversations.permissionRequest(s.id, "tool-2", 100))
-        assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false)), expired = false), rb.conversations.permissionRequest(s.id, "req-1", 100))
+        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED), ra.conversations.permissionRequest(s.id, "tool-2", 100))
+        assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false)), PermissionRequestState.ANSWERED), rb.conversations.permissionRequest(s.id, "req-1", 100))
+        assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 100)?.state)
         assertNull(ra.conversations.permissionRequest(s.id, "req-1", 3), "Only the recent transcript is searched")
         failure("permission_request_expired") { ra.conversation.answer(colleague, s.id, PermissionAnswer("tool-2", true, null, emptyList()), InputRequest("""{"requestId":"tool-2","behavior":"allow"}""", false, null, null, null)) }
         val denied = ra.conversation.answer(admin, s.id, PermissionAnswer("tool-1", false, "Not today.", emptyList()), InputRequest("""{"requestId":"tool-1","behavior":"deny","message":"Not today."}""", false, null, null, null))
         assertIs<InputOutcome.Accepted>(denied)
         assertEquals(listOf(denied.input.id), rb.agent.inputs(team, s.id, 1, 0).map { it.id })
         ra.agent.acknowledge(team, s.id, 1, listOf(RunnerInputAck(denied.input.id, true, null)))
+        ra.agent.events(team, s.id, 1, listOf(
+            RunnerEvent(9, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-3","toolName":"Bash","input":{},"question":false}"""),
+            RunnerEvent(10, CloudEventType.TURN, """{"phase":"interrupted"}""", turn = TurnMarker.ENDED),
+        ))
+        failure("permission_request_ended") { ra.conversation.answer(admin, s.id, PermissionAnswer("tool-3", true, null, emptyList()), InputRequest("""{"requestId":"tool-3","behavior":"allow"}""", false, null, null, null)) }
 
         // The team's deadline for unanswered requests is a stored cloud setting that reaches the runner; none by default.
         assertEquals(0, ra.agent.agent(team, s.id, 1).permissionDeadlineMinutes)

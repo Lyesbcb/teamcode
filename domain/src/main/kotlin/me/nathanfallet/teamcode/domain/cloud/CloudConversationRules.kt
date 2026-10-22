@@ -121,7 +121,12 @@ object CloudConversationRules {
      * indexes must exist in it when its input is known.
      */
     fun checkAnswer(request: PermissionRequestRecord, answer: PermissionAnswer, approver: Boolean) {
-        if (request.expired) throw TeamFailure("permission_request_expired", 409, "This permission request expired without an answer and was denied.")
+        when (request.state) {
+            PermissionRequestState.OPEN -> Unit
+            PermissionRequestState.EXPIRED -> throw TeamFailure("permission_request_expired", 409, "This permission request expired without an answer and was denied.")
+            PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
+            PermissionRequestState.ENDED -> throw TeamFailure("permission_request_ended", 409, "The turn of this permission request has ended.")
+        }
         if (!request.question) {
             if (!approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
             if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")

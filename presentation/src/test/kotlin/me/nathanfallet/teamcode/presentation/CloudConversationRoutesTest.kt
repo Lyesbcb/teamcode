@@ -238,8 +238,8 @@ class CloudConversationRoutesTest {
 
                 // A permission answer reaches the runner as the fixed JSON it parses; a bad behavior or a read-only key is refused.
                 suspend fun answer(token: String, body: String) = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth(token); contentType(ContentType.Application.Json); setBody(body) }
-                conversations.requests["req-1"] = PermissionRequestRecord("req-1", question = true, listOf(QuestionShape(2, false), QuestionShape(3, true)), expired = false)
-                conversations.requests["tool-1"] = PermissionRequestRecord("tool-1", question = false, null, expired = false)
+                conversations.requests["req-1"] = PermissionRequestRecord("req-1", question = true, listOf(QuestionShape(2, false), QuestionShape(3, true)))
+                conversations.requests["tool-1"] = PermissionRequestRecord("tool-1", question = false, null)
                 assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"maybe"}""").status)
                 assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"deny","answers":[{"question":0,"options":[1]}]}""").status, "Answers go with allow")
                 assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[2]}]}""").status, "An option the question does not have")
@@ -257,8 +257,9 @@ class CloudConversationRoutesTest {
                 assertEquals(HttpStatusCode.Accepted, answer("other", """{"requestId":"req-1","behavior":"allow","answers":[{"question":1,"options":[0,2]}]}""").status)
                 conversations.policy = CloudAccessPolicy.DEFAULT
                 assertEquals(HttpStatusCode.Accepted, answer("admin", """{"requestId":"tool-1","behavior":"deny","message":"Not today."}""").status, "An administrator decides a tool use")
-                conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, expired = true)
-                assertEquals(HttpStatusCode.Conflict, answer("colleague", """{"requestId":"old-1","behavior":"allow"}""").status, "An expired request was already denied")
+                conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, PermissionRequestState.EXPIRED)
+                val expired = answer("colleague", """{"requestId":"old-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.Conflict, expired.status, "An expired request was already denied"); assertTrue("permission_request_expired" in expired.bodyAsText())
                 conversations.inputs.values.removeIf { it.kind == CloudInputKind.PERMISSION }
                 val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1")
                 assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)

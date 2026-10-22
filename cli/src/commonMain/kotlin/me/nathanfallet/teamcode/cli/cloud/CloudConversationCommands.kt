@@ -54,7 +54,7 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
         CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
-            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd() + questions(data["input"])
+            "${data.text("toolName") ?: "tool"} ${(data["input"]?.toString() ?: data.text("inputPreview"))?.preview(160) ?: ""}".trimEnd() + questions(data["input"])
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}"
         else -> "[$type] $data"
     }

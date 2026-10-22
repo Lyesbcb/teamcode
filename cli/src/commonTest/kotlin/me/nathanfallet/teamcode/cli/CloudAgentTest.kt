@@ -75,6 +75,12 @@ class CloudAgentTest {
             "Each question and option is printed with the index an answer takes")
         val large = adapter.parse("""{"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"content":"${"x".repeat(30_000)}"}}}""").events.single()
         assertEquals("r9", large.data.str("requestId")); assertNull(large.data["input"]); assertEquals(true, large.data["inputTruncated"]!!.jsonPrimitive.boolean)
+        assertEquals(2_000, large.data.str("inputPreview").length, "Whoever decides still sees the start of the input")
+        val wide = adapter.parse("""{"type":"control_request","request_id":"r10","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"content":"${"é".repeat(12_000)}"}}}""").events.single()
+        assertNull(wide.data["input"], "The limit counts UTF-8 bytes, as the server does"); adapter.answer("r10", false, null, emptyList())
+        val plan = adapter.parse("""{"type":"control_request","request_id":"r11","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"x"},"requires_user_interaction":true}}""").events.single()
+        assertEquals(false, plan.data["question"]!!.jsonPrimitive.boolean, "Only AskUserQuestion is a question; another interactive tool is a tool use to approve")
+        adapter.answer("r11", false, null, emptyList())
         assertTrue("x".repeat(30_000) in adapter.answer("r9", true, null, emptyList()).lines.single(), "The agent still gets its full input back")
         for (wrong in listOf(listOf(CloudQuestionAnswer(0, listOf(2))), listOf(CloudQuestionAnswer(2, listOf(0))), listOf(CloudQuestionAnswer(0, listOf(0, 1)))))
             assertEquals(AnswerOutcome(emptyList(), AnswerOutcome.INVALID), adapter.answer("r2", true, null, wrong), "An index the request does not have: $wrong")
@@ -84,8 +90,13 @@ class CloudAgentTest {
         assertEquals("Blue", updated["answers"]!!.jsonObject.str("Red or blue?"), "A refused answer left the request open; indexes become Claude Code's texts")
         assertEquals("S, L", updated["answers"]!!.jsonObject.str("Which sizes?")); assertNotNull(updated["questions"], "The original input is passed back")
         adapter.parse("""{"type":"control_request","request_id":"r6","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Name?","options":[{"label":"A"}]}]},"requires_user_interaction":true}}""")
+        assertEquals(listOf("r6"), adapter.openPermissions.toList())
         val free = obj(adapter.answer("r6", true, null, listOf(CloudQuestionAnswer(0, text = "Ada"))).lines.single())["response"]!!.jsonObject["response"]!!.jsonObject
         assertEquals("Ada", free["updatedInput"]!!.jsonObject["answers"]!!.jsonObject.str("Name?"), "A free text is passed as is")
+        adapter.parse("""{"type":"control_request","request_id":"r7","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Same?","options":[{"label":"A"}]},{"question":"Same?","options":[{"label":"B"}]}]}}}""")
+        assertEquals(AnswerOutcome.INVALID, adapter.answer("r7", true, null, listOf(CloudQuestionAnswer(0, listOf(0)), CloudQuestionAnswer(1, listOf(0)))).refusal,
+            "Two questions with one text cannot both be answered in Claude Code's format")
+        adapter.answer("r7", false, null, emptyList())
 
         adapter.parse("""{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}""")
         adapter.parse("""{"type":"control_cancel_request","request_id":"r3"}""")

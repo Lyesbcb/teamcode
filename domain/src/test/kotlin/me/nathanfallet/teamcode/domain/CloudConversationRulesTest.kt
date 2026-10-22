@@ -4,6 +4,7 @@ import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules
 import me.nathanfallet.teamcode.domain.cloud.CloudConversationRules.MASK
 import me.nathanfallet.teamcode.domain.cloud.PermissionAnswer
 import me.nathanfallet.teamcode.domain.cloud.PermissionRequestRecord
+import me.nathanfallet.teamcode.domain.cloud.PermissionRequestState
 import me.nathanfallet.teamcode.domain.cloud.QuestionAnswer
 import me.nathanfallet.teamcode.domain.cloud.QuestionShape
 import me.nathanfallet.teamcode.domain.team.TeamFailure
@@ -67,18 +68,19 @@ class CloudConversationRulesTest {
     }
 
     @Test fun onlyTheOwnerOrAnAdministratorDecidesAToolUse() {
-        val tool = PermissionRequestRecord("t1", question = false, questions = null, expired = false)
+        val tool = PermissionRequestRecord("t1", question = false, questions = null)
         val allow = PermissionAnswer("t1", true, null, emptyList())
         CloudConversationRules.checkAnswer(tool, allow, approver = true)
         CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", false, "No.", emptyList()), approver = true)
         assertEquals("permission_answer_denied", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, allow, approver = false) }.code)
         assertEquals(403, assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", false, null, emptyList()), approver = false) }.status)
         assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool, PermissionAnswer("t1", true, null, listOf(QuestionAnswer(0, listOf(0)))), approver = true) }.code)
-        assertEquals("permission_request_expired", assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(expired = true), allow, approver = true) }.code)
+        for ((state, code) in listOf(PermissionRequestState.EXPIRED to "permission_request_expired", PermissionRequestState.ANSWERED to "permission_request_answered", PermissionRequestState.ENDED to "permission_request_ended"))
+            assertEquals(code, assertFailsWith<TeamFailure> { CloudConversationRules.checkAnswer(tool.copy(state = state), allow, approver = true) }.code)
     }
 
     @Test fun anyoneWhoMaySendMessagesAnswersAQuestionByIndex() {
-        val question = PermissionRequestRecord("q1", question = true, questions = listOf(QuestionShape(2, false), QuestionShape(3, true)), expired = false)
+        val question = PermissionRequestRecord("q1", question = true, questions = listOf(QuestionShape(2, false), QuestionShape(3, true)))
         fun check(vararg answers: QuestionAnswer) = CloudConversationRules.checkAnswer(question, PermissionAnswer("q1", true, null, answers.toList()), approver = false)
         fun refused(vararg answers: QuestionAnswer) = assertEquals("invalid_permission_answer", assertFailsWith<TeamFailure> { check(*answers) }.code)
         check(QuestionAnswer(0, listOf(1)), QuestionAnswer(1, listOf(0, 2)))

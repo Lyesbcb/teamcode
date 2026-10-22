@@ -51,6 +51,8 @@ interface AgentAdapter {
      * answer leaves the request open.
      */
     fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome = AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
+    /** Permission requests still waiting for an answer. */
+    val openPermissions: Set<String> get() = emptySet()
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -111,6 +113,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     private val started = mutableListOf<AgentEvent>()
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
+    override val openPermissions: Set<String> get() = permissions.keys.toSet()
 
     override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
         val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
@@ -136,6 +139,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
      */
     private fun questionTexts(input: JsonObject, answers: List<CloudQuestionAnswer>): Map<String, String>? {
         val questions = input["questions"].array() ?: return null
+        // Claude Code keys answers by question text: two answered questions with one text cannot both reach it.
+        val texts = answers.map { questions.getOrNull(it.question).obj()?.get("question").string() }
+        if (texts.toSet().size != texts.size) return null
         return answers.associate { answer ->
             val question = questions.getOrNull(answer.question).obj() ?: return null
             val text = question["question"].string() ?: return null
@@ -198,10 +204,13 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
                     put("requestId", id); put("toolName", request["tool_name"].string() ?: "tool")
-                    if (input.toString().length <= MAX_PERMISSION_INPUT_CHARS) put("input", input) else put("inputTruncated", true)
+                    val encoded = input.toString()
+                    if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES) put("input", input)
+                    else { put("inputTruncated", true); put("inputPreview", encoded.take(PERMISSION_PREVIEW_CHARS)) }
                     request["tool_use_id"].string()?.let { put("toolUseId", it) }
                     request["description"].string()?.let { put("description", it) }
-                    put("question", (request["requires_user_interaction"] as? JsonPrimitive)?.booleanOrNull == true)
+                    // Only AskUserQuestion is a question to the user; any other tool, interactive or not, is a tool use to approve.
+                    put("question", request["tool_name"].string() == "AskUserQuestion")
                     request["decision_reason_type"].string()?.let { put("reason", it) }
                 })))
             }
@@ -233,8 +242,10 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     }
 
     private companion object {
-        /** Well under the server's 60,000-byte event limit, which would replace the event and its request id. */
-        const val MAX_PERMISSION_INPUT_CHARS = 20_000
+        /** UTF-8 bytes, well under the server's 60,000-byte event limit, which would replace the event and its request id. */
+        const val MAX_PERMISSION_INPUT_BYTES = 20_000
+        /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
+        const val PERMISSION_PREVIEW_CHARS = 2_000
         val USAGE_FIELDS = listOf(
             "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
             "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",

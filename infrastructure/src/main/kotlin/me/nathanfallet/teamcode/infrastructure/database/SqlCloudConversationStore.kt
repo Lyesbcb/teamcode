@@ -68,17 +68,22 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
         val from = lastSeqOf(sessionId) - window
-        // A range of the primary key (session, seq), newest first: an expiry is seen before the request it closes.
+        // A range of the primary key (session, seq), newest first: what closed a request is seen before the request.
         val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data).where {
             (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq greater from) and
-                (CloudSessionEvents.type inList listOf(CloudEventType.PERMISSION_REQUEST.wire, CloudEventType.PERMISSION_EXPIRED.wire))
+                (CloudSessionEvents.type inList PERMISSION_LOOKUP_TYPES)
         }.orderBy(CloudSessionEvents.seq to SortOrder.DESC)
-        var expired = false
+        var state = PermissionRequestState.OPEN
         for (row in rows) {
             val data = try { Json.parseToJsonElement(row[CloudSessionEvents.data]) as? JsonObject } catch (_: IllegalArgumentException) { null } ?: continue
-            if ((data["requestId"] as? JsonPrimitive)?.contentOrNull != requestId) continue
-            if (row[CloudSessionEvents.type] == CloudEventType.PERMISSION_EXPIRED.wire) { expired = true; continue }
-            return@query permissionRequestRecord(requestId, data, expired)
+            fun text(name: String) = (data[name] as? JsonPrimitive)?.contentOrNull
+            when (row[CloudSessionEvents.type]) {
+                // The oldest closing event wins: it is the one the agent saw first.
+                CloudEventType.TURN.wire -> if (text("phase") in TURN_ENDS) state = PermissionRequestState.ENDED
+                CloudEventType.INPUT.wire -> if (text("requestId") == requestId && text("status") == CloudInputStatus.CONSUMED.wire) state = PermissionRequestState.ANSWERED
+                CloudEventType.PERMISSION_EXPIRED.wire -> if (text("requestId") == requestId) state = PermissionRequestState.EXPIRED
+                else -> if (text("requestId") == requestId) return@query permissionRequestRecord(requestId, data, state)
+            }
         }
         null
     }
@@ -386,13 +391,16 @@ private fun readEvent(row: ResultRow) = CloudEvent(
     row[CloudSessionEvents.sessionId], row[CloudSessionEvents.seq], CloudEventType.parse(row[CloudSessionEvents.type]) ?: CloudEventType.STATUS,
     row[CloudSessionEvents.at], row[CloudSessionEvents.epoch], row[CloudSessionEvents.data],
 )
+private val PERMISSION_LOOKUP_TYPES = listOf(CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED, CloudEventType.INPUT, CloudEventType.TURN).map { it.wire }
+private val TURN_ENDS = setOf("completed", "interrupted", "failed")
+
 /** A stored `permission.request`: whether it is a question, and each question's option count when its input was kept. */
-private fun permissionRequestRecord(requestId: String, data: JsonObject, expired: Boolean): PermissionRequestRecord {
+private fun permissionRequestRecord(requestId: String, data: JsonObject, state: PermissionRequestState): PermissionRequestRecord {
     val questions = ((data["input"] as? JsonObject)?.get("questions") as? JsonArray)?.map { question ->
         val shape = question as? JsonObject
         QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true)
     }
-    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, expired)
+    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, state)
 }
 private fun readInput(row: ResultRow) = CloudInput(
     id = row[CloudSessionInputs.id], teamId = row[CloudSessionInputs.teamId], sessionId = row[CloudSessionInputs.sessionId],
