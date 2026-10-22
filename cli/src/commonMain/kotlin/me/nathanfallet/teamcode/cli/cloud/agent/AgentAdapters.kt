@@ -56,8 +56,9 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * Claude Code in print mode with stream-json input and output: `claude -p --input-format stream-json
  * --output-format stream-json --verbose --dangerously-skip-permissions`, resumed with `--resume <session_id>`.
  * Messages written while a turn runs are queued by Claude Code itself; an interrupt is a `control_request`.
- * Thinking blocks are dropped here and never uploaded. A finished turn carries Claude Code's own cost estimate and
- * the turn's tokens from its `result` line.
+ * Thinking blocks are dropped here and never uploaded. Events produced by a subagent keep its parent's tool call id as
+ * `parentToolUseId`. A finished turn carries Claude Code's own cost estimate and the turn's tokens from its `result`
+ * line.
  */
 class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
     override var conversationId: String? = null; private set
@@ -79,6 +80,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
 
     /** The conversation's cost at the last priced `result`; null while unknown (before [startup], or a resumed conversation's first turn). */
     private var reportedCostUsd: Double? = null
+
+    /** A subagent's lines carry the `tool_use` id of the parent's Agent (Task) call; the main agent's carry null. */
+    private fun JsonObjectBuilder.parent(line: JsonObject) { line["parent_tool_use_id"].string()?.let { put("parentToolUseId", it) } }
 
     private val started = mutableListOf<AgentEvent>()
     override fun takeEvents(): List<AgentEvent> = started.toList().also { started.clear() }
@@ -110,9 +114,9 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
             "assistant" -> AgentOutput(value["message"].obj()?.get("content").array().orEmpty().mapNotNull { block ->
                 val content = block.obj() ?: return@mapNotNull null
                 when (content["type"].string()) {
-                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it) }) }
+                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it); parent(value) }) }
                     "tool_use" -> AgentEvent(CloudEventTypes.TOOL_CALL, buildJsonObject {
-                        content["id"].string()?.let { put("id", it) }; put("name", content["name"].string() ?: "tool"); content["input"]?.let { put("input", it) }
+                        content["id"].string()?.let { put("id", it) }; put("name", content["name"].string() ?: "tool"); content["input"]?.let { put("input", it) }; parent(value)
                     })
                     else -> null // thinking and redacted_thinking are never uploaded.
                 }
@@ -122,6 +126,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 AgentEvent(CloudEventTypes.TOOL_RESULT, buildJsonObject {
                     content["tool_use_id"].string()?.let { put("id", it) }; put("output", resultText(content["content"]))
                     put("isError", (content["is_error"] as? JsonPrimitive)?.booleanOrNull ?: false)
+                    parent(value)
                 })
             })
             "result" -> {

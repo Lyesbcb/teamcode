@@ -25,7 +25,10 @@ private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length 
 /** Micro-dollars as `$0.003253`; null for a negative amount, which no runner reports. */
 internal fun dollars(micros: Long): String? = if (micros < 0) null else "$" + "${micros / 1_000_000}.${(micros % 1_000_000).toString().padStart(6, '0')}"
 
-/** One readable line (or block) per event; unknown types are shown by name so newer servers stay readable. */
+/**
+ * One readable line (or block) per event; unknown types are shown by name so newer servers stay readable. A subagent's
+ * events (`parentToolUseId`) are indented under the tool call that started it.
+ */
 internal fun CloudEventView.render(): String {
     val time = Instant.fromEpochMilliseconds(at).toString().substring(11, 19)
     val body = when (type) {
@@ -39,7 +42,7 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
         else -> "[$type] $data"
     }
-    return "$time #$seq $body"
+    return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}$body"
 }
 
 private fun CloudInputView.line() = listOfNotNull(id, kind, status, reason, if (woke) "woke the session" else null).joinToString("\t")
