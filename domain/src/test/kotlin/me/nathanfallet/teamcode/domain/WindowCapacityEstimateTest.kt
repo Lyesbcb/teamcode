@@ -15,17 +15,36 @@ class WindowCapacityEstimateTest {
         (0 until count).map { HourCost(start / hour + it, micros, unpriced = it == unpricedAt) }
     private fun estimate(history: List<QuotaSample>, costs: List<HourCost>) = EstimateWindowCapacityUseCase().estimate("seven_day", history, costs, now)
 
-    @Test fun eachRiseOfFivePointsOrMoreIsOneSampleAndTheMedianIsKept() {
+    @Test fun eachRiseOfFivePointsOrMoreIsOneSample() {
         // +6 points per hour for $0.60: the full window is worth 0.6 / 0.06 = $10.
         val result = estimate(listOf(sample(0, .10), sample(1, .16), sample(2, .22), sample(3, .28)), hours(3))
         assertEquals(3, result.samples)
         assertEquals(10_000_000, result.fullWindowMicros)
     }
 
+    @Test fun useOutsideTeamCodeLowersSomeSamplesButNotTheEstimate() {
+        // Every hour TeamCode settles $0.60. In three of the five hours someone else also used the subscription, so the
+        // window rose 12 points instead of 6: those samples read a $5 window, the clean ones the true $10. A median
+        // keeps $5 for the budget; the reported capacity, the upper quartile, keeps $10.
+        val history = listOf(.10, .16, .28, .40, .46, .58).mapIndexed { index, utilization -> sample(index, utilization) }
+        val result = estimate(history, hours(5))
+        assertEquals(5, result.samples)
+        assertEquals(10_000_000, result.capacityMicros)
+        assertEquals(5_000_000, result.fullWindowMicros, "Admission keeps the median, unchanged")
+    }
+
+    @Test fun whenEveryPairOverlapsOutsideUseTheEstimateStaysALowerBound() {
+        // +12 points per $0.60 hour throughout: the subscription was always shared, so $5 is all that can be shown.
+        val result = estimate((0..3).map { sample(it, .10 + .12 * it) }, hours(3))
+        assertEquals(5_000_000, result.capacityMicros)
+        assertEquals(5_000_000, result.fullWindowMicros)
+    }
+
     @Test fun fewerThanThreeSamplesGiveNoEstimate() {
         val result = estimate(listOf(sample(0, .10), sample(1, .16), sample(2, .22)), hours(2))
         assertEquals(2, result.samples)
         assertNull(result.fullWindowMicros)
+        assertNull(result.capacityMicros, "Unknown, never guessed")
     }
 
     @Test fun smallRisesAccumulateUntilFivePoints() {
