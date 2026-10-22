@@ -28,19 +28,22 @@ object CloudConversationRules {
      */
     private val secrets = listOf(
         // Prefixed shapes start at a word boundary and contain a digit, so `task-management-…` or `etc_…` stay readable.
+        // Lookaheads are bounded, so a crafted string (`sk-sk-sk-…`) never makes a scan backtrack quadratically.
         Regex("(?<![A-Za-z0-9_-])sk-(?:ant-)?(?=[A-Za-z0-9_-]{0,256}[0-9])[A-Za-z0-9_-]{16,}"),
         Regex("(?<![A-Za-z0-9_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
         Regex("github_pat_[A-Za-z0-9_]{20,}"),
         Regex("(?<![A-Za-z0-9_-])tc(?:ex|sk|dv|ss)?_(?=[A-Za-z0-9_-]{0,256}[0-9])[A-Za-z0-9_-]{16,}"),
         Regex("(?:AKIA|ASIA)[A-Z0-9]{16}"),
         Regex("xox[abprs]-[A-Za-z0-9-]{10,}"),
-        Regex("(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"),
+        // Anchored at a word start and possessive: `eyJeyJeyJ…` without a dot is scanned once, not once per `eyJ`.
+        Regex("(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\\.[A-Za-z0-9_-]{8,}+\\.[A-Za-z0-9_-]{8,}"),
         Regex("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"),
     )
     private val authorization = Regex("(?i)\\b(bearer|basic|token)\\s+([A-Za-z0-9._~+/=-]{12,})")
     /** A name ending in a secret word (`GITHUB_TOKEN`, `"api_key"`, not `max_tokens`) assigned a value of 8 characters or more. */
     private val assignment = Regex("(?i)\\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|CREDENTIALS?))(\"?\\s*[=:]\\s*)(\"[^\"]{8,}\"|'[^']{8,}'|[^\\s\"',;]{8,})")
-    private val urlCredentials = Regex("(?i)((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://)[^\\s/@:]+:[^\\s/@]+@")
+    /** The scheme is bounded, so a long run of scheme characters without `://` is scanned in linear time. */
+    private val urlCredentials = Regex("(?i)([a-z][a-z0-9+.-]{0,31}://)[^\\s/@:]+:[^\\s/@]+@")
 
     /**
      * A plain word (`configuration`, `Authentication.`) after `token`, `basic` or `bearer` is prose. Anything else is
@@ -62,7 +65,7 @@ object CloudConversationRules {
      */
     fun detect(text: String): String? {
         secrets.forEachIndexed { index, pattern -> if (pattern.containsMatchIn(text)) return secretKinds[index] }
-        if (authorizationValue.findAll(text).any { looksLikeSecretValue(it.groupValues[2]) }) return "authorization_header"
+        if (authorizationValue.findAll(text).any { looksLikeSecretValue(it.groupValues[1], it.groupValues[2]) }) return "authorization_header"
         if (urlCredentials.containsMatchIn(text)) return "url_credentials"
         return null
     }
@@ -71,13 +74,54 @@ object CloudConversationRules {
     private val authorizationValue = Regex("(?i)\\b(bearer|basic|token)[ \\t]+([A-Za-z0-9._~+/=-]{12,})")
 
     /**
-     * Stricter than [looksLikeCredential], since a hit refuses a whole file: a digit or a base64 or token symbol
-     * (`+/=_~`), or mixed case with no word separator (`dXNlcjpwYXNzd29yZA`); hyphenated or dotted words are prose.
+     * Stricter than [looksLikeCredential], since a hit refuses a whole file. A `Basic` value counts only when it is
+     * base64 (padded or not) of a `user:password` pair. A `Bearer` or `Token` value counts when it is at least 12
+     * characters with letters and digits, at least 20 with both cases, or at least 16 digits, and is neither a path (`/api/v1/items`,
+     * `https://…`), nor an identifier made of lowercase words and numbers (`refresh_interval_v2`,
+     * `2024-10-22-rotation-notes`), nor a camel- or Pascal-case name (`getAccessToken2`), which pages
+     * legitimately contain.
      */
-    private fun looksLikeSecretValue(value: String): Boolean {
+    private fun looksLikeSecretValue(scheme: String, value: String): Boolean {
         val word = value.trimEnd('.')
-        if (word.any { it.isDigit() || it in "+/=_~" }) return true
-        return '-' !in word && '.' !in word && word.any { it.isLowerCase() } && word.drop(1).any { it.isUpperCase() }
+        if (scheme.equals("basic", ignoreCase = true)) return basicPair(word)
+        if ("://" in word || PATH.matches(word)) return false
+        if (word.length < 12 || identifier(word)) return false
+        // A long run of digits alone is a numeric token; a shorter one is a number.
+        if (word.none { it.isLetter() }) return word.length >= 16 && word.all { it.isDigit() }
+        if (word.none { it.isDigit() } && (word.length < 20 || word.none { it.isUpperCase() } || word.none { it.isLowerCase() })) return false
+        val segments = word.split('.', '_', '-', '/', '~', '+', '=').filter { it.isNotEmpty() }
+        val wordy = segments.size > 1 && segments.all { segment ->
+            segment.all { it.isDigit() } || (segment.all { it.isLowerCase() || it.isDigit() } && segment.count { it.isDigit() } <= 2)
+        }
+        return !wordy
+    }
+
+    /** A path: `/api/v1/items`, `./dist`, or one lowercase segment (`/artifacts`), not `/9j4AAQSkZJRg…` (base64). */
+    private val PATH = Regex("\\.{0,2}/(?:[A-Za-z0-9._~-]+/)+[A-Za-z0-9._~-]*|\\.{0,2}/[a-z0-9._~-]*")
+    private val NAME_PART = Regex("[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+    /**
+     * A camel- or Pascal-case name (`getAccessToken2`, `handleOAuth2Callback`, `RefreshTokenSchedulerService`): words of
+     * three letters or more, acronyms and short numbers. A random token splits into short, mixed pieces instead.
+     */
+    private fun identifier(word: String): Boolean {
+        val parts = NAME_PART.findAll(word).map { it.value }.toList()
+        if (parts.size < 2 || parts.joinToString("") != word) return false
+        return parts.all { part -> when {
+            part.all { it.isDigit() } -> part.length <= 2
+            part.all { it.isUpperCase() } -> part.length <= 5
+            else -> part.length >= 3
+        } }
+    }
+
+    /** Base64, padded or not, of printable text holding a colon: what `Authorization: Basic` carries. */
+    private fun basicPair(word: String): Boolean {
+        val bare = word.trimEnd('=')
+        if (bare.length % 4 == 1 || word.length - bare.length > 2 || bare.any { !(it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it in "+/") }) return false
+        val decoded = try { java.util.Base64.getDecoder().decode(bare + "=".repeat((4 - bare.length % 4) % 4)) } catch (_: IllegalArgumentException) { return false }
+        val text = try { java.nio.charset.StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(decoded)).toString() }
+            catch (_: java.nio.charset.CharacterCodingException) { return false }
+        return ':' in text && text.none { it.isISOControl() }
     }
 
     fun mask(text: String): String {

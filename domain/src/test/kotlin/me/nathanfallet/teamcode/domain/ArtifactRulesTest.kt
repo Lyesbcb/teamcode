@@ -98,6 +98,8 @@ class ArtifactRulesTest {
         assertEquals("artifact_capabilities_unsupported", assertFailsWith<TeamFailure> { service.commit(owner, id, id, "index.html", files, 0, null, null, null, null, mapOf("db" to "on")) }.code)
         val key = owner.copy(serviceScopes = setOf(ServiceScope.ARTIFACTS_WRITE))
         assertEquals("credential_scope", assertFailsWith<TeamFailure> { service.setAccess(key, id, "public", true, null) }.code)
+        assertEquals("invalid_artifact_access", assertFailsWith<TeamFailure> { service.setAccess(owner, id, "public", false, null) }.code, "Not following the latest version needs a pinned one")
+        assertEquals("invalid_artifact_access", assertFailsWith<TeamFailure> { service.setAccess(owner, id, "public", true, 2) }.code)
         assertEquals("credential_scope", assertFailsWith<TeamFailure> { service.delete(key, id) }.code)
         val reader = owner.copy(serviceScopes = setOf(ServiceScope.ARTIFACTS_READ))
         assertEquals("credential_scope", assertFailsWith<TeamFailure> { service.startUpload(reader, null, listOf(file("a"))) }.code)
@@ -111,15 +113,40 @@ class ArtifactRulesTest {
         if (method.name == "toString") "stub" else error("Unexpected call to ${method.name}.")
     } as T
 
-    @Test fun theSecretScanIgnoresProseAndStaysLinearOnCraftedFiles() {
-        for (prose in listOf("Basic cross-browser support for every page", "Token\n----------------\nexplained below", "Basic\n================", "basic setup-instructions-here"))
+    @Test @org.junit.jupiter.api.Timeout(120) fun theSecretScanIgnoresProseAndStaysLinearOnCraftedFiles() {
+        for (prose in listOf("Basic cross-browser support for every page", "Token\n----------------\nexplained below", "Basic\n================", "basic setup-instructions-here",
+                "Basic input/output", "Token usage/limits", "token refresh_interval", "basic /api/v1/artifacts", "token getAccessToken", "Bearer /api/v1/artifacts/uploads",
+                "token refresh_interval_v2_settings"))
             assertNull(CloudConversationRules.detect(prose), prose)
         assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer abc123def456ghi789"))
         assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Basic dXNlcjpwYXNzd29yZA=="))
         assertEquals("url_credentials", CloudConversationRules.detect("postgres://app:hunter2secret@db.internal/app"))
+        assertEquals("authorization_header", CloudConversationRules.detect("curl -H 'Authorization: token tok_4f8a9b1c2d3e5f6a7b8c'"))
+        // Unpadded Basic values, long tokens without a digit, and credentials glued to a word are still found.
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Basic dXNlcjpwYXNzd29yZA"))
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIj_kLmN"))
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer Ab//Cd3fGhIjKlMnOpQrSt"))
+        assertEquals("url_credentials", CloudConversationRules.detect("--url-https://u:hunter2pw@host"))
+        assertEquals("jwt", CloudConversationRules.detect("Bearer eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4"))
+        assertNull(CloudConversationRules.detect("token getAccessTokenForCurrentUser"), "A camel-case identifier is not a token")
+        assertNull(CloudConversationRules.detect("Token getAccessTokenForCurrentUserSession"))
+        assertNull(CloudConversationRules.detect("token 2024-10-22-rotation-notes"), "Dates and words are prose")
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer abc123def456"), "Short tokens are still found")
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer AbCdEfGhIjKlMnOpQrStUvWxYz"))
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Token 4815162342108151623"))
+        assertNull(CloudConversationRules.detect("token 2024102212"), "A short number is not a token")
+        for (name in listOf("Token RefreshTokenSchedulerService", "token handleOAuth2Callback", "Bearer getAccessToken2", "Bearer /api/v1/items", "Bearer ./dist/app.js"))
+            assertNull(CloudConversationRules.detect(name), name)
+        assertEquals("authorization_header", CloudConversationRules.detect("Authorization: Bearer /9j4AAQSkZJRgABAQEAYABgAAD"), "Base64 starting with a slash is not a path")
+        // The transcript mask finds what the scanner finds.
+        val jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4"
+        assertFalse(jwt in CloudConversationRules.mask("jwt=$jwt"))
+        assertFalse("hunter2" in CloudConversationRules.mask("--url-https://u:hunter2@host"))
         val started = System.nanoTime()
         for (crafted in listOf("a-".repeat(1_000_000), "sk-".repeat(700_000), "eyJ".repeat(700_000), "tc_".repeat(700_000)))
             assertNull(CloudConversationRules.detect(crafted))
-        assertTrue(System.nanoTime() - started < 10_000_000_000, "Each 2 MiB crafted file is scanned in linear time")
+        for (crafted in listOf("a.".repeat(1_000_000), "sk-".repeat(700_000), "eyJ".repeat(700_000), "-eyJ".repeat(500_000), "a".repeat(2_000_000), "x://a:".repeat(300_000)))
+            CloudConversationRules.mask(crafted)
+        assertTrue(System.nanoTime() - started < 30_000_000_000, "Each 2 MiB crafted file is scanned and masked in linear time (quadratic would take hours)")
     }
 }
