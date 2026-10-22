@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode.cli.cloud
 
 import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.core.Context
+import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.choice
@@ -23,10 +24,15 @@ import me.nathanfallet.teamcode.client.TeamCodeException
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
-/** A question request's questions and options in full: `teamcode cloud answer --answer` needs their exact text. */
-private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.get("questions") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.joinToString("") { question ->
-    val options = (question["options"] as? JsonArray).orEmpty().mapNotNull { ((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull }
-    "\n    ? ${question.text("question") ?: ""}" + if (options.isEmpty()) "" else " (${options.joinToString(" / ")})"
+/**
+ * A question request's questions and options in full, each with the index `teamcode cloud answer --answer` takes:
+ * `? 0: Red or blue? (0: Red / 1: Blue)`, marked `several` when more than one option may be chosen.
+ */
+private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.get("questions") as? JsonArray).orEmpty().withIndex().joinToString("") { (index, element) ->
+    val question = element as? JsonObject ?: JsonObject(emptyMap())
+    val options = (question["options"] as? JsonArray).orEmpty().mapIndexed { option, it -> "$option: ${((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull ?: ""}" }
+    val several = (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
+    "\n    ? $index: ${question.text("question") ?: ""}" + (if (options.isEmpty()) "" else " (${options.joinToString(" / ")})") + if (several) " several" else ""
 }
 
 /** Micro-dollars as `$0.003253`; null for a negative amount, which no runner reports. */
@@ -49,6 +55,7 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
         CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
             "${data.text("toolName") ?: "tool"} ${data["input"]?.toString()?.preview(160) ?: ""}".trimEnd() + questions(data["input"])
+        CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}"
         else -> "[$type] $data"
     }
     return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}$body"
@@ -145,20 +152,26 @@ internal class CloudInterrupt : SuspendingCliktCommand(name = "interrupt") {
 }
 
 internal class CloudAnswer : SuspendingCliktCommand(name = "answer") {
-    override fun help(context: Context) = "Answer a permission request of the agent (a [permission] or [question] line of the transcript): allow or deny it, or answer its questions."
+    override fun help(context: Context) = "Answer a permission request of the agent (a [permission] or [question] line of the transcript): allow or deny it, " +
+        "or answer its questions by the indexes printed under it. A tool use is answered by the session owner or an administrator only."
     private val id by argument()
     private val request by argument("REQUEST_ID")
     private val behavior by argument("allow|deny").choice("allow", "deny")
     private val message by option("--message", help = "Why it was denied; the agent reads it.")
-    private val answers by option("--answer", help = "QUESTION=ANSWER for a question request (repeatable); needs allow.").multiple()
+    private val answers by option("--answer", help = "QUESTION=OPTION[,OPTION...] by index, from 0, for a question request (repeatable); needs allow.").multiple()
+    private val texts by option("--answer-text", help = "QUESTION=TEXT: a free answer to the question at that index (repeatable); needs allow.").multiple()
     override suspend fun run() {
-        val parsed = answers.associate { value ->
-            val split = value.indexOf('=')
-            require(split > 0) { "Use --answer QUESTION=ANSWER." }
-            value.take(split) to value.drop(split + 1)
-        }
-        val answer = AnswerCloudPermissionRequest(request, behavior, message, parsed.takeIf { it.isNotEmpty() })
+        val parsed = answers.map { value ->
+            val (question, options) = indexed(value, "--answer QUESTION=OPTION[,OPTION...]")
+            CloudQuestionAnswer(question, options.split(',').map { it.trim().toIntOrNull()?.takeIf { index -> index >= 0 } ?: throw UsageError("Use --answer QUESTION=OPTION[,OPTION...] with option indexes from 0.") })
+        } + texts.map { value -> indexed(value, "--answer-text QUESTION=TEXT").let { (question, text) -> CloudQuestionAnswer(question, text = text) } }
+        val answer = AnswerCloudPermissionRequest(request, behavior, message, parsed.sortedBy { it.question }.takeIf { it.isNotEmpty() })
         echo(sdk(loadConfig()).use { it.answerCloudPermission(id, answer, Uuid.random().toString()) }.line())
+    }
+    private fun indexed(value: String, usage: String): Pair<Int, String> {
+        val split = value.indexOf('=')
+        val question = value.take(split.coerceAtLeast(0)).trim().toIntOrNull()?.takeIf { split > 0 && it >= 0 } ?: throw UsageError("Use $usage with a question index from 0.")
+        return question to value.drop(split + 1)
     }
 }
 

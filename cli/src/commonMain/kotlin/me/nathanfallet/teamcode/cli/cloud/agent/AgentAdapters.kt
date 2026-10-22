@@ -4,6 +4,7 @@ import kotlin.math.roundToLong
 import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
+import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
 
 /** A normalized transcript event before upload. The server masks and bounds it again. */
 data class AgentEvent(val type: String, val data: JsonObject)
@@ -13,8 +14,19 @@ data class AgentOutput(val events: List<AgentEvent> = emptyList(), val replies: 
 
 data class AgentCommand(val command: String, val arguments: List<String>)
 
-/** Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their answers. */
-data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false)
+/**
+ * Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their
+ * answers. [permissionDeadlineMinutes]: how long a request waits before the host denies it; 0 for no deadline.
+ */
+data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0)
+
+/** The lines answering a permission request, or the rejection reason when there are none ([UNKNOWN] or [INVALID]). */
+data class AnswerOutcome(val lines: List<String>, val refusal: String? = null) {
+    companion object {
+        const val UNKNOWN = "unknown_permission_request"
+        const val INVALID = "invalid_answer"
+    }
+}
 
 /**
  * One long-lived agent process with streaming input. Adapters are pure translators between TeamCode inputs and an
@@ -34,10 +46,11 @@ interface AgentAdapter {
     fun interrupt(): List<String>
     fun parse(line: String): AgentOutput
     /**
-     * Lines answering the open permission request [requestId] (`allow` with optional question [answers], or deny with
-     * [message]); empty when no such request is open, so the answer is rejected.
+     * Lines answering the open permission request [requestId] (`allow` with optional question [answers] by index, or
+     * deny with [message]). Refused when no such request is open, or when an index is not in the request; a refused
+     * answer leaves the request open.
      */
-    fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> = emptyList()
+    fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome = AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
 }
@@ -99,20 +112,38 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
     private val permissions = mutableMapOf<String, JsonObject>()
 
-    override fun answer(requestId: String, allow: Boolean, message: String?, answers: Map<String, String>): List<String> {
-        val input = permissions.remove(requestId) ?: return emptyList()
-        return listOf(buildJsonObject {
+    override fun answer(requestId: String, allow: Boolean, message: String?, answers: List<CloudQuestionAnswer>): AnswerOutcome {
+        val input = permissions[requestId] ?: return AnswerOutcome(emptyList(), AnswerOutcome.UNKNOWN)
+        val texts = if (answers.isEmpty()) emptyMap() else questionTexts(input, answers) ?: return AnswerOutcome(emptyList(), AnswerOutcome.INVALID)
+        permissions.remove(requestId)
+        return AnswerOutcome(listOf(buildJsonObject {
             put("type", "control_response")
             putJsonObject("response") {
                 put("subtype", "success"); put("request_id", requestId)
                 putJsonObject("response") {
                     if (allow) {
                         put("behavior", "allow")
-                        put("updatedInput", if (answers.isEmpty()) input else JsonObject(input + ("answers" to buildJsonObject { answers.forEach { (question, value) -> put(question, value) } })))
+                        put("updatedInput", if (texts.isEmpty()) input else JsonObject(input + ("answers" to buildJsonObject { texts.forEach { (question, value) -> put(question, value) } })))
                     } else { put("behavior", "deny"); put("message", message ?: "A team member denied this request.") }
                 }
             }
-        }.toString())
+        }.toString()))
+    }
+
+    /**
+     * Claude Code's answer format: question text to the chosen label, several labels joined with ", " for a
+     * multi-select question, or the free text. Null when an index is not in the request.
+     */
+    private fun questionTexts(input: JsonObject, answers: List<CloudQuestionAnswer>): Map<String, String>? {
+        val questions = input["questions"].array() ?: return null
+        return answers.associate { answer ->
+            val question = questions.getOrNull(answer.question).obj() ?: return null
+            val text = question["question"].string() ?: return null
+            val options = question["options"].array().orEmpty()
+            if (answer.text == null && (answer.options.isEmpty() || (answer.options.size > 1 && (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull != true))) return null
+            val value = answer.text ?: answer.options.map { options.getOrNull(it).obj()?.get("label").string() ?: return null }.joinToString(", ")
+            text to value
+        }
     }
     override fun takeEvents(): List<AgentEvent> = started.toList().also { started.clear() }
 

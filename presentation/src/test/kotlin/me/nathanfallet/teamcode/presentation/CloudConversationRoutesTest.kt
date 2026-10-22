@@ -38,7 +38,8 @@ class CloudConversationRoutesTest {
         override suspend fun profile(teamId: String, profileId: String) = profile
         override suspend fun profileVersion(teamId: String, profileId: String, version: Int) = profile.spec
         override suspend fun cluster(teamId: String, clusterId: String) = CloudCluster("cluster-id", "default", "lab", "https://k8s.example.test", listOf("teamcode"), 10, "standard", 1, 0, null, 1, 1)
-        override suspend fun settings(teamId: String) = CloudSettings()
+        var settings = CloudSettings()
+        override suspend fun settings(teamId: String) = settings
         override suspend fun insert(session: CloudSession, actor: CloudActor, idempotency: IdempotencyRequest?, retainedLimit: Int) =
             CloudCreateOutcome.Created(session.copy(generation = 1).also { sessions[it.id] = it })
         override suspend fun find(teamId: String, id: String) = sessions[id]
@@ -84,6 +85,9 @@ class CloudConversationRoutesTest {
             return CloudEventPage(page, all.firstOrNull()?.seq, all.lastOrNull()?.seq ?: 0, page.lastOrNull()?.seq?.takeIf { it < (all.lastOrNull()?.seq ?: 0) }, null)
         }
         override suspend fun lastSeq(sessionId: String) = events.filter { it.sessionId == sessionId }.maxOfOrNull { it.seq } ?: 0
+        /** The requests a test says are in the transcript (the MySQL lookup is covered in infrastructure). */
+        val requests = mutableMapOf<String, PermissionRequestRecord>()
+        override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long) = requests[requestId]
         override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome {
             val input = new.input
             inputs.values.find { it.sessionId == input.sessionId && it.authorId == input.authorId && it.clientKey != null && it.clientKey == input.clientKey }?.let {
@@ -223,7 +227,10 @@ class CloudConversationRoutesTest {
             val member = sdk("colleague")
             try {
                 assertEquals(RunnerAgentView("claude", null, "opus", null, "none", permissionRelay = true), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)),
-                    "This server takes permission requests, so the runner relays them")
+                    "This server takes permission requests, so the runner relays them, without a deadline by default")
+                store.settings = CloudSettings(permissionDeadlineMinutes = 15)
+                assertEquals(15, runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)).permissionDeadlineMinutes, "The team's deadline reaches the runner")
+                store.settings = CloudSettings()
                 val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
                 assertEquals(ack.id, delivered.id); assertEquals("Fix the retry", delivered.text)
                 runner.runnerAcknowledge(RunnerInputAckRequest("default", "s1", 1, listOf(RunnerInputAckView(ack.id, "consumed"))))
@@ -231,17 +238,37 @@ class CloudConversationRoutesTest {
 
                 // A permission answer reaches the runner as the fixed JSON it parses; a bad behavior or a read-only key is refused.
                 suspend fun answer(token: String, body: String) = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth(token); contentType(ContentType.Application.Json); setBody(body) }
+                conversations.requests["req-1"] = PermissionRequestRecord("req-1", question = true, listOf(QuestionShape(2, false), QuestionShape(3, true)), expired = false)
+                conversations.requests["tool-1"] = PermissionRequestRecord("tool-1", question = false, null, expired = false)
                 assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"maybe"}""").status)
-                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"deny","answers":{"Q":"A"}}""").status, "Answers go with allow")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"deny","answers":[{"question":0,"options":[1]}]}""").status, "Answers go with allow")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[2]}]}""").status, "An option the question does not have")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[0,1]}]}""").status, "One option for a single-choice question")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"req-1","behavior":"allow","answers":[{"question":2,"text":"Green"}]}""").status, "A question the request does not have")
+                assertEquals(HttpStatusCode.BadRequest, answer("colleague", """{"requestId":"tool-1","behavior":"allow","answers":[{"question":0,"options":[0]}]}""").status, "A tool use takes no answers")
+                assertEquals(HttpStatusCode.Conflict, answer("colleague", """{"requestId":"req-9","behavior":"allow"}""").status, "No such request in the transcript")
                 assertEquals(HttpStatusCode.Forbidden, answer("colleague-read", """{"requestId":"req-1","behavior":"allow"}""").status)
                 assertEquals(HttpStatusCode.NotFound, answer("other", """{"requestId":"req-1","behavior":"allow"}""").status)
-                val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = mapOf("Red or blue?" to "Blue")), "answer-1")
+                // A member the policy lets send messages answers a question, but approving a tool use stays the owner's or an administrator's.
+                conversations.policy = CloudAccessPolicy(1, listOf(CloudAccessRule(CloudAccessSubject.MemberSubject(other.id), setOf(CloudPermission.TRANSCRIPT, CloudPermission.MESSAGE), CloudAccessScope.TEAM)))
+                val refused = answer("other", """{"requestId":"tool-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.Forbidden, refused.status); assertTrue("permission_answer_denied" in refused.bodyAsText())
+                assertEquals(HttpStatusCode.Forbidden, answer("other", """{"requestId":"tool-1","behavior":"deny"}""").status, "Denying is the owner's decision too")
+                assertEquals(HttpStatusCode.Accepted, answer("other", """{"requestId":"req-1","behavior":"allow","answers":[{"question":1,"options":[0,2]}]}""").status)
+                conversations.policy = CloudAccessPolicy.DEFAULT
+                assertEquals(HttpStatusCode.Accepted, answer("admin", """{"requestId":"tool-1","behavior":"deny","message":"Not today."}""").status, "An administrator decides a tool use")
+                conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, expired = true)
+                assertEquals(HttpStatusCode.Conflict, answer("colleague", """{"requestId":"old-1","behavior":"allow"}""").status, "An expired request was already denied")
+                conversations.inputs.values.removeIf { it.kind == CloudInputKind.PERMISSION }
+                val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1")
                 assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)
-                assertEquals(answered.id, member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = mapOf("Red or blue?" to "Blue")), "answer-1").id, "Replayed")
+                assertEquals(answered.id, member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1").id, "Replayed")
                 assertEquals(422, assertFailsWith<TeamCodeException> { member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "deny"), "answer-1") }.statusCode)
                 val relayed = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.single()
                 assertEquals("permission", relayed.kind)
-                assertEquals("""{"requestId":"req-1","behavior":"allow","answers":{"Red or blue?":"Blue"}}""", relayed.text)
+                assertEquals("""{"requestId":"req-1","behavior":"allow","answers":[{"question":0,"options":[1]},{"question":1,"text":"Purple"}]}""", relayed.text, "By index, sorted by question")
+                assertEquals(HttpStatusCode.Accepted, answer("colleague", """{"requestId":"tool-1","behavior":"allow"}""").status, "The owner decides a tool use")
+                runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0))
                 val events = listOf(
                     RunnerEventView(1, "turn", buildJsonObject { put("phase", "started") }),
                     RunnerEventView(2, "message.agent", buildJsonObject {

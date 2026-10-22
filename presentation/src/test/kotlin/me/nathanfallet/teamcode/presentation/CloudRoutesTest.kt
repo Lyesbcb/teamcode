@@ -358,6 +358,24 @@ class CloudRoutesTest {
             contentType(ContentType.Application.FormUrlEncoded); setBody("csrf=admin-session&pausedRetentionDays=30&failedWorkspaceRetentionDays=7&maxRunning=2&maxRetained=20&transcriptRetentionDays=30&memberTransfers=offer&transferOfferDays=5&transferPendingInputs=cancel")
         }.status)
         assertEquals(Triple(MemberTransfers.OFFER, 5, TransferPendingInputs.CANCEL), settings.settings.let { Triple(it.memberTransfers, it.transferOfferDays, it.transferPendingInputs) })
+
+        // The permission request deadline: none by default, set and cleared through the API and the form, kept by a client that omits it.
+        val base = """"pausedRetentionDays":30,"failedWorkspaceRetentionDays":7,"maxRunningSessionsPerMember":2,"maxRetainedSessionsPerMember":20,"transcriptRetentionDays":30"""
+        assertEquals(0, Serialization.json.decodeFromString<CloudSettingsView>(client.get("/api/v1/cloud/settings") { bearerAuth("admin") }.bodyAsText()).permissionDeadlineMinutes)
+        assertEquals(HttpStatusCode.BadRequest, client.put("/api/v1/cloud/settings") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody("""{$base,"permissionDeadlineMinutes":1441}""") }.status)
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/cloud/settings") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody("""{$base,"permissionDeadlineMinutes":30}""") }.status)
+        assertEquals(30, settings.settings.permissionDeadlineMinutes)
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/cloud/settings") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody("""{$base}""") }.status)
+        assertEquals(30, settings.settings.permissionDeadlineMinutes, "An absent deadline keeps the stored one")
+        assertTrue(client.get("/dashboard/cloud") { header(HttpHeaders.Cookie, "teamcode_session=admin") }.bodyAsText().contains("""name="permissionDeadlineMinutes" min="0" max="1440" value="30""""))
+        suspend fun form(extra: String) = client.post("/dashboard/cloud") {
+            header(HttpHeaders.Cookie, "teamcode_session=admin"); header(HttpHeaders.Origin, "http://localhost")
+            contentType(ContentType.Application.FormUrlEncoded); setBody("csrf=admin-session&pausedRetentionDays=30&failedWorkspaceRetentionDays=7&maxRunning=2&maxRetained=20&transcriptRetentionDays=30$extra")
+        }
+        assertEquals(HttpStatusCode.Found, form("").status)
+        assertEquals(30, settings.settings.permissionDeadlineMinutes, "A form from before the deadline existed keeps it")
+        assertEquals(HttpStatusCode.Found, form("&permissionDeadlineMinutes=").status)
+        assertEquals(0, settings.settings.permissionDeadlineMinutes, "An empty field means no deadline")
     }
 
     @Test fun retentionSettingsArePersistentAdministratorSettings() = testApplication {

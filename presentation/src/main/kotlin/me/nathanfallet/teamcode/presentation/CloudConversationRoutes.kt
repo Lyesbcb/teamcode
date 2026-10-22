@@ -176,11 +176,17 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
             call.refuseOnBehalf()
             val body = call.boundedJson<AnswerCloudPermissionRequest>(64 * 1024)
             val allow = when (body.behavior) { "allow" -> true; "deny" -> false; else -> throw TeamFailure("invalid_permission_answer", 400, "Use behavior allow or deny.") }
-            val answer = PermissionAnswer(body.requestId, allow, body.message, body.answers.orEmpty())
-            // The runner reads this text: the answer exactly as validated, in a fixed shape.
+            val answer = PermissionAnswer(body.requestId, allow, body.message, body.answers.orEmpty().map { QuestionAnswer(it.question, it.options, it.text) })
+            // The runner reads this text: the answer exactly as validated, in a fixed shape (answers by question index).
             val text = buildJsonObject {
                 put("requestId", answer.requestId); put("behavior", body.behavior); answer.message?.let { put("message", it) }
-                if (answer.answers.isNotEmpty()) putJsonObject("answers") { answer.answers.toSortedMap().forEach { (question, value) -> put(question, value) } }
+                if (answer.answers.isNotEmpty()) putJsonArray("answers") {
+                    for (item in answer.answers.sortedBy { it.question }) addJsonObject {
+                        put("question", item.question)
+                        if (item.options.isNotEmpty()) putJsonArray("options") { item.options.forEach { add(it) } }
+                        item.text?.let { put("text", it) }
+                    }
+                }
             }.toString()
             val key = call.clientKey(null)
             call.respondInput(service.answer(call.principal, call.sessionId(), answer, InputRequest(text, false, key, key?.let { digest("permission\n$text") }, null)))
@@ -203,7 +209,7 @@ internal fun Route.cloudRunnerConversationRoutes(channel: CloudRunnerChannel, co
         val body = call.boundedJson<RunnerAgentRequest>(4_096)
         val pod = channel.authenticate(call.token(), body.teamId, body.sessionId, body.epoch)
         val agent = runner.agent(pod.teamId, pod.sessionId, pod.epoch)
-        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = true))
+        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = true, permissionDeadlineMinutes = agent.permissionDeadlineMinutes))
     }
     post(RUNNER_PATH + "events") {
         val body = call.boundedJson<RunnerEventsRequest>(RUNNER_BODY_BYTES)

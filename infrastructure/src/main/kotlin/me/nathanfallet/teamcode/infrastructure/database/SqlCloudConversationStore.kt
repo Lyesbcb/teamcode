@@ -2,8 +2,10 @@ package me.nathanfallet.teamcode.infrastructure.database
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -63,6 +65,23 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
+
+    override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
+        val from = lastSeqOf(sessionId) - window
+        // A range of the primary key (session, seq), newest first: an expiry is seen before the request it closes.
+        val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data).where {
+            (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq greater from) and
+                (CloudSessionEvents.type inList listOf(CloudEventType.PERMISSION_REQUEST.wire, CloudEventType.PERMISSION_EXPIRED.wire))
+        }.orderBy(CloudSessionEvents.seq to SortOrder.DESC)
+        var expired = false
+        for (row in rows) {
+            val data = try { Json.parseToJsonElement(row[CloudSessionEvents.data]) as? JsonObject } catch (_: IllegalArgumentException) { null } ?: continue
+            if ((data["requestId"] as? JsonPrimitive)?.contentOrNull != requestId) continue
+            if (row[CloudSessionEvents.type] == CloudEventType.PERMISSION_EXPIRED.wire) { expired = true; continue }
+            return@query permissionRequestRecord(requestId, data, expired)
+        }
+        null
+    }
 
     override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome = database.query {
         val input = new.input
@@ -367,6 +386,14 @@ private fun readEvent(row: ResultRow) = CloudEvent(
     row[CloudSessionEvents.sessionId], row[CloudSessionEvents.seq], CloudEventType.parse(row[CloudSessionEvents.type]) ?: CloudEventType.STATUS,
     row[CloudSessionEvents.at], row[CloudSessionEvents.epoch], row[CloudSessionEvents.data],
 )
+/** A stored `permission.request`: whether it is a question, and each question's option count when its input was kept. */
+private fun permissionRequestRecord(requestId: String, data: JsonObject, expired: Boolean): PermissionRequestRecord {
+    val questions = ((data["input"] as? JsonObject)?.get("questions") as? JsonArray)?.map { question ->
+        val shape = question as? JsonObject
+        QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true)
+    }
+    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, expired)
+}
 private fun readInput(row: ResultRow) = CloudInput(
     id = row[CloudSessionInputs.id], teamId = row[CloudSessionInputs.teamId], sessionId = row[CloudSessionInputs.sessionId],
     kind = CloudInputKind.parse(row[CloudSessionInputs.kind]) ?: CloudInputKind.MESSAGE,

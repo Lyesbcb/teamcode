@@ -46,15 +46,16 @@ private fun ApiCatalog.cloudAdministration() {
     get("/api/v1/cloud/settings") {
         operationId = "getCloudSettings"; tag(ApiTags.CLOUD_ADMIN)
         summary = "The cloud settings"
-        description = "Retention of paused and failed workspaces and of transcripts, per-member session limits and the " +
-            "transfer policy. Administrators only."
+        description = "Retention of paused and failed workspaces and of transcripts, per-member session limits, the " +
+            "transfer policy and the deadline of cloud agents' permission requests. Administrators only."
         responses { ok<CloudSettingsView>("The settings.") }
     }
     put("/api/v1/cloud/settings") {
         operationId = "saveCloudSettings"; tag(ApiTags.CLOUD_ADMIN)
         summary = "Change the cloud settings"
-        description = "The retention and limit fields are required; an absent transfer field keeps its stored value. " +
-            "`pausedRetentionDays` or `transcriptRetentionDays` set to null keep data indefinitely. Administrators only."
+        description = "The retention and limit fields are required; an absent transfer field or `permissionDeadlineMinutes` keeps its stored value. " +
+            "`pausedRetentionDays` or `transcriptRetentionDays` set to null keep data indefinitely. `permissionDeadlineMinutes` (1 to 1440) denies a " +
+            "cloud agent's permission request nobody answered in time; 0 waits without a deadline. Administrators only."
         body<CloudSettingsView>("The settings.")
         responses {
             ok<CloudSettingsView>("The saved settings.")
@@ -404,9 +405,11 @@ private fun ApiCatalog.cloudConversation() {
         operationId = "answerCloudPermission"; tag(ApiTags.CLOUD_CONVERSATION)
         summary = "Answer a permission request"
         description = "Answers a `permission.request` event of the running agent: `allow` or `deny` the tool use (with a `message` for the agent), " +
-            "or answer a question (`AskUserQuestion`) with `answers` by question text. Delivered before queued messages; never wakes a session. " +
-            "Consumed when the agent took it; rejected with `unknown_permission_request` when that request is no longer open, " +
-            "or `execution_ended` when the agent process that asked has stopped. Requires the `message` permission. Capability `cloud.permissions.v1`."
+            "or answer a question (`AskUserQuestion`) with `answers`, each a question index and the chosen option indexes or a free text. " +
+            "Delivered before queued messages; never wakes a session. Consumed when the agent took it; rejected with `unknown_permission_request` " +
+            "when that request is no longer open, or `execution_ended` when the agent process that asked has stopped. A question needs the " +
+            "`message` permission; a tool use gated by an `ask` rule is approved or denied by the session owner or a cloud administrator only. " +
+            "Capability `cloud.permissions.v1`."
         parameters {
             sessionId()
             headerText("Idempotency-Key", IDEMPOTENCY_TEXT)
@@ -414,9 +417,12 @@ private fun ApiCatalog.cloudConversation() {
         body<AnswerCloudPermissionRequest>("The request id, the behavior and an optional message or answers (at most 64 KiB).")
         responses {
             ok<CloudInputView>("Accepted.", HttpStatusCode.Accepted)
-            badRequest("An invalid answer, key, or `TeamCode-On-Behalf-Of` was sent (`invalid_permission_answer`, `invalid_idempotency_key`, `on_behalf_unsupported`).")
+            badRequest("An invalid answer, key, or `TeamCode-On-Behalf-Of` was sent (`invalid_permission_answer`, `invalid_idempotency_key`, `on_behalf_unsupported`); " +
+                "an index the request does not have, or answers to a tool use, are `invalid_permission_answer` too.")
+            error(HttpStatusCode.Forbidden, "The caller may not send messages (`cloud_permission_denied`), or a tool use is answered by someone other than the owner or an administrator (`permission_answer_denied`).")
             notFound("No such session (`not_found`).")
-            conflict("No agent is running (`nothing_to_answer`), or the session is not running (`session_not_running`).")
+            conflict("No agent is running (`nothing_to_answer`), the session is not running (`session_not_running`), no such request is in the recent " +
+                "transcript (`unknown_permission_request`), or it expired without an answer (`permission_request_expired`).")
             error(HttpStatusCode.UnprocessableEntity, "The key was used with another answer (`idempotency_conflict`).")
             error(HttpStatusCode.PayloadTooLarge, "The body exceeds 64 KiB (`payload_too_large`).")
         }
