@@ -89,6 +89,10 @@ internal class AgentHost(
     private var stopping = false
     /** Deadline timers of open permission requests, by request id, with the process that asked; guarded by [lock]. */
     private val deadlines = mutableMapOf<String, Pair<AgentProcess, Job>>()
+    /** Requests whose answer is being written: their deadline stays until the write succeeds. Under [lock]. */
+    private val writing = mutableSetOf<String>()
+    /** Requests whose deadline passed while their answer was being written: denied at once if that write fails. Under [lock]. */
+    private val dueWhileWriting = mutableSetOf<String>()
     private lateinit var scope: CoroutineScope
 
     /** Runs input delivery and uploads until cancelled or fenced. */
@@ -174,16 +178,18 @@ internal class AgentHost(
                 val child = process ?: return@withLock null
                 val active = adapter ?: return@withLock null
                 // The deadline keeps running until the answer is written: a failed write leaves it as it was.
-                Triple(child, active, active.answer(requestId, allow, message, answers))
+                Triple(child, active, active.answer(requestId, allow, message, answers)).also { if (it.third.lines.isNotEmpty()) writing += requestId }
             } ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, AnswerOutcome.UNKNOWN)
             if (outcome.lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, outcome.refusal ?: AnswerOutcome.UNKNOWN)
             val written = write(child, outcome.lines)
             lock.withLock {
+                writing -= requestId
+                val due = dueWhileWriting.remove(requestId)
                 if (written) deadlines.remove(requestId)?.second?.cancel()
-                // Not written: the request stays open for another answer, with its deadline (rearmed only if it fired meanwhile).
+                // Not written: the request stays open for another answer, with its deadline; one that passed meanwhile denies it now.
                 else if (process === child && outcome.input != null) {
                     active.reopen(requestId, outcome.input)
-                    if (requestId !in deadlines) expireLater(child, active, requestId)
+                    if (due) expireLater(child, active, requestId, delayMillis = 0)
                 }
             }
             return if (written) consumed else unavailable
@@ -266,7 +272,7 @@ internal class AgentHost(
                     else denials += active.answer(requestId, false, UNSEEN_DENIAL, emptyList()).lines
                 }
                 // A request withdrawn or ended with its turn needs no timer any more.
-                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) }
+                if (deadlines.isNotEmpty()) cancelDeadlines(child) { !active.permissionOpen(it) && it !in writing }
                 result.replies + denials
             }
             // Written by another coroutine: this loop must keep reading even while stdin is full.
@@ -298,14 +304,16 @@ internal class AgentHost(
      * With a team deadline, denies the request [requestId] when it is still open after it: the agent reads why, and
      * the transcript gets a `permission.expired` event. Called under [lock].
      */
-    private fun expireLater(child: AgentProcess, active: AgentAdapter, requestId: String) {
+    private fun expireLater(child: AgentProcess, active: AgentAdapter, requestId: String, delayMillis: Long? = null) {
         val minutes = settings?.permissionDeadlineMinutes?.takeIf { it > 0 } ?: return
         deadlines.remove(requestId)?.second?.cancel()
         deadlines[requestId] = child to scope.launch {
-            sleep(minutes * 60_000L)
+            sleep(delayMillis ?: (minutes * 60_000L))
             val message = "No answer within $minutes minute${if (minutes == 1) "" else "s"}: the request was denied."
             val lines = lock.withLock {
                 deadlines.remove(requestId)
+                // An answer being written: denied only if that write fails.
+                if (requestId in writing) { dueWhileWriting += requestId; return@launch }
                 // Answered, withdrawn, ended with its turn, or another process by now: nothing to deny.
                 if (process !== child) return@launch
                 active.answer(requestId, false, message, emptyList()).lines.ifEmpty { return@launch }.also {

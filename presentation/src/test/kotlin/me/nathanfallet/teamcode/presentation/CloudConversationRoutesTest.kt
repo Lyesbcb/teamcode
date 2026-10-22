@@ -271,6 +271,10 @@ class CloudConversationRoutesTest {
                 conversations.requests["old-1"] = PermissionRequestRecord("old-1", question = false, null, PermissionRequestState.EXPIRED, epoch = 1)
                 val expired = answer("colleague", """{"requestId":"old-1","behavior":"allow"}""")
                 assertEquals(HttpStatusCode.Conflict, expired.status, "An expired request was already denied"); assertTrue("permission_request_expired" in expired.bodyAsText())
+                conversations.requests["big-1"] = PermissionRequestRecord("big-1", question = false, null, epoch = 1, inputLeftOut = true)
+                val unseen = answer("colleague", """{"requestId":"big-1","behavior":"allow"}""")
+                assertEquals(HttpStatusCode.BadRequest, unseen.status, "Nobody approves an input nobody could read"); assertTrue("permission_input_unseen" in unseen.bodyAsText())
+                assertEquals(HttpStatusCode.Accepted, answer("colleague", """{"requestId":"big-1","behavior":"deny"}""").status, "but it can be denied")
                 conversations.inputs.values.removeIf { it.kind == CloudInputKind.PERMISSION }
                 val answered = member.answerCloudPermission("s1", AnswerCloudPermissionRequest("req-1", "allow", answers = listOf(CloudQuestionAnswer(1, text = "Purple"), CloudQuestionAnswer(0, listOf(1)))), "answer-1")
                 assertEquals("permission", answered.kind); assertEquals("queued", answered.status); assertFalse(answered.woke)

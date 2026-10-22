@@ -128,6 +128,9 @@ object CloudConversationRules {
             PermissionRequestState.ANSWERED -> throw TeamFailure("permission_request_answered", 409, "This permission request was already answered.")
             PermissionRequestState.ENDED -> throw TeamFailure("permission_request_ended", 409, "The turn of this permission request has ended.")
         }
+        // Nobody may approve what nobody could read: an input too large for the transcript can only be denied.
+        if (answer.allow && request.inputLeftOut)
+            throw TeamFailure("permission_input_unseen", 400, "This request's input was too large to show in the transcript, so it can only be denied.")
         if (!request.question) {
             if (!approver) throw TeamFailure("permission_answer_denied", 403, "Only the session owner or an administrator may approve or deny this tool use.")
             if (answer.answers.isNotEmpty()) throw TeamFailure("invalid_permission_answer", 400, "This request is a tool use, not a question: send no answers.")

@@ -274,7 +274,10 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         const val MAX_PERMISSION_INPUT_BYTES = 15_000
         /** Characters of a left-out input still shown, so whoever decides sees what the tool would do. */
         const val PERMISSION_PREVIEW_CHARS = 2_000
-        /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
+        /**
+         * The other fields of a request event stay short (the description at [PERMISSION_PREVIEW_CHARS]), so the event as a
+         * whole (at most about 15 KB of input or 8 KB of preview, plus 8 KB of description) stays well under the server's 60 KB.
+         */
         const val MAX_PERMISSION_FIELD_CHARS = 200
         /** The server's transcript limits and the reasoning keys it drops. */
         const val MAX_KEPT_DEPTH = CloudTranscriptLimits.MAX_DEPTH

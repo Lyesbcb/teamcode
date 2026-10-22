@@ -86,8 +86,8 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
             // A question is shown by the indexed lines that follow, not as raw JSON.
-            // A question left out of the event shows its preview instead: answering it needs to know what it asks.
-            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + if (data["question"].isTrue()) questions(data["input"]) else ""
+            // An input left out of the event shows its preview instead, and can only be denied (the server refuses allow).
+            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut; too large to approve, deny only)" } ?: ""}".printable().trimEnd() + if (data["question"].isTrue()) questions(data["input"]) else ""
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }

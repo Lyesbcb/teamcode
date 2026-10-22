@@ -187,7 +187,7 @@ class CloudConversationPersistenceTest {
             RunnerEvent(7, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-2","toolName":"Bash","inputTruncated":true,"question":false}"""),
             RunnerEvent(8, CloudEventType.PERMISSION_EXPIRED, """{"requestId":"tool-2","deadlineMinutes":5,"message":"No answer within 5 minutes: the request was denied."}"""),
         ))
-        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1), ra.conversations.permissionRequest(s.id, "tool-2"))
+        assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1, inputLeftOut = true), ra.conversations.permissionRequest(s.id, "tool-2"))
         assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false, "Red or blue?")), PermissionRequestState.ANSWERED, epoch = 1), rb.conversations.permissionRequest(s.id, "req-1"))
         assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1")?.state)
         assertNull(ra.conversations.permissionRequest(s.id, "nobody-asked"))

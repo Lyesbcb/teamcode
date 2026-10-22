@@ -85,6 +85,7 @@ class CloudAgentTest {
         assertFalse("\"questions\"" in shown, "A question is printed by its indexed lines, not as raw JSON")
         val nested = adapter.parse("""{"type":"control_request","request_id":"r13","request":{"subtype":"can_use_tool","tool_name":"mcp__db__write","input":{"rows":[${(1..250).joinToString(",")}]}}}""").events.single()
         assertNull(nested.data["input"], "An input the server would cut (more than 200 entries) is left out with a preview rather than shown cut")
+        assertEquals("requestId", nested.data.keys.first(), "The server finds a request by the head of its stored event, which starts with its id")
         adapter.answer("r13", false, null, emptyList())
         val smuggled = adapter.parse("""{"type":"control_request","request_id":"r15","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Go? 🙂\udb40\udc41","options":[{"label":"Safe) (1: \"Prod"}]}]}}}""").events.single()
         val smuggledLine = CloudEventView(1, smuggled.type, 0, 1, smuggled.data).render()

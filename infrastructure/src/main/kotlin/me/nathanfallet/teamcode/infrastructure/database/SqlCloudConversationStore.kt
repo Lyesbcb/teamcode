@@ -66,8 +66,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
 
-    /** The request [NewInput.permissionCheck] sees, read on its own (tests and diagnostics). */
-    suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
+    /** The request [NewInput.permissionCheck] sees, read on its own (tests). */
+    internal suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
 
     /**
      * Through the index (session, type, seq): the newest of the session's latest requests whose stored event starts
@@ -438,7 +438,8 @@ private fun permissionRequestRecord(requestId: String, data: JsonObject, state: 
         QuestionShape((shape?.get("options") as? JsonArray)?.size ?: 0, (shape?.get("multiSelect") as? JsonPrimitive)?.booleanOrNull == true,
             (shape?.get("question") as? JsonPrimitive)?.contentOrNull)
     }
-    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, state)
+    return PermissionRequestRecord(requestId, (data["question"] as? JsonPrimitive)?.booleanOrNull == true, questions, state,
+        inputLeftOut = (data["inputTruncated"] as? JsonPrimitive)?.booleanOrNull == true || data["input"] !is JsonObject)
 }
 private fun readInput(row: ResultRow) = CloudInput(
     id = row[CloudSessionInputs.id], teamId = row[CloudSessionInputs.teamId], sessionId = row[CloudSessionInputs.sessionId],

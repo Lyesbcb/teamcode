@@ -418,7 +418,8 @@ private fun ApiCatalog.cloudConversation() {
         responses {
             ok<CloudInputView>("Accepted.", HttpStatusCode.Accepted)
             badRequest("An invalid answer, key, or `TeamCode-On-Behalf-Of` was sent (`invalid_permission_answer`, `invalid_idempotency_key`, `on_behalf_unsupported`); " +
-                "an index the request does not have, or answers to a tool use, are `invalid_permission_answer` too.")
+                "an index the request does not have, or answers to a tool use, are `invalid_permission_answer` too; `allow` of a request whose input was " +
+                "too large to show is `permission_input_unseen` (it can only be denied).")
             error(HttpStatusCode.Forbidden, "The caller may not send messages (`cloud_permission_denied`), or a tool use is answered by someone other than the owner or an administrator (`permission_answer_denied`).")
             notFound("No such session (`not_found`).")
             conflict("No agent is running (`nothing_to_answer`), the session is not running (`session_not_running`), no such request is in the recent " +

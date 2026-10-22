@@ -45,7 +45,7 @@ data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(
  * than a tool use gated by an `ask` rule. [questions]: each question's shape, null when the input was left out of the
  * event. [state]: what the later transcript says about it. [epoch]: the execution that asked; another one cannot answer it.
  */
-data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0)
+data class PermissionRequestRecord(val requestId: String, val question: Boolean, val questions: List<QuestionShape>?, val state: PermissionRequestState = PermissionRequestState.OPEN, val epoch: Int = 0, val inputLeftOut: Boolean = false)
 enum class PermissionRequestState {
     /** Nothing closed it yet (the runner may still have, without telling: a withdrawal). */
     OPEN,
