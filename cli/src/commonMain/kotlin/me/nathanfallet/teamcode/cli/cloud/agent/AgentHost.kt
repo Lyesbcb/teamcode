@@ -168,14 +168,22 @@ internal class AgentHost(
             val allow = (answer["behavior"] as? JsonPrimitive)?.contentOrNull == "allow"
             val message = (answer["message"] as? JsonPrimitive)?.contentOrNull
             // Never starts the agent: only the process that asked can take the answer.
-            val (child, outcome) = lock.withLock {
+            val (child, active, outcome) = lock.withLock {
+                // Stopping: the process that asked is going away, so nothing can take the answer any more.
+                if (stopping) return unavailable
                 val child = process ?: return@withLock null
-                val outcome = adapter?.answer(requestId, allow, message, answers) ?: return@withLock null
+                val active = adapter ?: return@withLock null
+                val outcome = active.answer(requestId, allow, message, answers)
                 if (outcome.lines.isNotEmpty()) deadlines.remove(requestId)?.second?.cancel()
-                child to outcome
+                Triple(child, active, outcome)
             } ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, AnswerOutcome.UNKNOWN)
             if (outcome.lines.isEmpty()) return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, outcome.refusal ?: AnswerOutcome.UNKNOWN)
-            return if (write(child, outcome.lines)) consumed else unavailable
+            if (write(child, outcome.lines)) return consumed
+            // Not written: the request stays open for another answer, and its deadline runs again.
+            lock.withLock {
+                if (process === child && outcome.input != null) { active.reopen(requestId, outcome.input); expireLater(child, active, requestId) }
+            }
+            return unavailable
         }
         val text = input.text ?: return RunnerInputAckView(input.id, CloudInputStatuses.REJECTED, "invalid_input")
         val (child, lines) = lock.withLock {

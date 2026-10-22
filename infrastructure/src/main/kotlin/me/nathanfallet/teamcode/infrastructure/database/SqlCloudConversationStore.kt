@@ -66,46 +66,36 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
 
     override suspend fun lastSeq(sessionId: String): Long = database.query { lastSeqOf(sessionId) }
 
-    override suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String): CloudInput? = database.query {
-        CloudSessionInputs.selectAll().where {
-            (CloudSessionInputs.sessionId eq sessionId) and (CloudSessionInputs.authorId eq authorId) and (CloudSessionInputs.clientKey eq clientKey)
-        }.singleOrNull()?.let(::readInput)
-    }
+    override suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? = database.query { findPermissionRequest(sessionId, requestId) }
 
-    override suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord? = database.query {
-        // A request of the current execution is found by the runner's own index (session, epoch, runner seq) among that
-        // execution's latest requests, however many other events followed it; then its closing events are read from
-        // it onwards. An older request (already ended with its execution) is looked for in the last [window] events.
-        val epoch = CloudSessions.select(CloudSessions.currentEpoch).where { CloudSessions.id eq sessionId }.singleOrNull()?.get(CloudSessions.currentEpoch)
-        // The runner writes `requestId` first, so only the start of each stored event is read: never the whole inputs.
+    /**
+     * Through the index (session, type, seq): the newest of the session's latest requests whose stored event starts
+     * with this `requestId` (the runner writes it first, so only that head is read), then the first event of each
+     * closing kind after it. Each query is bounded; none reads another request's input.
+     */
+    private fun findPermissionRequest(sessionId: String, requestId: String): PermissionRequestRecord? {
         val head = CloudSessionEvents.data.substring(1, REQUEST_HEAD_CHARS)
         val expected = "{\"requestId\":" + JsonPrimitive(requestId)
-        val anchor = epoch?.let {
-            CloudSessionEvents.select(CloudSessionEvents.seq, head).where {
-                (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.epoch eq it) and (CloudSessionEvents.type eq CloudEventType.PERMISSION_REQUEST.wire)
-            }.orderBy(CloudSessionEvents.runnerSeq to SortOrder.DESC).limit(MAX_REQUESTS_SCANNED).firstOrNull { row ->
-                row[head].removePrefix(expected).let { rest -> rest.length < row[head].length && (rest.startsWith(",") || rest.startsWith("}")) }
-            }?.get(CloudSessionEvents.seq)
-        }
-        val from = if (anchor != null) anchor - 1 else lastSeqOf(sessionId) - window
-        // A range of the primary key (session, seq), newest first: what closed a request is seen before the request.
-        val rows = CloudSessionEvents.select(CloudSessionEvents.type, CloudSessionEvents.data, CloudSessionEvents.epoch).where {
-            (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq greater from) and
-                (CloudSessionEvents.type inList PERMISSION_LOOKUP_TYPES)
-        }.orderBy(CloudSessionEvents.seq to SortOrder.DESC)
-        var state = PermissionRequestState.OPEN
-        for (row in rows) {
-            val data = jsonObject(row[CloudSessionEvents.data]) ?: continue
-            fun text(name: String) = data.str(name)
-            when (row[CloudSessionEvents.type]) {
-                // The oldest closing event wins: it is the one the agent saw first.
-                CloudEventType.TURN.wire -> if (text("phase") in CloudConversationRules.TURN_END_PHASES) state = PermissionRequestState.ENDED
-                CloudEventType.INPUT.wire -> if (text("requestId") == requestId && text("status") == CloudInputStatus.CONSUMED.wire) state = PermissionRequestState.ANSWERED
-                CloudEventType.PERMISSION_EXPIRED.wire -> if (text("requestId") == requestId) state = PermissionRequestState.EXPIRED
-                else -> if (text("requestId") == requestId) return@query permissionRequestRecord(requestId, data, state).copy(epoch = row[CloudSessionEvents.epoch])
-            }
-        }
-        null
+        val anchor = CloudSessionEvents.select(CloudSessionEvents.seq, head).where {
+            (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.type eq CloudEventType.PERMISSION_REQUEST.wire)
+        }.orderBy(CloudSessionEvents.seq to SortOrder.DESC).limit(MAX_REQUESTS_SCANNED).firstOrNull { row ->
+            row[head].removePrefix(expected).let { rest -> rest.length < row[head].length && (rest.startsWith(",") || rest.startsWith("}")) }
+        }?.get(CloudSessionEvents.seq) ?: return null
+        val asked = CloudSessionEvents.select(CloudSessionEvents.data, CloudSessionEvents.epoch)
+            .where { (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq eq anchor) }.single()
+        val data = jsonObject(asked[CloudSessionEvents.data]) ?: return null
+        fun closing(type: CloudEventType, scanned: Int, closes: (JsonObject) -> Boolean): Long? =
+            CloudSessionEvents.select(CloudSessionEvents.seq, CloudSessionEvents.data).where {
+                (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.type eq type.wire) and (CloudSessionEvents.seq greater anchor)
+            }.orderBy(CloudSessionEvents.seq to SortOrder.ASC).limit(scanned)
+                .firstOrNull { row -> jsonObject(row[CloudSessionEvents.data])?.let(closes) == true }?.get(CloudSessionEvents.seq)
+        // The request's turn ends at the first turn event after it that is an end; the oldest closing event wins (the agent saw it first).
+        val ended = closing(CloudEventType.TURN, 2) { it.str("phase") in CloudConversationRules.TURN_END_PHASES }
+        val answered = closing(CloudEventType.INPUT, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId && it.str("status") == CloudInputStatus.CONSUMED.wire }
+        val expired = closing(CloudEventType.PERMISSION_EXPIRED, MAX_CLOSING_SCANNED) { it.str("requestId") == requestId }
+        val state = listOfNotNull(ended?.let { it to PermissionRequestState.ENDED }, answered?.let { it to PermissionRequestState.ANSWERED }, expired?.let { it to PermissionRequestState.EXPIRED })
+            .minByOrNull { it.first }?.second ?: PermissionRequestState.OPEN
+        return permissionRequestRecord(requestId, data, state).copy(epoch = asked[CloudSessionEvents.epoch])
     }
 
     override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome = database.query {
@@ -126,6 +116,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 return@query InputOutcome.Replayed(readInput(existing))
             }
         }
+        new.permissionCheck?.invoke(AnswerContext(new.permissionRequestId?.let { findPermissionRequest(input.sessionId, it) }, state, desired, session[CloudSessions.currentEpoch]))
         val expected = new.expectedLastEventSeq
         if (expected != null && lastSeqOf(input.sessionId) > expected)
             throw TeamFailure("stale_view", 409, "The transcript has newer events than expectedLastEventSeq. Read them first.")
@@ -398,7 +389,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     private fun lockSession(sessionId: String): ResultRow =
-        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode)
+        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode, CloudSessions.currentEpoch)
             .where { CloudSessions.id eq sessionId }.forUpdate().singleOrNull() ?: throw TeamFailure("not_found", 404, "Cloud session not found.")
 
     private fun ownerChanged() = TeamFailure("session_busy", 409, "The cloud session changed owner. Retry the request.")
@@ -428,9 +419,10 @@ private fun readEvent(row: ResultRow) = CloudEvent(
     row[CloudSessionEvents.sessionId], row[CloudSessionEvents.seq], CloudEventType.parse(row[CloudSessionEvents.type]) ?: CloudEventType.STATUS,
     row[CloudSessionEvents.at], row[CloudSessionEvents.epoch], row[CloudSessionEvents.data],
 )
-private val PERMISSION_LOOKUP_TYPES = listOf(CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED, CloudEventType.INPUT, CloudEventType.TURN).map { it.wire }
-/** How many of the current execution's latest requests an answer is matched against. */
+/** How many of the session's latest requests an answer is matched against. */
 private const val MAX_REQUESTS_SCANNED = 200
+/** How many later `input` or `permission.expired` events are read to find the one that closed a request. */
+private const val MAX_CLOSING_SCANNED = 200
 /** Enough of a stored `permission.request` for its leading `requestId` (at most 128 characters, escaped). */
 private const val REQUEST_HEAD_CHARS = 300
 

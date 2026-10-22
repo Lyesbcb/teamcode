@@ -30,7 +30,7 @@ private fun String.printable(): String = buildString {
     var i = 0
     while (i < this@printable.length) {
         val c = this@printable[i]
-        val low = getOrNull(i + 1)
+        val low = this@printable.getOrNull(i + 1)
         if (c.isHighSurrogate() && low != null && low.isLowSurrogate()) {
             // Supplementary characters are checked by code point: the tag characters and the other invisible ones there.
             val point = 0x10000 + ((c.code - 0xD800) shl 10) + (low.code - 0xDC00)
@@ -82,7 +82,7 @@ internal fun CloudEventView.render(): String {
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
             // A question is shown by the indexed lines that follow, not as raw JSON.
             // A question left out of the event shows its preview instead: answering it needs to know what it asks.
-            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
+            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + if (data["question"].isTrue()) questions(data["input"]) else ""
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }

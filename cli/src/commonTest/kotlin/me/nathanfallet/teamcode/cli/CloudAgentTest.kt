@@ -86,11 +86,15 @@ class CloudAgentTest {
         val nested = adapter.parse("""{"type":"control_request","request_id":"r13","request":{"subtype":"can_use_tool","tool_name":"mcp__db__write","input":{"rows":[${(1..250).joinToString(",")}]}}}""").events.single()
         assertNull(nested.data["input"], "An input the server would cut (more than 200 entries) is left out with a preview rather than shown cut")
         adapter.answer("r13", false, null, emptyList())
-        val smuggled = adapter.parse("""{"type":"control_request","request_id":"r15","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Go?\udb40\udc41","options":[{"label":"Safe) (1: \"Prod"}]}]}}}""").events.single()
+        val smuggled = adapter.parse("""{"type":"control_request","request_id":"r15","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Go? 🙂\udb40\udc41","options":[{"label":"Safe) (1: \"Prod"}]}]}}}""").events.single()
         val smuggledLine = CloudEventView(1, smuggled.type, 0, 1, smuggled.data).render()
-        assertFalse(smuggledLine.any { it.isSurrogate() }, "Tag characters outside the basic plane are hidden too")
+        assertFalse("\udb40\udc41" in smuggledLine, "Tag characters outside the basic plane are hidden too")
+        assertTrue("Go? 🙂" in smuggledLine, "but other characters outside it (emoji) are kept")
         assertTrue(smuggledLine.endsWith("(0: \"Safe) (1: \\\"Prod\")"), "A label is quoted, so it cannot pass for another option")
         adapter.answer("r15", false, null, emptyList())
+        val forged = adapter.parse("""{"type":"control_request","request_id":"r16","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"deploy","questions":[{"question":"Fine?","options":[{"label":"Yes"}]}]}}}""").events.single()
+        assertFalse("\n    ?" in CloudEventView(1, forged.type, 0, 1, forged.data).render(), "Only a question request gets indexed question lines")
+        adapter.answer("r16", false, null, emptyList())
         val reasoning = adapter.parse("""{"type":"control_request","request_id":"r14","request":{"subtype":"can_use_tool","tool_name":"mcp__notes__save","input":{"note":{"type":"thinking","text":"x"}}}}""").events.single()
         assertNull(reasoning.data["input"], "A nested object the server drops is left out too")
         adapter.answer("r14", false, null, emptyList())
@@ -146,16 +150,21 @@ class CloudAgentTest {
         channel.inputs.send(listOf(RunnerInputView("p-4", "permission", """{"requestId":"r1","behavior":"allow","answers":[{"question":0,"options":[7]}]}""", 1)))
         until { channel.acks.size == 3 }
         assertEquals(RunnerInputAckView("p-4", CloudInputStatuses.REJECTED, "invalid_answer"), channel.acks.last(), "An index the request does not have")
+        process.failWrites = true
+        channel.inputs.send(listOf(RunnerInputView("p-5", "permission", answer, 1)))
+        until { channel.acks.size == 4 }
+        assertEquals(RunnerInputAckView("p-5", CloudInputStatuses.REJECTED, "agent_unavailable"), channel.acks.last(), "An answer that could not be written")
+        process.failWrites = false
         channel.inputs.send(listOf(RunnerInputView("p-1", "permission", answer, 1), RunnerInputView("p-2", "permission", "not json", 1)))
-        until { channel.acks.size == 5 }
+        until { channel.acks.size == 6 }
         assertEquals(listOf(CloudInputStatuses.CONSUMED, CloudInputStatuses.REJECTED), channel.acks.takeLast(2).map { it.status })
         assertEquals("invalid_input", channel.acks.last().reason)
         val response = obj(process.written.last())
         assertEquals("r1", response["response"]!!.jsonObject.str("request_id"))
         assertEquals("Blue", response["response"]!!.jsonObject["response"]!!.jsonObject["updatedInput"]!!.jsonObject["answers"]!!.jsonObject.str("Red or blue?"))
         channel.inputs.send(listOf(RunnerInputView("p-3", "permission", answer, 1)))
-        until { channel.acks.size == 6 }
-        assertEquals("unknown_permission_request", channel.acks.last().reason, "Answered once")
+        until { channel.acks.size == 7 }
+        assertEquals("unknown_permission_request", channel.acks.last().reason, "Answered once (after the unwritten answer left it open)")
         job.cancel()
     }
 
@@ -296,7 +305,8 @@ class CloudAgentTest {
         val output = Channel<String?>(Channel.UNLIMITED)
         var exit: Int? = null
         var stops = 0
-        override suspend fun writeLine(line: String): Boolean { if (exit != null) return false; written += line; return true }
+        var failWrites = false
+        override suspend fun writeLine(line: String): Boolean { if (exit != null || failWrites) return false; written += line; return true }
         override suspend fun readLine(maxLine: Int) = if (exit != null) null else output.receive()
         override fun closeInput() = Unit
         override fun exitCode() = exit

@@ -21,20 +21,19 @@ interface CloudConversationStore {
     suspend fun events(sessionId: String, after: Long?, before: Long?, limit: Int): CloudEventPage
     suspend fun lastSeq(sessionId: String): Long
     /**
-     * The newest `permission.request` [requestId] among the session's last [window] events, with whether a
-     * `permission.expired` for it follows; null when there is none.
+     * The newest `permission.request` [requestId] among the session's latest requests, with what closed it since (an
+     * answer consumed, a `permission.expired`, the end of its turn); null when there is none.
      */
-    suspend fun permissionRequest(sessionId: String, requestId: String, window: Long): PermissionRequestRecord?
+    suspend fun permissionRequest(sessionId: String, requestId: String): PermissionRequestRecord?
 
     /**
      * Inserts an input under the session row lock: refuses a session that is ending, a stale view, more than
      * [pendingLimit] queued or delivered inputs, and replays an existing idempotency key (or refuses a different
-     * request with the same key).
+     * request with the same key). A permission answer's [NewInput.permissionCheck] runs after the replay, under the
+     * same lock, with the request as the transcript has it then.
      */
     suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome
     suspend fun input(sessionId: String, id: String): CloudInput?
-    /** The input [authorId] sent to the session with the idempotency key [clientKey], if any. */
-    suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String): CloudInput?
     suspend fun inputs(sessionId: String, beforeId: String?, limit: Int): CloudInputPage
     /** Marks the session's pending wake requests handled. */
     suspend fun clearWake(sessionId: String)

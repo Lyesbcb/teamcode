@@ -99,7 +99,12 @@ data class NewInput(
     val expectedOwnerId: String? = null,
     /** For a permission answer: refused with `409 permission_request_answered` while another answer to this request is pending. */
     val permissionRequestId: String? = null,
+    /** For a permission answer: the rules it must pass, given the session and its request as they are under the lock. */
+    val permissionCheck: ((AnswerContext) -> Unit)? = null,
 )
+
+/** What a permission answer is checked against, read under the session row lock: [request] is null when none was found. */
+data class AnswerContext(val request: PermissionRequestRecord?, val state: CloudSessionState, val desiredState: DesiredState, val currentEpoch: Int)
 sealed interface InputOutcome {
     val input: CloudInput
     data class Accepted(override val input: CloudInput) : InputOutcome
