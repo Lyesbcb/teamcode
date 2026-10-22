@@ -71,7 +71,7 @@ class CloudAgentTest {
 
         val question = adapter.parse("""{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Red or blue?","options":[{"label":"Red"},{"label":"Blue"}]},{"question":"Which sizes?","multiSelect":true,"options":[{"label":"S"},{"label":"M"},{"label":"L"}]}]},"tool_use_id":"t2","requires_user_interaction":true}}""").events.single()
         assertEquals(true, question.data["question"]!!.jsonPrimitive.boolean)
-        assertTrue(CloudEventView(1, question.type, 0, 1, question.data).render().endsWith("\n    ? 0: Red or blue? (0: Red / 1: Blue)\n    ? 1: Which sizes? (0: S / 1: M / 2: L) several"),
+        assertTrue(CloudEventView(1, question.type, 0, 1, question.data).render().endsWith("\n    ? 0: \"Red or blue?\" (0: \"Red\" / 1: \"Blue\")\n    ? 1: \"Which sizes?\" (0: \"S\" / 1: \"M\" / 2: \"L\") several"),
             "Each question and option is printed with the index an answer takes")
         val large = adapter.parse("""{"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"content":"${"x".repeat(30_000)}"}}}""").events.single()
         assertEquals("r9", large.data.str("requestId")); assertNull(large.data["input"]); assertEquals(true, large.data["inputTruncated"]!!.jsonPrimitive.boolean)
@@ -86,6 +86,11 @@ class CloudAgentTest {
         val nested = adapter.parse("""{"type":"control_request","request_id":"r13","request":{"subtype":"can_use_tool","tool_name":"mcp__db__write","input":{"rows":[${(1..250).joinToString(",")}]}}}""").events.single()
         assertNull(nested.data["input"], "An input the server would cut (more than 200 entries) is left out with a preview rather than shown cut")
         adapter.answer("r13", false, null, emptyList())
+        val smuggled = adapter.parse("""{"type":"control_request","request_id":"r15","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Go?\udb40\udc41","options":[{"label":"Safe) (1: \"Prod"}]}]}}}""").events.single()
+        val smuggledLine = CloudEventView(1, smuggled.type, 0, 1, smuggled.data).render()
+        assertFalse(smuggledLine.any { it.isSurrogate() }, "Tag characters outside the basic plane are hidden too")
+        assertTrue(smuggledLine.endsWith("(0: \"Safe) (1: \\\"Prod\")"), "A label is quoted, so it cannot pass for another option")
+        adapter.answer("r15", false, null, emptyList())
         val reasoning = adapter.parse("""{"type":"control_request","request_id":"r14","request":{"subtype":"can_use_tool","tool_name":"mcp__notes__save","input":{"note":{"type":"thinking","text":"x"}}}}""").events.single()
         assertNull(reasoning.data["input"], "A nested object the server drops is left out too")
         adapter.answer("r14", false, null, emptyList())

@@ -138,7 +138,7 @@ teamcode cloud attach SESSION [--tail N] [--read-only] [--no-wake]
 
 `send` retries network failures with the same idempotency key, so a retry never sends twice; `--wait` waits until the message was consumed or rejected. `logs --follow` reconnects like `attach`.
 
-`logs` and `attach` print a tool use as `[permission ID]` with the tool's whole input (or its preview, marked cut), and a question as `[question ID]` followed by one line per question (control, format and separator characters shown as spaces, so agent text cannot rewrite or hide part of the line) with its index and its options' indexes, for example `? 0: Red or blue? (0: Red / 1: Blue)` (`several` when more than one option may be chosen), and an expiry as `[expired ID]`. `answer` takes those indexes: `--answer 0=1` picks `Blue`, `--answer 1=0,2` two options of a multi-select question, `--answer-text 0=Green` a free answer.
+`logs` and `attach` print a tool use as `[permission ID]` with the tool's whole input (or its preview, marked cut), and a question as `[question ID]` followed by one line per question (or by its preview when its input was left out; control, format and separator characters, including invisible ones outside the basic plane, shown as spaces, so agent text cannot rewrite or hide part of the line) with its index and its options' indexes, agent texts quoted so a label cannot pass for more options, for example `? 0: "Red or blue?" (0: "Red" / 1: "Blue")` (`several` when more than one option may be chosen), and an expiry as `[expired ID]`. `answer` takes those indexes: `--answer 0=1` picks `Blue`, `--answer 1=0,2` two options of a multi-select question, `--answer-text 0=Green` a free answer.
 
 ## Event feed
 

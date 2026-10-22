@@ -77,12 +77,14 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         // execution's latest requests, however many other events followed it; then its closing events are read from
         // it onwards. An older request (already ended with its execution) is looked for in the last [window] events.
         val epoch = CloudSessions.select(CloudSessions.currentEpoch).where { CloudSessions.id eq sessionId }.singleOrNull()?.get(CloudSessions.currentEpoch)
+        // The runner writes `requestId` first, so only the start of each stored event is read: never the whole inputs.
+        val head = CloudSessionEvents.data.substring(1, REQUEST_HEAD_CHARS)
+        val expected = "{\"requestId\":" + JsonPrimitive(requestId)
         val anchor = epoch?.let {
-            CloudSessionEvents.select(CloudSessionEvents.seq, CloudSessionEvents.data).where {
+            CloudSessionEvents.select(CloudSessionEvents.seq, head).where {
                 (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.epoch eq it) and (CloudSessionEvents.type eq CloudEventType.PERMISSION_REQUEST.wire)
             }.orderBy(CloudSessionEvents.runnerSeq to SortOrder.DESC).limit(MAX_REQUESTS_SCANNED).firstOrNull { row ->
-                val data = try { Json.parseToJsonElement(row[CloudSessionEvents.data]) as? JsonObject } catch (_: IllegalArgumentException) { null }
-                (data?.get("requestId") as? JsonPrimitive)?.contentOrNull == requestId
+                row[head].removePrefix(expected).let { rest -> rest.length < row[head].length && (rest.startsWith(",") || rest.startsWith("}")) }
             }?.get(CloudSessionEvents.seq)
         }
         val from = if (anchor != null) anchor - 1 else lastSeqOf(sessionId) - window
@@ -93,8 +95,8 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         }.orderBy(CloudSessionEvents.seq to SortOrder.DESC)
         var state = PermissionRequestState.OPEN
         for (row in rows) {
-            val data = try { Json.parseToJsonElement(row[CloudSessionEvents.data]) as? JsonObject } catch (_: IllegalArgumentException) { null } ?: continue
-            fun text(name: String) = (data[name] as? JsonPrimitive)?.contentOrNull
+            val data = jsonObject(row[CloudSessionEvents.data]) ?: continue
+            fun text(name: String) = data.str(name)
             when (row[CloudSessionEvents.type]) {
                 // The oldest closing event wins: it is the one the agent saw first.
                 CloudEventType.TURN.wire -> if (text("phase") in CloudConversationRules.TURN_END_PHASES) state = PermissionRequestState.ENDED
@@ -140,8 +142,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 (CloudSessionInputs.sessionId eq input.sessionId) and (CloudSessionInputs.kind eq CloudInputKind.PERMISSION.wire) and
                     (CloudSessionInputs.status inList listOf(CloudInputStatus.QUEUED.wire, CloudInputStatus.DELIVERED.wire))
             }.limit(CloudConversationRules.MAX_PENDING_PERMISSION_ANSWERS).any { row ->
-                val text = row[CloudSessionInputs.text] ?: return@any false
-                ((try { Json.parseToJsonElement(text) as? JsonObject } catch (_: IllegalArgumentException) { null })?.get("requestId") as? JsonPrimitive)?.contentOrNull == requestId
+                jsonObject(row[CloudSessionInputs.text]).str("requestId") == requestId
             }
             if (answered) throw TeamFailure("permission_request_answered", 409, "This permission request already has an answer on its way to the agent.")
         }
@@ -337,9 +338,9 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             if (input.kind == CloudInputKind.PERMISSION) {
                 // Who answered which request, and how; the answer's texts stay in the input.
                 put("authorId", input.authorId)
-                val answer = input.text?.let { try { Json.parseToJsonElement(it) as? JsonObject } catch (_: IllegalArgumentException) { null } }
-                (answer?.get("requestId") as? JsonPrimitive)?.contentOrNull?.let { put("requestId", it) }
-                (answer?.get("behavior") as? JsonPrimitive)?.contentOrNull?.let { put("behavior", it) }
+                val answer = jsonObject(input.text)
+                answer.str("requestId")?.let { put("requestId", it) }
+                answer.str("behavior")?.let { put("behavior", it) }
             }
         }
         val type = if (status == CloudInputStatus.CONSUMED && input.kind == CloudInputKind.MESSAGE) CloudEventType.USER_MESSAGE else CloudEventType.INPUT
@@ -430,6 +431,12 @@ private fun readEvent(row: ResultRow) = CloudEvent(
 private val PERMISSION_LOOKUP_TYPES = listOf(CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED, CloudEventType.INPUT, CloudEventType.TURN).map { it.wire }
 /** How many of the current execution's latest requests an answer is matched against. */
 private const val MAX_REQUESTS_SCANNED = 200
+/** Enough of a stored `permission.request` for its leading `requestId` (at most 128 characters, escaped). */
+private const val REQUEST_HEAD_CHARS = 300
+
+/** Stored JSON text (an event's data, a permission answer) as an object; null when absent or not an object. */
+private fun jsonObject(text: String?): JsonObject? = text?.let { try { Json.parseToJsonElement(it) as? JsonObject } catch (_: IllegalArgumentException) { null } }
+private fun JsonObject?.str(name: String): String? = (this?.get(name) as? JsonPrimitive)?.contentOrNull
 
 /** A stored `permission.request`: whether it is a question, and each question's option count when its input was kept. */
 private fun permissionRequestRecord(requestId: String, data: JsonObject, state: PermissionRequestState): PermissionRequestRecord {

@@ -297,12 +297,13 @@ internal class AgentHost(
                 deadlines.remove(requestId)
                 // Answered, withdrawn, ended with its turn, or another process by now: nothing to deny.
                 if (process !== child) return@launch
-                active.answer(requestId, false, message, emptyList()).lines.ifEmpty { return@launch }
+                active.answer(requestId, false, message, emptyList()).lines.ifEmpty { return@launch }.also {
+                    // Recorded before the agent reads the denial, so it precedes whatever the agent does next (the end
+                    // of its turn in particular).
+                    enqueue(CloudEventTypes.PERMISSION_EXPIRED, buildJsonObject { put("requestId", requestId); put("deadlineMinutes", minutes); put("message", message) })
+                }
             }
-            // Recorded once the agent has the denial: a process that died meanwhile had nothing left to deny.
-            if (write(child, lines)) lock.withLock {
-                enqueue(CloudEventTypes.PERMISSION_EXPIRED, buildJsonObject { put("requestId", requestId); put("deadlineMinutes", minutes); put("message", message) })
-            }
+            write(child, lines)
         }
     }
 
