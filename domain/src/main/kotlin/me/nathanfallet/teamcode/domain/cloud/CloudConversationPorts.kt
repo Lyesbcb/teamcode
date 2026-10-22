@@ -33,6 +33,8 @@ interface CloudConversationStore {
      */
     suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome
     suspend fun input(sessionId: String, id: String): CloudInput?
+    /** The input [authorId] sent to the session with the idempotency key [clientKey], if any. */
+    suspend fun inputByKey(sessionId: String, authorId: String, clientKey: String): CloudInput?
     suspend fun inputs(sessionId: String, beforeId: String?, limit: Int): CloudInputPage
     /** Marks the session's pending wake requests handled. */
     suspend fun clearWake(sessionId: String)

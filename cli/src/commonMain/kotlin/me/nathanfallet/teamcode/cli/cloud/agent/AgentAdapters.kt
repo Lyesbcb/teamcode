@@ -134,6 +134,19 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     }
 
     /**
+     * Whether the server stores [element] as is: within its depth, entry and key limits and without the reasoning keys
+     * it drops (as keys, or as the `type` of a nested object). Otherwise the event says the input was left out, rather
+     * than showing an approver a silently cut one. Secrets the server masks stay masked for the approver, as everywhere
+     * in the transcript; `allow` still returns the original input.
+     */
+    private fun keptWhole(element: JsonElement, depth: Int): Boolean = when (element) {
+        is JsonObject -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && (depth == 0 || element["type"].string() !in DROPPED_KEYS) &&
+            element.all { (key, value) -> key.length <= 64 && key !in DROPPED_KEYS && keptWhole(value, depth + 1) }
+        is JsonArray -> depth < MAX_KEPT_DEPTH && element.size <= MAX_KEPT_ENTRIES && element.all { keptWhole(it, depth + 1) }
+        else -> true
+    }
+
+    /**
      * Claude Code's answer format: question text to the chosen label, several labels joined with ", " for a
      * multi-select question, or the free text. Null when an index is not in the request.
      */
@@ -196,16 +209,19 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
                 })
             })
             "control_request" -> {
-                val request = value["request"].obj()?.takeIf { it["subtype"].string() == "can_use_tool" }
-                val id = value["request_id"].string()
-                if (request == null || id == null) return AgentOutput()
+                val id = value["request_id"].string() ?: return AgentOutput()
+                // Another control request needs a reply too, or Claude Code would wait for it: refused, since none is relayed.
+                val request = value["request"].obj()?.takeIf { it["subtype"].string() == "can_use_tool" } ?: return AgentOutput(replies = listOf(buildJsonObject {
+                    put("type", "control_response")
+                    putJsonObject("response") { put("subtype", "error"); put("request_id", id); put("error", "This control request is not supported by the TeamCode runner.") }
+                }.toString()))
                 val input = request["input"].obj() ?: JsonObject(emptyMap())
                 permissions[id] = input
                 AgentOutput(listOf(AgentEvent(CloudEventTypes.PERMISSION_REQUEST, buildJsonObject {
                     // The request must stay answerable: an input too large for one event is left out, never the whole event.
                     put("requestId", id); put("toolName", request["tool_name"].string()?.take(MAX_PERMISSION_FIELD_CHARS) ?: "tool")
                     val encoded = input.toString()
-                    if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES) put("input", input)
+                    if (encoded.encodeToByteArray().size <= MAX_PERMISSION_INPUT_BYTES && keptWhole(input, 1)) put("input", input)
                     else { put("inputTruncated", true); put("inputPreview", encoded.take(PERMISSION_PREVIEW_CHARS)) }
                     request["tool_use_id"].string()?.let { put("toolUseId", it.take(MAX_PERMISSION_FIELD_CHARS)) }
                     request["description"].string()?.let { put("description", it.take(PERMISSION_PREVIEW_CHARS)) }
@@ -251,6 +267,10 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
         const val PERMISSION_PREVIEW_CHARS = 2_000
         /** The other fields of a request event stay short, so the event as a whole stays well under the server's limit. */
         const val MAX_PERMISSION_FIELD_CHARS = 200
+        /** The server's transcript limits (depth 16 from the event, 200 entries) and the reasoning keys it drops. */
+        const val MAX_KEPT_DEPTH = 16
+        const val MAX_KEPT_ENTRIES = 200
+        val DROPPED_KEYS = setOf("thinking", "signature", "reasoning", "redacted_thinking")
         val USAGE_FIELDS = listOf(
             "input_tokens" to "inputTokens", "output_tokens" to "outputTokens",
             "cache_creation_input_tokens" to "cacheCreationInputTokens", "cache_read_input_tokens" to "cacheReadInputTokens",

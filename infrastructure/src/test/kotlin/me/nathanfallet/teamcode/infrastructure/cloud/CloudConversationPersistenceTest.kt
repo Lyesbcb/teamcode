@@ -179,6 +179,8 @@ class CloudConversationPersistenceTest {
         for (part in listOf("\"requestId\":\"req-1\"", "\"behavior\":\"allow\"", "\"authorId\":\"${colleague.member.id}\"", "\"kind\":\"permission\""))
             assertTrue(part in answered.data, answered.data)
         assertFalse("Blue" in answered.data, "The answer's texts stay in the input")
+        val retried = rb.conversation.answer(colleague, s.id, PermissionAnswer("req-1", true, null, listOf(QuestionAnswer(0, listOf(1)))), InputRequest(text, false, "answer-1", "a1", null))
+        assertIs<InputOutcome.Replayed>(retried, "A retry with the same key replays the consumed answer"); assertEquals(answer.input.id, retried.input.id)
 
         // The team feed says the session waited for a person, then that the answer reached the agent; never the texts.
         val feed = SqlTeamEventStore(ra.database).read(team, TeamEventAudience(colleague.member.id, sessions = true, runs = false, teamSessions = false, teamRuns = false),
@@ -217,7 +219,8 @@ class CloudConversationPersistenceTest {
         assertEquals(PermissionRequestRecord("tool-2", question = false, questions = null, PermissionRequestState.EXPIRED, epoch = 1), ra.conversations.permissionRequest(s.id, "tool-2", 100))
         assertEquals(PermissionRequestRecord("req-1", question = true, questions = listOf(QuestionShape(2, false, "Red or blue?")), PermissionRequestState.ANSWERED, epoch = 1), rb.conversations.permissionRequest(s.id, "req-1", 100))
         assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 100)?.state)
-        assertNull(ra.conversations.permissionRequest(s.id, "req-1", 3), "Only the recent transcript is searched")
+        assertEquals(PermissionRequestState.OPEN, ra.conversations.permissionRequest(s.id, "tool-1", 0)?.state, "A request of the current execution is found however many events followed it")
+        assertNull(ra.conversations.permissionRequest(s.id, "nobody-asked", 100))
         failure("permission_request_expired") { ra.conversation.answer(colleague, s.id, PermissionAnswer("tool-2", true, null, emptyList()), InputRequest("""{"requestId":"tool-2","behavior":"allow"}""", false, null, null, null)) }
         val denied = ra.conversation.answer(admin, s.id, PermissionAnswer("tool-1", false, "Not today.", emptyList()), InputRequest("""{"requestId":"tool-1","behavior":"deny","message":"Not today."}""", false, null, null, null))
         assertIs<InputOutcome.Accepted>(denied)

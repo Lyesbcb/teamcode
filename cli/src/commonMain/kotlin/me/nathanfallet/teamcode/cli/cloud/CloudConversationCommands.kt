@@ -22,19 +22,42 @@ import me.nathanfallet.teamcode.client.TeamCodeClient
 import me.nathanfallet.teamcode.client.TeamCodeException
 
 private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
-/** Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) become spaces. */
-private fun String.printable() = map { if (it.isISOControl()) ' ' else it }.joinToString("")
+/**
+ * Agent-chosen text shown to whoever decides a request: control characters (escape sequences, carriage returns) and
+ * invisible format characters (bidirectional overrides, zero-width marks, line separators) become spaces.
+ */
+private fun String.printable(): String = buildString {
+    var i = 0
+    while (i < this@printable.length) {
+        val c = this@printable[i]
+        val low = getOrNull(i + 1)
+        if (c.isHighSurrogate() && low != null && low.isLowSurrogate()) {
+            // Supplementary characters are checked by code point: the tag characters and the other invisible ones there.
+            val point = 0x10000 + ((c.code - 0xD800) shl 10) + (low.code - 0xDC00)
+            if (HIDDEN_SUPPLEMENTARY.any { point in it }) append("  ") else append(c).append(low)
+            i += 2; continue
+        }
+        append(if (c.isISOControl() || c.category in HIDDEN || c.isSurrogate()) ' ' else c)
+        i++
+    }
+}
+/** The format characters outside the basic plane (Unicode 15). */
+private val HIDDEN_SUPPLEMENTARY = listOf(0x110BD..0x110BD, 0x110CD..0x110CD, 0x13430..0x1343F, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A, 0xE0000..0xE007F)
+/** Agent text quoted, so a label cannot pass for more options or indexes. */
+private fun String.quoted() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+private fun JsonElement?.isTrue() = (this as? JsonPrimitive)?.booleanOrNull == true
+private val HIDDEN = setOf(CharCategory.FORMAT, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR)
 private fun String.preview(limit: Int) = replace('\n', ' ').let { if (it.length > limit) it.take(limit - 1) + "…" else it }
 
 /**
  * A question request's questions and options in full, each with the index `teamcode cloud answer --answer` takes:
- * `? 0: Red or blue? (0: Red / 1: Blue)`, marked `several` when more than one option may be chosen.
+ * `? 0: "Red or blue?" (0: "Red" / 1: "Blue")`, marked `several` when more than one option may be chosen.
  */
 private fun questions(input: JsonElement?): String = ((input as? JsonObject)?.get("questions") as? JsonArray).orEmpty().withIndex().joinToString("") { (index, element) ->
     val question = element as? JsonObject ?: JsonObject(emptyMap())
-    val options = (question["options"] as? JsonArray).orEmpty().mapIndexed { option, it -> "$option: ${((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull ?: ""}" }
+    val options = (question["options"] as? JsonArray).orEmpty().mapIndexed { option, it -> "$option: ${(((it as? JsonObject)?.get("label") as? JsonPrimitive)?.contentOrNull ?: "").quoted()}" }
     val several = (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
-    "\n    ? $index: " + (question.text("question") ?: "").printable() + (if (options.isEmpty()) "" else " (${options.joinToString(" / ").printable()})") + if (several) " several" else ""
+    "\n    ? $index: " + (question.text("question") ?: "").quoted().printable() + (if (options.isEmpty()) "" else " (${options.joinToString(" / ").printable()})") + if (several) " several" else ""
 }
 
 /** Micro-dollars as `$0.003253`; null for a negative amount, which no runner reports. */
@@ -55,9 +78,11 @@ internal fun CloudEventView.render(): String {
         CloudEventTypes.STATUS -> "[status] " + data.entries.joinToString(", ") { (key, value) -> "$key=${(value as? JsonPrimitive)?.contentOrNull ?: value}" }
         CloudEventTypes.ERROR -> "[error] ${data.text("code") ?: "error"}: ${data.text("message") ?: ""}".trimEnd(' ', ':')
         CloudEventTypes.INPUT -> "[${data.text("kind") ?: "message"} ${data.text("inputId")?.take(8) ?: ""} ${data.text("status") ?: ""}${data.text("reason")?.let { ": $it" } ?: ""}]"
-        CloudEventTypes.PERMISSION_REQUEST -> "[${if ((data["question"] as? JsonPrimitive)?.booleanOrNull == true) "question" else "permission"} ${data.text("requestId") ?: ""}] " +
+        CloudEventTypes.PERMISSION_REQUEST -> "[${if (data["question"].isTrue()) "question" else "permission"} ${data.text("requestId")?.printable() ?: ""}] " +
             // The whole input (bounded by the runner): whoever decides must see everything the tool would do.
-            "${data.text("toolName") ?: "tool"} ${data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
+            // A question is shown by the indexed lines that follow, not as raw JSON.
+            // A question left out of the event shows its preview instead: answering it needs to know what it asks.
+            "${data.text("toolName") ?: "tool"} ${if (data["question"].isTrue() && data["input"] != null) "" else data["input"]?.toString() ?: data.text("inputPreview")?.let { "$it… (cut)" } ?: ""}".printable().trimEnd() + questions(data["input"])
         CloudEventTypes.PERMISSION_EXPIRED -> "[expired ${data.text("requestId") ?: ""}] ${data.text("message") ?: "No answer in time: the request was denied."}".printable()
         else -> "[$type] $data"
     }

@@ -250,7 +250,7 @@ internal object CloudTranscriptSanitizer {
     }
     fun turn(type: CloudEventType, data: JsonObject): TurnMarker? = if (type != CloudEventType.TURN) null else when ((data["phase"] as? JsonPrimitive)?.contentOrNull) {
         "started" -> TurnMarker.STARTED
-        "completed", "interrupted", "failed" -> TurnMarker.ENDED
+        in CloudConversationRules.TURN_END_PHASES -> TurnMarker.ENDED
         else -> null
     }
     fun conversation(type: CloudEventType, data: JsonObject): ConversationResume? = if (type != CloudEventType.STATUS) null

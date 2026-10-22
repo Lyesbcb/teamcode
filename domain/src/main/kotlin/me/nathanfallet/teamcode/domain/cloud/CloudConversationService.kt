@@ -97,6 +97,12 @@ class CloudConversationService(
     suspend fun answer(principal: Principal, id: String, answer: PermissionAnswer, request: InputRequest): InputOutcome {
         CloudConversationRules.validatePermissionAnswer(answer)
         val session = open(principal, id, CloudPermission.MESSAGE)
+        // A retry of an answer already taken replays it, before the checks its own consumption would now fail.
+        request.clientKey?.let { key -> store.inputByKey(session.id, principal.member.id, key) }?.let { existing ->
+            if (existing.requestDigest != request.requestDigest || existing.kind != CloudInputKind.PERMISSION)
+                throw TeamFailure("idempotency_conflict", 422, "This idempotency key was already used with a different message.")
+            return InputOutcome.Replayed(existing)
+        }
         if (session.state != READY && session.state != ACTIVE)
             throw TeamFailure("nothing_to_answer", 409, "The session has no running agent waiting for an answer.")
         val asked = store.permissionRequest(session.id, answer.requestId, CloudConversationRules.PERMISSION_LOOKUP_EVENTS)
