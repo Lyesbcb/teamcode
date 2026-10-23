@@ -1,5 +1,11 @@
 # Implementation status
 
+## Remote sessions in the companion app (2026-10-23)
+
+Third step of remote sessions, with Nathan's approval beyond the V1 scope (23/10, in #105): the companion app tells remote sessions from cloud ones. From a server that announces `cloud.sessions.remote.v1` it asks the list and the feed for both kinds and offers a cloud / remote / all filter; cards and the session header say "Cloud" or "Remote · <device>", a device that went quiet (`host_offline`) is shown as offline in plain words, and a remote session offers no Resume (only its device resumes it; a message asks it to) and never a transfer. An older server is asked exactly as before. Details in [companion.md](companion.md#app).
+
+Evidence: `RemoteSessionRepositoryTest`, `SessionUseCasesTest`, `SessionsViewModelTest`, `SessionsScreenTest` and `SessionScreenTest` (desktop target); `:companion:jvmTest`, `:companion:testAndroidHostTest`, `:companion:compileKotlinIosSimulatorArm64` and `:companion-android:assembleDebug` pass locally.
+
 ## Companion app session transfers (2026-10-23)
 
 The [companion app](companion.md#app) transfers cloud sessions (`cloud.transfer.v1`), as `teamcode cloud transfer` and `cloud transfers` do: "Transfer…" in a cloud session's menu for its owner and administrators, never on a remote session or one being prepared, ended or already changing owner; an administrator searches a member and transfers at once, optionally resuming it for them and pausing without waiting for the running turn; a member names the recipient by ID and sends an offer (the server lists members to administrators only). A Transfers screen, from the Sessions tab, lists transfers to and from the member, with accept, decline and withdraw (and cancel for administrators), and every refusal in plain words, including each failed check of an ineligible recipient: the typed client now keeps the problem codes of `422 recipient_ineligible` (`TeamCodeException.problems`, validated codes only, never the rest of the message). No server change.
