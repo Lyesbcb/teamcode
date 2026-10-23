@@ -98,6 +98,9 @@ internal fun CloudEventView.render(): String {
     return "$time #$seq ${if (data.text("parentToolUseId") != null) "  ↳ " else ""}${body.lines().joinToString("\n") { it.printable() }}"
 }
 
+/** What `logs` and `attach` print for an event: nothing for live text deltas, whose final `message.agent` follows. */
+internal fun CloudEventView.printed(): String? = if (type == CloudEventTypes.AGENT_MESSAGE_DELTA) null else render()
+
 private fun CloudInputView.line() = listOfNotNull(id, kind, status, reason, if (woke) "woke the session" else null).joinToString("\t")
 
 internal class CloudLogs : SuspendingCliktCommand(name = "logs") {
@@ -110,7 +113,7 @@ internal class CloudLogs : SuspendingCliktCommand(name = "logs") {
     override suspend fun run() {
         if (tail !in 0..10_000) throw UsageError("Use --tail between 0 and 10000.")
         sdk(loadConfig()).use { client ->
-            val print: (CloudEventView) -> Unit = { echo(if (json) Serialization.json.encodeToString(it) else it.render()) }
+            val print: (CloudEventView) -> Unit = { event -> (if (json) Serialization.json.encodeToString(event) else event.printed())?.let { echo(it) } }
             var cursor = after ?: (client.cloudEvents(id, after = 0, limit = 1).lastSeq - tail).coerceAtLeast(0)
             while (true) {
                 val page = client.cloudEvents(id, after = cursor, limit = 200)
@@ -241,7 +244,7 @@ internal class CloudAttach : SuspendingCliktCommand(name = "attach") {
             var cursor = (last - tail).coerceAtLeast(0)
             while (cursor < last) {
                 val page = client.cloudEvents(id, after = cursor, limit = 200)
-                page.events.forEach { echo(it.render()) }
+                page.events.forEach { event -> event.printed()?.let { echo(it) } }
                 cursor = page.events.lastOrNull()?.seq ?: break
             }
             // False when the transcript stopped on an event this version cannot read: detach, then exit 1.
@@ -262,7 +265,7 @@ internal class CloudAttach : SuspendingCliktCommand(name = "attach") {
                             catch (_: Exception) { lease }
                     }
                 }
-                val follow = launch { readable = followEvents(client, id, cursor, { echo(it.render()) }, notice) }
+                val follow = launch { readable = followEvents(client, id, cursor, { event -> event.printed()?.let { echo(it) } }, notice) }
                 // Not a child of this scope: a blocked stdin read cannot be cancelled and must not hold the detach.
                 val input = CoroutineScope(Dispatchers.Default).launch {
                     while (isActive) {

@@ -82,7 +82,17 @@ data class CloudSessionView(
     /** The accepted transfer the session is moving toward (`cloud.transfer.v1`); null otherwise. */
     val transferId: String? = null,
     val environment: CloudEnvironmentView = CloudEnvironmentView(),
+    /** Set while the agent waits for a person (`cloud.sessions.waiting.v1`); null when nothing waits. */
+    val waiting: CloudWaitingView? = null,
 )
+/**
+ * What the agent of a session waits for: the open `permission.request` at [eventSeq] in its transcript, since [since]
+ * (server time, milliseconds). [reason] is `permission` (a tool use to approve) or `question` (a question to answer);
+ * [requestId] is what `POST /cloud/sessions/{id}/permissions` takes, left out when the runner sent one it would refuse.
+ * When several requests are open, the most recent one.
+ */
+@Serializable
+data class CloudWaitingView(val reason: String, val requestId: String? = null, val since: Long, val eventSeq: Long)
 @Serializable
 data class CloudSessionPageView(val sessions: List<CloudSessionView>, val nextBefore: String? = null)
 
