@@ -177,7 +177,7 @@ teamcode cloud attach SESSION [--tail N] [--read-only] [--no-wake]
 
 | Event (`event:` field) | When | `data` (besides `sessionId` or `runId`) |
 | --- | --- | --- |
-| `cloud.session.created` | A session was created | `name`, `state` |
+| `cloud.session.created` | A session was created | `name`, `state`, `kind` (`cloud` or `remote`), `hostDeviceId` for a remote session; every session event carries the last two |
 | `cloud.session.paused` | It reached `paused` | `state`, `previousState`, `reason` (`paused`, `idle_paused`, ...) |
 | `cloud.session.woken` | A message asked a paused session to wake up | `state`, `reason` |
 | `cloud.session.resumed` | A resuming session is `ready` again | `state`, `previousState` |
@@ -198,7 +198,7 @@ Each frame is `id: <seq>`, `event: <type>`, `data: <TeamEventView>` (`seq`, `typ
 
 ## Storage
 
-Migrations `V20261020100009*`: `cloud_settings.transcript_retention_days`, `cloud_access_policies`, `cloud_session_inputs` (text as `MEDIUMTEXT`, unique `(session, author, client key)`), `cloud_session_events` (primary key `(session_id, seq)`, unique `(session_id, epoch, runner_seq)` for deduplication) and `cloud_session_attachments`, and `cloud_session_transcripts`, the per-session cursors (last sequence, runner sequence of the latest execution) that the retention purge never deletes, so numbering never restarts. Writes take the session row lock, so sequences stay dense across replicas. Migration `V20261023220000` adds the `awaiting_*` columns of `cloud_sessions` that hold [`waiting`](#a-session-waiting-for-a-person).
+Migrations `V20261020100009*`: `cloud_settings.transcript_retention_days`, `cloud_access_policies`, `cloud_session_inputs` (text as `MEDIUMTEXT`, unique `(session, author, client key)`), `cloud_session_events` (primary key `(session_id, seq)`, unique `(session_id, epoch, runner_seq)` for deduplication) and `cloud_session_attachments`, and `cloud_session_transcripts`, the per-session cursors (last sequence, runner sequence of the latest execution) that the retention purge never deletes, so numbering never restarts. Writes take the session row lock, so sequences stay dense across replicas. Migration `V20261023230000` adds the `awaiting_*` columns of `cloud_sessions` that hold [`waiting`](#a-session-waiting-for-a-person).
 
 ## Known limits
 

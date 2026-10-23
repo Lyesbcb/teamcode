@@ -148,10 +148,19 @@ object CloudSessions : Table("cloud_sessions") {
     val awaitingSince = long("awaiting_since").nullable()
     val awaitingEventSeq = long("awaiting_event_seq").nullable()
     val awaitingEpoch = integer("awaiting_epoch").nullable()
+    /** `cloud` (a pod) or `remote` (a member's device); fixed at creation. */
+    val kind = varchar("kind", 16).default("cloud")
+    /** The device a remote session runs on; null for cloud sessions. */
+    val hostDeviceId = optReference("host_device_id", Devices.id, onDelete = ReferenceOption.NO_ACTION, onUpdate = ReferenceOption.NO_ACTION, fkName = "cloud_sessions_host_device")
+    /** The last segment of a remote session's directory, never its full path. */
+    val hostDirectoryName = varchar("host_directory_name", 255).nullable()
     override val primaryKey = PrimaryKey(id)
     init {
         index("cloud_session_owner", false, teamId, ownerId, createdAt)
         index("cloud_session_team", false, teamId, createdAt)
+        // A list of one kind reads these instead of filtering the rows of the other kind after the lookup.
+        index("cloud_session_owner_kind", false, teamId, ownerId, kind, createdAt)
+        index("cloud_session_team_kind", false, teamId, kind, createdAt)
         index("cloud_session_due", false, reconcileAfter)
         index("cloud_session_cluster_waiting", false, clusterId, waitingSince)
     }

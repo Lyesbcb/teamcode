@@ -10,6 +10,18 @@ enum class CloudSessionState(val wire: String) {
     val terminal get() = this == TERMINATED || this == FAILED
     companion object { fun parse(value: String) = entries.single { it.wire == value } }
 }
+/**
+ * Where a session's agent runs: `cloud` in a pod the server starts, `remote` on a member's own device (started by the
+ * desktop app or the CLI). Fixed at creation.
+ */
+enum class CloudSessionKind(val wire: String) {
+    CLOUD("cloud"), REMOTE("remote");
+    companion object { fun parse(value: String) = entries.single { it.wire == value } }
+}
+/** The device a remote session runs on; [device] is null once the device was removed or when it was not read with the session. */
+data class CloudSessionHost(val deviceId: String?, val directoryName: String?, val device: HostDevice? = null)
+/** What a client shows about a host device: its name and, once reported, its operating system. */
+data class HostDevice(val name: String, val platform: String?, val osVersion: String?)
 enum class DesiredState(val wire: String) {
     RUNNING("running"), PAUSED("paused"), TERMINATED("terminated");
     companion object { fun parse(value: String) = entries.single { it.wire == value } }
@@ -110,6 +122,9 @@ data class CloudSession(
      * the conversation store writes it. [waitingForHuman] tells whether it still holds.
      */
     val humanWait: CloudHumanWait? = null,
+    val kind: CloudSessionKind = CloudSessionKind.CLOUD,
+    /** Set for remote sessions only. */
+    val host: CloudSessionHost? = null,
 ) {
     /** Whether a permission answer can reach the agent now: `ready` or `active`, desired running. */
     val takesAnswers: Boolean get() = desiredState == DesiredState.RUNNING && (state == CloudSessionState.READY || state == CloudSessionState.ACTIVE)
@@ -258,6 +273,8 @@ data class CloudSessionQuery(
     val labels: Map<String, String> = emptyMap(),
     val beforeId: String? = null,
     val limit: Int = 50,
+    /** Empty: every kind. */
+    val kinds: Set<CloudSessionKind> = emptySet(),
 )
 data class CloudSessionPage(val sessions: List<CloudSession>, val nextBeforeId: String?)
 

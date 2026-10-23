@@ -84,6 +84,27 @@ data class CloudSessionView(
     val environment: CloudEnvironmentView = CloudEnvironmentView(),
     /** Set while the agent waits for a person (`cloud.sessions.waiting.v1`); null when nothing waits. */
     val waiting: CloudWaitingView? = null,
+    /** `cloud` (a pod started by the server) or `remote` (a member's device); a server without this field has cloud sessions only. */
+    val kind: String = CloudSessionKinds.CLOUD,
+    /** Where a remote session runs; null for cloud sessions. */
+    val host: CloudSessionHostView? = null,
+)
+object CloudSessionKinds {
+    const val CLOUD = "cloud"
+    const val REMOTE = "remote"
+}
+/**
+ * The device of a remote session. [deviceId] is null once the device was removed; [deviceName], [platform] and
+ * [osVersion] describe the device as it is now ([platform]: `macos`, `windows`, `linux`, `ios` or `android`, null
+ * until the installation reported it). [directoryName] is the last segment of the session's directory, never its path.
+ */
+@Serializable
+data class CloudSessionHostView(
+    val deviceId: String? = null,
+    val deviceName: String? = null,
+    val platform: String? = null,
+    val osVersion: String? = null,
+    val directoryName: String? = null,
 )
 /**
  * What the agent of a session waits for: the open `permission.request` at [eventSeq] in its transcript, since [since]
