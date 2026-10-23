@@ -63,7 +63,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
                 CloudEventType.TURN -> turnEvent(sessionId, owner, seq, data, now)
                 CloudEventType.PERMISSION_EXPIRED -> expiredEvent(sessionId, owner, seq, data, now)
                 else -> waitingEvent(sessionId, owner, seq, data, now)
-            }
+            }?.ofKind(session)
         })
         RunnerEventsAck(through, last)
     }
@@ -311,7 +311,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             val wait = answers.fold(waited) { current, answer -> closeWait(sessionId, current, jsonObject(answer.text).str("requestId")) }
             if (wait != waited) saveHumanWait(sessionId, wait)
             // Last, so the team's cursor lock is taken after every other write of this transaction.
-            publishTeamEvents(teamId, answers.map { answeredEvent(sessionId, session[CloudSessions.ownerId], it, now) })
+            publishTeamEvents(teamId, answers.map { answeredEvent(sessionId, session[CloudSessions.ownerId], it, now).ofKind(session) })
         }
     }
 
@@ -461,6 +461,9 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         }
     }
 
+    /** The session's kind on its feed events, so the feed carries a remote session's only to clients that ask for them. */
+    private fun PendingTeamEvent.ofKind(session: ResultRow) = copy(data = JsonObject(data + ("kind" to JsonPrimitive(session[CloudSessions.kind]))))
+
     private val FEED_TYPES = setOf(CloudEventType.TURN, CloudEventType.PERMISSION_REQUEST, CloudEventType.PERMISSION_EXPIRED)
 
     /** `cloud.turn` in the team feed: the phase and where to read the transcript, never its text. Called under the session row lock. */
@@ -518,7 +521,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
     }
 
     private fun lockSession(sessionId: String): ResultRow =
-        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode, CloudSessions.currentEpoch,
+        CloudSessions.select(CloudSessions.id, CloudSessions.teamId, CloudSessions.ownerId, CloudSessions.state, CloudSessions.desiredState, CloudSessions.blockedCode, CloudSessions.currentEpoch, CloudSessions.kind,
             CloudSessions.awaitingReason, CloudSessions.awaitingRequestId, CloudSessions.awaitingSince, CloudSessions.awaitingEventSeq, CloudSessions.awaitingEpoch)
             .where { CloudSessions.id eq sessionId }.forUpdate().singleOrNull() ?: throw TeamFailure("not_found", 404, "Cloud session not found.")
 

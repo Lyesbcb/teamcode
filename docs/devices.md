@@ -20,7 +20,7 @@ Authentication sessions are login credentials. They are separate from agent conv
 
 ## Installation identity and registration
 
-On password login, the CLI creates a random UUID in `$XDG_CONFIG_HOME/teamcode/installation-id`, falling back to `~/.config/teamcode/installation-id`. It is non-secret and survives logout and server changes. The existing `config.json` still contains only the server origin and revocable access token; logout removes that credential file. Neither file contains a provider credential or the user's password.
+On password login, the CLI creates a random UUID in `$XDG_CONFIG_HOME/teamcode/installation-id`, falling back to `~/.config/teamcode/installation-id`. It is non-secret and survives logout and server changes. The existing `config.json` still contains only the server origin and revocable access token; logout removes that credential file. Neither file contains a provider credential or the user's password. Login, logout and `teamcode configure` change `config.json` under the advisory lock `config.lock` in the same directory (an empty file, never deleted; a command waits up to 10 seconds for another, then refuses). Login revokes the session its new configuration replaced on the same server, so two sign-ins, even concurrent ones, leave no orphan session; logout removes the file only if it still holds the session it revoked. The format, the paths, the private writes and the lock live in the `:config` module, so the desktop app reads and writes the same files with the same code.
 
 The identity is published completely before another process can read it, without replacing an existing identity. Concurrent first logins use the same identifier. Files use owner-only permissions/DACLs; malformed or symbolic-link identity files are rejected without overwriting them. Native creation extends the same private-file publication scheme used for configuration: a synced temporary file, then a no-replacement link on POSIX or no-replacement move on Windows. JVM tests use the corresponding filesystem primitive. Existing configuration writes retain atomic replacement.
 
@@ -30,7 +30,7 @@ A device is a logical installation, not hardware attestation. Copying a configur
 
 **Operating system.** A login may also send `platform` (`macos`, `windows`, `linux`, `ios` or `android`) and `osVersion` (1 to 64 printable characters, only with a platform; otherwise `400 invalid_platform` or `invalid_os_version`). They are recorded on the device and returned by the device API as `platform` and `osVersion`, so a client can say which machine a [remote session](cloud-sessions.md#create-request-and-view) runs on. A login without them, from an older client, keeps what was recorded before. The native CLI sends its platform; existing devices show none until their next login.
 
-Removing a device keeps the remote sessions that ran on it, with their transcript, but without a host device.
+Removing a device terminates the remote sessions that ran on it (`terminated_reason = device_removed`); they keep their transcript, without a host device, and their directory on the machine is never touched.
 
 ## Shared persistence and revocation
 
