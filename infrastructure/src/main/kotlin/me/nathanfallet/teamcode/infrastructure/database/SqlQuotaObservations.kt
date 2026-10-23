@@ -61,6 +61,7 @@ internal class SqlQuotaObservations(private val database: Database) {
                 it[sampleMinute] = minute
             }
         }
+        refreshNextReset(accountId, now)
         val binding = update.modelLimit?.takeIf { codex && validModel(it.model) && validLimit(it.limit) }
         if (binding != null) {
             val model = binding.model.lowercase()
@@ -88,3 +89,11 @@ internal fun readQuotaModelLimits(team: String): Map<String, Map<String, String>
         .where { (Accounts.teamId eq team) and (Accounts.provider eq "codex") }
         .groupBy { it[QuotaModelLimits.accountId] }
         .mapValues { (_, rows) -> rows.associate { it[QuotaModelLimits.modelName] to it[QuotaModelLimits.limitSlug] } }
+
+/** Keeps `accounts.next_reset_at` equal to the earliest still-future reset of a shared window; call inside a transaction. */
+internal fun refreshNextReset(accountId: String, now: Long) {
+    val earliest = QuotaWindows.select(QuotaWindows.resetsAt).where {
+        (QuotaWindows.accountId eq accountId) and (QuotaWindows.windowName notLike "model:%") and (QuotaWindows.resetsAt greater now)
+    }.mapNotNull { it[QuotaWindows.resetsAt] }.minOrNull() ?: NO_KNOWN_RESET
+    Accounts.update({ (Accounts.id eq accountId) and (Accounts.nextResetAt neq earliest) }) { it[nextResetAt] = earliest }
+}
