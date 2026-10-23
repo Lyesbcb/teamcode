@@ -343,15 +343,20 @@ internal class LiveText(private val now: () -> Long) {
     private val blocks = mutableMapOf<Pair<String, Int>, Block>()
     /** The text blocks streaming now, by API message id: the block a single-block `assistant` line ends. */
     private val open = mutableMapOf<String, Int>()
+    /** The message streaming now, by `parent_tool_use_id` (null for the main agent), from its `message_start`. */
+    private val current = mutableMapOf<String?, String>()
 
     fun parse(line: JsonObject): AgentEvent? {
         val event = line["event"].obj() ?: return null
-        val message = line["api_message_id"].string() ?: return null
+        val parent = line["parent_tool_use_id"].string()
+        if (event["type"].string() == "message_start") event["message"].obj()?.get("id").string()?.let { current[parent] = it }
+        // Claude Code 2.1.309 names the message on every line; the id of its `message_start` covers a version that does not.
+        val message = line["api_message_id"].string() ?: current[parent] ?: return null
         val index = (event["index"] as? JsonPrimitive)?.intOrNull ?: return null
         val key = message to index
         when (event["type"].string()) {
             "content_block_start" -> if (event["content_block"].obj()?.get("type").string() == "text") {
-                blocks[key] = Block(line["parent_tool_use_id"].string(), now()); open[message] = index
+                blocks[key] = Block(parent, now()); open[message] = index
             }
             "content_block_delta" -> {
                 val delta = event["delta"].obj()?.takeIf { it["type"].string() == "text_delta" } ?: return null
@@ -374,7 +379,7 @@ internal class LiveText(private val now: () -> Long) {
         return index
     }
 
-    fun clear() { blocks.clear(); open.clear() }
+    fun clear() { blocks.clear(); open.clear(); current.clear() }
 
     private fun send(key: Pair<String, Int>, block: Block): AgentEvent? {
         if (block.held.isEmpty()) return null

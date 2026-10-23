@@ -329,6 +329,9 @@ class CloudConversationPersistenceTest {
         // A request open when a pause is asked: the runner denies it while draining, so the pause write ends the wait.
         rb.agent.events(team, s.id, 1, listOf(RunnerEvent(19, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-5","toolName":"Bash","input":{},"question":false}""")))
         assertEquals("tool-5", ra.store.find(team, s.id)!!.waitingForHuman?.requestId)
+        // An id no member could answer with: the runner denies that request at once, so it never shows.
+        rb.agent.events(team, s.id, 1, listOf(RunnerEvent(20, CloudEventType.PERMISSION_REQUEST, """{"requestId":"bad id","toolName":"Bash","input":{},"question":false}""")))
+        assertEquals("tool-5", ra.store.find(team, s.id)!!.waitingForHuman?.requestId, "A request nobody can answer leaves the wait as it was")
 
         // Pausing: a message sent now wakes the session at once; with the checkpoint already taken, it resumes as soon
         // as the pause completes.
@@ -336,7 +339,7 @@ class CloudConversationPersistenceTest {
         assertNull(ra.store.find(team, s.id)!!.humanWait, "Asking for a pause cleared the wait in the same write")
         pass(ra)
         assertEquals(PAUSING, ra.store.find(team, s.id)!!.state)
-        rb.agent.events(team, s.id, 1, listOf(RunnerEvent(20, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-6","toolName":"Bash","input":{},"question":false}""")))
+        rb.agent.events(team, s.id, 1, listOf(RunnerEvent(21, CloudEventType.PERMISSION_REQUEST, """{"requestId":"tool-6","toolName":"Bash","input":{},"question":false}""")))
         assertNull(ra.store.find(team, s.id)!!.humanWait, "A request raised while pausing (the runner denies it) never shows as waiting")
         assertEquals(emptyList(), ra.agent.inputs(team, s.id, 1, 0), "A pausing session receives no new input")
         val polled = ra.agent.poll(team, s.id, 1, 20_000, "running")

@@ -46,7 +46,7 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             if (event.type in FEED_TYPES) feed += Triple(last, event.type, event.data)
             // The wait follows the transcript event by event, so it is exact whatever the batch holds.
             wait = when {
-                event.type == CloudEventType.PERMISSION_REQUEST -> if (answerable) humanWait(jsonObject(event.data), now, last, epoch) else wait
+                event.type == CloudEventType.PERMISSION_REQUEST -> (if (answerable) humanWait(jsonObject(event.data), now, last, epoch) else null) ?: wait
                 event.turn == TurnMarker.ENDED -> null // Every request of the turn ended with it.
                 event.type == CloudEventType.PERMISSION_EXPIRED -> closeWait(sessionId, wait, jsonObject(event.data).str("requestId"))
                 else -> wait
@@ -127,10 +127,14 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
             .minByOrNull { it.first }?.second ?: PermissionRequestState.OPEN
     }
 
-    /** The wait a stored `permission.request` sets: why, which request (when a member can answer with its id), since when. */
-    private fun humanWait(request: JsonObject?, now: Long, seq: Long, epoch: Int) = CloudHumanWait(
-        if (request.str("question") == "true") CloudHumanWait.Reason.QUESTION else CloudHumanWait.Reason.PERMISSION,
-        request.str("requestId")?.takeIf(CloudConversationRules::isPermissionRequestId), now, seq, epoch)
+    /**
+     * The wait a stored `permission.request` sets: why, which request, since when. None for an id no member could
+     * answer with: the runner denies such a request at once, so nobody is waited for.
+     */
+    private fun humanWait(request: JsonObject?, now: Long, seq: Long, epoch: Int): CloudHumanWait? {
+        val requestId = request.str("requestId")?.takeIf(CloudConversationRules::isPermissionRequestId) ?: return null
+        return CloudHumanWait(if (request.str("question") == "true") CloudHumanWait.Reason.QUESTION else CloudHumanWait.Reason.PERMISSION, requestId, now, seq, epoch)
+    }
 
     /**
      * The wait once the request [requestId] was answered or expired: unchanged unless it is the one shown, else the
@@ -148,12 +152,16 @@ class SqlCloudConversationStore(private val database: Database) : CloudConversat
         for (row in earlier) {
             if (row[CloudSessionEvents.epoch] != wait.epoch) return null // Another execution's requests ended with it.
             val seq = row[CloudSessionEvents.seq]
-            // A request whose id no member could answer with is never answered: only its turn ends it.
-            when (requestState(sessionId, seq, requestHeadId(row[head]) ?: "")) {
+            fun asked() = CloudSessionEvents.select(CloudSessionEvents.data, CloudSessionEvents.at)
+                .where { (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq eq seq) }.single()
+            // The runner writes `requestId` first; a head without it is read whole (by primary key) rather than guessed.
+            val id = requestHeadId(row[head]) ?: asked().let { jsonObject(it[CloudSessionEvents.data]).str("requestId")?.takeIf(CloudConversationRules::isPermissionRequestId) }
+                // An id no member could answer with: the runner denied that request at once, it never waited.
+                ?: continue
+            when (requestState(sessionId, seq, id)) {
                 PermissionRequestState.OPEN -> {
-                    val asked = CloudSessionEvents.select(CloudSessionEvents.data, CloudSessionEvents.at)
-                        .where { (CloudSessionEvents.sessionId eq sessionId) and (CloudSessionEvents.seq eq seq) }.single()
-                    return humanWait(jsonObject(asked[CloudSessionEvents.data]), asked[CloudSessionEvents.at], seq, wait.epoch)
+                    val open = asked()
+                    return humanWait(jsonObject(open[CloudSessionEvents.data]), open[CloudSessionEvents.at], seq, wait.epoch)
                 }
                 PermissionRequestState.ENDED -> return null
                 PermissionRequestState.ANSWERED, PermissionRequestState.EXPIRED -> continue

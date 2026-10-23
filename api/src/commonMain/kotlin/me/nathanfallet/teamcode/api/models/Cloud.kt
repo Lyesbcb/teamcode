@@ -88,7 +88,8 @@ data class CloudSessionView(
 /**
  * What the agent of a session waits for: the open `permission.request` at [eventSeq] in its transcript, since [since]
  * (server time, milliseconds). [reason] is `permission` (a tool use to approve) or `question` (a question to answer);
- * [requestId] is what `POST /cloud/sessions/{id}/permissions` takes, left out when the runner sent one it would refuse.
+ * [requestId] is what `POST /cloud/sessions/{id}/permissions` takes: always present in this version (a request with an id
+ * that route would refuse is denied by the runner at once and never shows), optional for later reasons to wait.
  * When several requests are open, the most recent one.
  */
 @Serializable

@@ -80,7 +80,7 @@ When the server advertises `cloud.transcript.live.v1` it sets `liveText` in `POS
 
 - `messageId` is the agent's API message id, `index` the content block within that message: `(messageId, index)` names one block. `text` is what the block gained since the previous delta of the same block, so a client appends it.
 - Deltas are coalesced in the runner: one goes out once 500 ms passed since the block's previous delta (or its start), once about 2,000 characters are held, or at the block's end. Only text is streamed: thinking and the input of a tool use never are.
-- **Replacement.** The `message.agent` with the same `messageId` and `index` replaces the deltas of that block (Claude Code writes it once the block is complete); one with the `messageId` but no `index` replaces every block of that message. No delta of a block comes after its `message.agent`.
+- **Replacement.** The `message.agent` with the same `messageId` and `index` replaces the deltas of that block (Claude Code writes it once the block is complete); one with the `messageId` but no `index` replaces every block of that message. No delta of a block comes after its `message.agent`. A cut `message.agent` (`truncated`, above 60,000 bytes) keeps `messageId` and `index` and still ends its block, but holds no text: a client that showed the block's deltas may keep them as its text.
 - A block that gets no `message.agent` (its turn was interrupted) sends no more deltas after its turn's `turn` event; its partial text is not in the final transcript, so a client drops it at that event.
 - Clients that do not show live text ignore `message.agent.delta`, as they ignore any unknown type: `message.agent` carries the whole text as before. `teamcode cloud logs` and `attach` print the final message only (`logs --json` prints every event, deltas included), and the companion app shows final messages only.
 - Deltas are stored like other events (same bounds, masking and retention), so a client that reconnects replays them in order. Codex sessions are unchanged: they send whole messages and no deltas.
@@ -129,11 +129,11 @@ Codex sessions keep refusing approval requests: their bypass mode produces none.
 | Field | Meaning |
 | --- | --- |
 | `reason` | `permission` (a tool use to approve) or `question` (a question to answer) |
-| `requestId` | What `POST /permissions` takes; left out when the runner sent an id it would refuse |
+| `requestId` | What `POST /permissions` takes; always present in this version, optional for later reasons to wait |
 | `since` | When the request was stored (server time, milliseconds) |
 | `eventSeq` | The `permission.request` event in the transcript |
 
-It is set when a `permission.request` is stored, and ends exactly when the request stops being answerable: its answer is consumed, it expires (`permission.expired`), its turn ends (a `turn` end event), or the session stops taking answers (a pause is asked, the session pauses, ends or is transferred, which always goes through a new execution). When several requests are open at once (parallel tool uses), it shows the newest; when that one is answered or expires, the newest earlier request of the same execution still open shows instead. A request stored while the session takes no answer (a pause asked: the runner denies it) never shows.
+It is set when a `permission.request` is stored, and ends exactly when the request stops being answerable: its answer is consumed, it expires (`permission.expired`), its turn ends (a `turn` end event), or the session stops taking answers (a pause is asked, the session pauses, ends or is transferred, which always goes through a new execution). When several requests are open at once (parallel tool uses), it shows the newest; when that one is answered or expires, the newest earlier request of the same execution still open shows instead. A request stored while the session takes no answer (a pause asked: the runner denies it), or with an id `POST /permissions` would refuse (the runner denies it at once), never shows.
 
 It is written in the same transaction as the transcript event, or the acknowledgement of the answer, that opens or closes it, under the session row lock already held there, and the session store clears it in the write that makes the session stop taking answers; reads return it with the session row, so listing sessions costs no extra query. It agrees with the [event feed](#event-feed)'s `cloud.session.waiting` and `cloud.session.answered`, which tell a client when to read it again.
 

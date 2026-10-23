@@ -11,6 +11,8 @@ import me.nathanfallet.teamcode.cli.cloud.RunnerInference
 import me.nathanfallet.teamcode.cli.cloud.RunnerLoop
 import me.nathanfallet.teamcode.cli.cloud.dollars
 import me.nathanfallet.teamcode.cli.cloud.printed
+import me.nathanfallet.teamcode.cli.cloud.shown
+import me.nathanfallet.teamcode.cli.cloud.tailStart
 import me.nathanfallet.teamcode.cli.cloud.render
 import me.nathanfallet.teamcode.cli.cloud.agent.*
 import me.nathanfallet.teamcode.cli.platform.AgentProcess
@@ -387,6 +389,33 @@ class CloudAgentTest {
         assertEquals(listOf("msg_9", "msg_9"), events.map { it.data.str("messageId") })
         assertTrue(events.none { "index" in it.data }, "Two text blocks in one line: no index")
         assertEquals(buildJsonObject { put("text", "Done") }, adapter.parse("""{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}""").events.single().data, "No id, no messageId")
+    }
+
+    @Test fun liveTextNamesTheMessageFromItsStartWhenLinesDoNot() {
+        var clock = 0L
+        val adapter = ClaudeStreamJsonAdapter(claude.copy(liveText = true), now = { clock })
+        fun bare(event: String) = """{"type":"stream_event","event":$event,"session_id":"c1","parent_tool_use_id":null,"uuid":"u"}"""
+        adapter.parse(bare("""{"type":"message_start","message":{"id":"msg_9","type":"message","role":"assistant","content":[]}}"""))
+        adapter.parse(bare("""{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"""))
+        clock = 600
+        val delta = adapter.parse(bare("""{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}""")).events.single()
+        assertEquals(buildJsonObject { put("messageId", "msg_9"); put("index", 0); put("text", "Hi") }, delta.data)
+    }
+
+    @Test fun tailCountsOnlyTheEventsShown() = runTest {
+        // 1..30: every third event is a final message, the others live text deltas.
+        val all = (1L..30L).map { CloudEventView(it, if (it % 3 == 0L) CloudEventTypes.AGENT_MESSAGE else CloudEventTypes.AGENT_MESSAGE_DELTA, 0, 1, buildJsonObject { put("text", "t") }) }
+        val asked = mutableListOf<Long>()
+        val page: suspend (Long) -> CloudEventPageView = { before ->
+            asked += before
+            val rows = all.filter { it.seq < before }.takeLast(4)
+            CloudEventPageView(rows, 1, 30, null, rows.firstOrNull()?.seq?.takeIf { it > 1 })
+        }
+        assertEquals(23, tailStart(3, 30, { it.shown() }, page), "Three final messages: 24, 27 and 30")
+        assertEquals(listOf(31L, 27L), asked, "Walked back page by page")
+        assertEquals(27, tailStart(3, 30, { true }, page), "--json counts every event")
+        assertEquals(0, tailStart(50, 30, { it.shown() }, page), "Fewer shown events than asked: from the start")
+        assertEquals(30, tailStart(0, 30, { it.shown() }, page))
     }
 
     @Test fun cloudLogsSkipLiveDeltas() {
