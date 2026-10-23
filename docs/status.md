@@ -1,5 +1,23 @@
 # Implementation status
 
+## Companion app artifacts (2026-10-23)
+
+The [companion app](companion.md#app) shows artifacts: a gallery (own or team artifacts, a search over what is loaded, a session's artifacts from its screen), a viewer with a version picker, copy link and open in the browser, and on iOS and Android the content in a web view loaded from a view ticket (`artifacts.tickets.v1`) whose URL must be the account's origin under `/artifact/<id>/<ticket>/`; the web view keeps no cookie or storage, has no bridge or file access, and navigates only under the ticket's directory. An expired ticket is renewed (told by the server's answer, not the device clock); a newer version is offered every 30 seconds, never loaded by itself. `teamcode://open?url=<viewer URL>` (the viewer page's **Open in app**) is registered on iOS and Android, Android takes shared text, and a pasted link opens from the gallery; a link resolves only to an artifact of an account on exactly its origin, and an unknown server is named before any sign-in. The desktop opens the viewer page in the browser. No server change.
+
+Evidence: `ArtifactUseCasesTest` (links, the ticket's prefix, a ticket for another server or version refused), `ArtifactViewModelsTest` (paging, scope, missing capability, a renewal, a missing page, a crashed page, a newer version offered, no ticket on the desktop, a version the artifact lacks), `RemoteArtifactRepositoryTest`; the app compiles for the JVM, Android and the iOS simulator.
+
+## Companion app distribution (2026-10-23)
+
+The [companion app](companion.md#distribution) builds and uploads from a maintainer's Mac with fastlane: `ios beta` archives with automatic signing through the App Store Connect key and uploads to TestFlight, `android beta` signs the release bundle with the upload key and uploads to Play's internal track. Only builds are uploaded: listings stay in the stores, and no lane submits or releases. Build numbers are `(major × 1,000,000 + minor × 1,000 + patch) × 100 + n` from the TeamCode version. `companion-android` signs its release build when the upload key is present; the iOS app has a shared scheme and a privacy manifest; the desktop `.dmg` is signed and notarized when the Mac provides a Developer ID. No key, certificate or password is in the repository.
+
+Evidence: `:companion-android:assembleRelease` gives versionCode 100000 for the default `0.1.0-SNAPSHOT` and takes `-PcompanionVersionCode`; `xcodebuild -list` shows the shared `TeamCode` scheme; `plutil -lint` accepts `PrivacyInfo.xcprivacy`. The lanes themselves need the store keys and were not run from this change.
+
+## Artifact tickets for apps (2026-10-22)
+
+`POST /api/v1/artifacts/{id}/tickets` gives an interactive login the [view ticket](artifacts.md#serving-and-access) the viewer page would mint, as a `contentUrl`, so the companion app shows an artifact in its own web view; at most 60 a minute per login session, advertised as `artifacts.tickets.v1`. The viewer page offers **Open in app** (`teamcode://open?url=…`) on phones and tablets. The typed client gains `issueArtifactTicket`. No schema change and no new query.
+
+Evidence: `ArtifactViewerRoutesTest` (the ticket serving the entry page and its files, an older version, a missing version or a member without access `404`, artifacts off `404`, no login `401`, a service key `403`, one version read per ticket, the per-minute limit with `Retry-After`, the link only for members on a phone).
+
 ## Team feed: a cloud session waiting for a person (2026-10-22)
 
 `cloud.session.waiting` (`reason` `permission` or `question`, `requestId`, `eventSeq`) is published in the team event feed, and to its webhooks, when a session's runner uploads a `permission.request`, and `cloud.session.answered` (`requestId`, `behavior`, `reason`, `eventSeq`) when a member's answer is consumed by the agent (`reason` `answered`) or when the runner denied the request at the team's deadline (`reason` `expired`, `behavior` `deny`, `eventSeq` the `permission.expired` event), so an expired request ends the wait like an answer. All are published in the transaction that stores the transcript event, after its other writes, like `cloud.turn`, and in transcript order with the turns of the same batch; none carries the tool input, the question or the answer. Evidence: `CloudConversationPersistenceTest` (MySQL 8.4, run locally) reads them from `SqlTeamEventStore` for the session owner, in order, without the question's text; a request and its turn end uploaded in one batch keep their order, an unanswerable request id is left out, and an expiry publishes `answered` with `deny`/`expired` pointing at its event. No pod was run. Built on the permission relay above (maintainer decisions of 2026-10-22).
@@ -1087,3 +1105,7 @@ Evidence: `MemberEnrollmentPersistenceTest` (MySQL 8.4, two pools: member refuse
 ## Companion app skeleton (2026-10-22)
 
 The [companion app](companion.md) exists on iOS, Android and the desktop: `:companion` (Compose Multiplatform, Koin, domain / infrastructure / presentation / di), `:companion-android`, the Xcode project `companion-ios/` and a desktop entry point. It adds a server after checking it is TeamCode, signs in with a password (temporary passwords changed in the app), keeps several accounts, stores tokens in the Keychain, the Android Keystore or the desktop keyring, and has a settings screen (theme, device name, sign-out). Sessions and artifacts come next. Evidence: the app tests listed in [companion.md](companion.md#evidence); the `companion` CI job runs them and assembles the Android app.
+
+## Companion app sessions (2026-10-22)
+
+The [companion app](companion.md) follows cloud sessions: a live list by state (and, for administrators, by owner) kept current by the caller-wide feed, and a session screen with its header, history pages and live transcript, reconnecting with back-off and closed in the background. It acts on them: messages sent idempotently with a pending bubble until the transcript records them, interrupt, pause and resume for the owner and administrators, and new sessions from an assigned profile. Evidence: the sessions and actions tests listed in [companion.md](companion.md#evidence).
