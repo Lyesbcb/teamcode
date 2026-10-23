@@ -69,7 +69,7 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
             it[claimName] = created.workspace.claimName; it[storageClass] = created.workspace.storageClass; it[workspaceSize] = created.workspace.sizeGibibytes
             it[environment] = encodeEnvironment(created.environment)
             it[kind] = created.kind.wire; it[hostDeviceId] = created.host?.deviceId; it[hostDirectoryName] = created.host?.directoryName
-            it[permissionMode] = created.host?.permissionMode?.wire
+            it[permissionMode] = created.host?.permissionMode?.wire; it[hostFolderId] = created.host?.folderId
             it[createdAt] = now
             writeSessionMutable(it, created)
             it[reconcileAfter] = now; it[reconcileRequested] = true
@@ -198,7 +198,9 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
 
     override suspend fun deviceOf(principal: Principal): String? = database.query {
         if (principal.serviceScopes != null) null
-        else Tokens.select(Tokens.deviceId).where { Tokens.id eq principal.tokenId }.singleOrNull()?.get(Tokens.deviceId)
+        // A cloud session's execution credential is never a host device, whatever its row says: one pod runs one session.
+        else Tokens.select(Tokens.deviceId).where { (Tokens.id eq principal.tokenId) and notExists(CloudInferenceCredentials.select(CloudInferenceCredentials.tokenId)
+            .where { CloudInferenceCredentials.tokenId eq Tokens.id }) }.singleOrNull()?.get(Tokens.deviceId)
     }
 
     override suspend fun startHostExecution(expected: CloudSession, next: CloudSession, execution: CloudExecution, ended: CloudExecution?, actor: CloudActor): CloudSession? = database.query {
@@ -317,7 +319,7 @@ private fun readHost(row: ResultRow): CloudSessionHost? {
     val execution = row.getOrNull(CloudExecutions.state)
     return CloudSessionHost(row[CloudSessions.hostDeviceId], row[CloudSessions.hostDirectoryName], device,
         RemotePermissionMode.parse(row[CloudSessions.permissionMode]) ?: RemotePermissionMode.ASK,
-        online = execution == ExecutionState.RUNNING.wire, lastHeartbeatAt = row.getOrNull(CloudExecutions.lastHeartbeatAt))
+        online = execution == ExecutionState.RUNNING.wire, lastHeartbeatAt = row.getOrNull(CloudExecutions.lastHeartbeatAt), folderId = row[CloudSessions.hostFolderId])
 }
 /** The wait columns of a session row, null when nothing was set or the row holds a reason this version does not know. */
 internal fun readHumanWait(row: ResultRow): CloudHumanWait? {
