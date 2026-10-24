@@ -35,7 +35,7 @@ data class ArtifactsUiState(
 class ArtifactsViewModel(
     private val route: ArtifactsRoute,
     private val loadArtifacts: LoadArtifactsUseCase,
-    private val accounts: AccountRepository? = null,
+    private val accounts: AccountRepository,
 ) : ViewModel() {
     private val state = MutableStateFlow(ArtifactsUiState())
     val uiState: StateFlow<ArtifactsUiState> = state.asStateFlow()
@@ -54,7 +54,7 @@ class ArtifactsViewModel(
      * artifact screen shares it; null when the account is gone.
      */
     fun viewerUrl(artifact: Artifact): String? =
-        accounts?.accounts?.value?.firstOrNull { it.id == route.accountId }?.let { artifactViewerUrl(it.origin, artifact.id) }
+        accounts.accounts.value.firstOrNull { it.id == route.accountId }?.let { artifactViewerUrl(it.origin, artifact.id) }
 
     fun onQuery(query: String) = state.update { it.copy(query = query) }
 

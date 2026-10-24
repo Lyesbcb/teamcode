@@ -1,5 +1,15 @@
 package me.nathanfallet.teamcode.companion
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import me.nathanfallet.teamcode.companion.presentation.components.FocusRingShown
+import me.nathanfallet.teamcode.companion.presentation.components.focusRing
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.input.key.Key
@@ -8,6 +18,7 @@ import androidx.compose.ui.test.DesktopComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -83,6 +94,13 @@ class DesktopShellTest {
         }
     }
 
+    @Test fun theDefaultSidebarWidthIsNotSavedAsTheMembersChoice() {
+        var preferences: PreferencesRepository? = null
+        app(before = { preferences = it.get() }) {
+            assertNull(preferences!!.sidebarWidth)
+        }
+    }
+
     @Test fun cmdKFindsASessionAndEnterOpensIt() {
         app {
             // The key itself, where the keyboard is (without a menu bar, as on a tablet, the app reads it).
@@ -144,6 +162,19 @@ class DesktopShellTest {
             settle()
             onNodeWithTag("artifact-r2").assertIsFocused()
         }
+    }
+
+    @Test fun theFocusRingShowsForTheKeyboardNotForAClick() = runDesktopComposeUiTest(200, 200) {
+        setContent { TeamCodeTheme { Box(Modifier.size(100.dp).focusRing(RectangleShape).clickable {}.testTag("row")) } }
+        // Compose focuses what a click hits: no ring for that.
+        onNodeWithTag("row").performMouseInput { click(center) }
+        waitForIdle()
+        onNodeWithTag("row").assertIsFocused()
+        onNodeWithTag("row").assert(SemanticsMatcher.expectValue(FocusRingShown, false))
+        // A key pressed there: the keyboard is in use, the ring shows.
+        onNodeWithTag("row").performKeyInput { pressKey(Key.DirectionDown) }
+        waitForIdle()
+        onNodeWithTag("row").assert(SemanticsMatcher.expectValue(FocusRingShown, true))
     }
 
     @Test fun aRightClickOnThePanelsCardsOpensTheirMenu() {

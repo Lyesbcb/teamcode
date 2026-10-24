@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.adamglin.PhosphorIcons
 import com.adamglin.phosphoricons.Regular
@@ -190,10 +191,12 @@ fun MainScreen(
     settings: SettingsViewModel = koinViewModel(),
 ) {
     var tab by rememberSaveable { mutableStateOf(initialTab) }
+    // The tab last told to the caller: its echo back as initialTab is not a new tab, and must not undo a later choice.
+    var reported by remember { mutableStateOf(initialTab) }
     // A wider window narrowed on one of its lists or on Settings: that tab.
-    LaunchedEffect(initialTab) { tab = initialTab }
+    LaunchedEffect(initialTab) { if (initialTab != reported) { reported = initialTab; tab = initialTab } }
     // Only the member's own choices: the first composition and the tab given by a wider window are already known.
-    LaunchedEffect(tab) { if (tab != initialTab) onTabChange(tab) }
+    LaunchedEffect(tab) { if (tab != reported) { reported = tab; onTabChange(tab) } }
     val sheets = rememberMainSheets()
     var palette by remember { mutableStateOf(false) }
     val homeState by home.uiState.collectAsStateWithLifecycle()
@@ -237,6 +240,11 @@ fun MainScreen(
     // A tablet or a phone with a keyboard: the same palette as the desktop, over the tabs.
     if (palette) {
         val sessions: SessionsViewModel = koinViewModel()
+        // The Sessions tab keeps the shared list live; on another tab, the palette does while it is open.
+        if (tab != MainTab.SESSIONS) LifecycleStartEffect(sessions) {
+            sessions.start()
+            onStopOrDispose { sessions.stop() }
+        }
         val sessionsState by sessions.uiState.collectAsStateWithLifecycle()
         val settingsState by settings.uiState.collectAsStateWithLifecycle()
         val artifacts = account?.takeIf { it.signedIn }?.let { key(it.id) { koinViewModel<ArtifactsViewModel>(key = artifactsKey(it.id)) { parametersOf(ArtifactsRoute(it.id)) } } }

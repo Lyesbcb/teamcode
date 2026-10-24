@@ -35,6 +35,9 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.isSecondaryPressed
@@ -96,12 +99,26 @@ fun Modifier.arrowKeyNavigation(): Modifier = composed {
     }
 }
 
-/** The ring around a focused row or card, in [shape]: where the keyboard is. Put it before the element's `clickable`. */
+/**
+ * The ring around a focused row or card, in [shape]: where the keyboard is. Put it before the element's `clickable`.
+ * A click focuses the element too: no ring then, until a key is pressed on it.
+ */
 fun Modifier.focusRing(shape: Shape): Modifier = composed {
     var focused by remember { mutableStateOf(false) }
+    var byPointer by remember { mutableStateOf(false) }
     val color = TeamCode.colors.accent
-    this.onFocusChanged { focused = it.isFocused }.then(if (focused) Modifier.border(2.dp, color, shape) else Modifier)
+    this.pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) if (awaitPointerEvent(PointerEventPass.Initial).type == PointerEventType.Press) byPointer = true
+        }
+    }.onPreviewKeyEvent { byPointer = false; false }
+        .onFocusChanged { focused = it.isFocused; if (!it.isFocused) byPointer = false }
+        .then(if (focused && !byPointer) Modifier.border(2.dp, color, shape) else Modifier)
+        .semantics { this[FocusRingShown] = focused && !byPointer }
 }
+
+/** Whether [focusRing] draws its ring, for tests. */
+val FocusRingShown = SemanticsPropertyKey<Boolean>("FocusRingShown")
 
 /** What Enter does in a text field that submits ([enterAction]). */
 enum class EnterAction { SUBMIT, NEWLINE, PASS }

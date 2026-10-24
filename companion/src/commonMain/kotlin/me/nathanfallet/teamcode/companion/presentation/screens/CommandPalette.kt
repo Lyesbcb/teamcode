@@ -4,8 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
-import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +43,10 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
@@ -216,7 +219,10 @@ fun CommandPalette(items: List<PaletteItem>, onDismiss: () -> Unit) {
     val list = rememberLazyListState()
     LaunchedEffect(query) { selected = 0 }
     // The selection moved by the keyboard stays in view; before the first layout, the list starts at its top anyway.
-    LaunchedEffect(selected, matches) {
+    // Keyed on the entries' ids: the parent rebuilds the entries (new lambdas) at each recomposition, which must not
+    // pull the list back to the selection the member scrolled away from.
+    val ids = matches.map { it.id }
+    LaunchedEffect(selected, ids) {
         if (matches.isEmpty()) return@LaunchedEffect
         val row = rowIndex(matches, selected.coerceIn(0, matches.lastIndex))
         val visible = list.layoutInfo.visibleItemsInfo
@@ -228,11 +234,23 @@ fun CommandPalette(items: List<PaletteItem>, onDismiss: () -> Unit) {
         else if (row >= last) list.scrollToItem((row - visible.size + 2).coerceAtLeast(0))
     }
     fun run(item: PaletteItem) { onDismiss(); item.run() }
+    // Whether the pointer event being handled moved the pointer over the window. A row scrolled under a resting pointer
+    // gets a hover event too (Compose sends one when the layout moves under it), which must not take the selection.
+    val pointer = remember { object { var last: Offset? = null; var moved = false } }
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         // From inside the dialog: its own window and focus owner exist only once its content is composed.
         LaunchedEffect(Unit) { focus.requestFocus() }
-        Box(Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val position = event.changes.firstOrNull()?.position
+                    pointer.moved = event.type == PointerEventType.Move && pointer.last != null && position != pointer.last
+                    pointer.last = position
+                }
+            }
+        }.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss), contentAlignment = Alignment.TopCenter) {
             Column(
                 Modifier.padding(top = 72.dp, start = 24.dp, end = 24.dp).widthIn(max = 620.dp).fillMaxWidth().clip(Radii.card).background(colors.panel)
                     .border(1.dp, colors.line, Radii.card)
@@ -278,7 +296,7 @@ fun CommandPalette(items: List<PaletteItem>, onDismiss: () -> Unit) {
                             item(key = "section-$section") { PaletteSectionTitle(section) }
                             previous = section
                         }
-                        item(key = item.id) { PaletteRow(item, index == selected, onHover = { selected = index }, onClick = { run(item) }) }
+                        item(key = item.id) { PaletteRow(item, index == selected, onHover = { if (pointer.moved) selected = index }, onClick = { run(item) }) }
                     }
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(colors.line))
@@ -317,12 +335,18 @@ private val PaletteRowShape = RoundedCornerShape(7.dp)
 private fun PaletteRow(item: PaletteItem, selected: Boolean, onHover: () -> Unit, onClick: () -> Unit) {
     val colors = TeamCode.colors
     val source = remember { MutableInteractionSource() }
-    val hovered by source.collectIsHoveredAsState()
-    LaunchedEffect(hovered) { if (hovered) onHover() }
+    val hover by rememberUpdatedState(onHover)
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp).heightIn(min = 36.dp).clip(PaletteRowShape)
             .background(if (selected) colors.chip else Color.Transparent)
-            .hoverable(source).handCursor()
+            // Selected by the pointer only when it moves (see `pointer`): a pointer resting where the palette opens, or a
+            // row scrolled under it by the arrows, would otherwise take the keyboard's selection.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) if (awaitPointerEvent().type == PointerEventType.Move) hover()
+                }
+            }
+            .handCursor()
             .clickable(interactionSource = source, indication = null, role = Role.Button, onClick = onClick)
             .semantics { this.selected = selected }
             .padding(horizontal = 10.dp, vertical = 7.dp)

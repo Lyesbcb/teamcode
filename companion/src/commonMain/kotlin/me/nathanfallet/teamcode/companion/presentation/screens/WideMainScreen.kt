@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.drop
 import me.nathanfallet.teamcode.companion.domain.models.ArtifactScope
 import me.nathanfallet.teamcode.companion.domain.models.KindFilter
 import me.nathanfallet.teamcode.companion.domain.models.SessionGroup
@@ -204,7 +205,8 @@ fun WideMainScreen(
         initialAnchoredIndex = sidebarWidthIndex(preferences.sidebarWidth, narrow),
     )
     LaunchedEffect(expansion) {
-        snapshotFlow { expansion.currentAnchor }.collect { anchor ->
+        // Its first value is the width it opened on, not a choice: saving it would pin the default as the member's.
+        snapshotFlow { expansion.currentAnchor }.drop(1).collect { anchor ->
             anchors.indexOf(anchor).takeIf { it >= 0 && it != preferences.sidebarWidth }?.let(preferences::setSidebarWidth)
         }
     }

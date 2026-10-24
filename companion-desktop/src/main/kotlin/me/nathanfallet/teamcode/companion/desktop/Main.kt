@@ -29,6 +29,8 @@ import java.awt.SystemTray
 import java.awt.Taskbar
 import javax.imageio.ImageIO
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import me.nathanfallet.teamcode.companion.App
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommand
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommands
@@ -81,7 +83,11 @@ fun main(args: Array<String>) {
             size = saved?.let { DpSize(it.width.dp, it.height.dp) } ?: DpSize(1200.dp, 800.dp),
         )
         LaunchedEffect(windowState) {
-            snapshotFlow { Triple(windowState.placement, windowState.position, windowState.size) }.collect { (mode, position, size) ->
+            // Once the window rests: a drag or a resize emits every frame, and a switch to maximized can pass through a
+            // floating window at the maximized size. Fullscreen is not kept: the next launch opens the window it came from.
+            snapshotFlow { Triple(windowState.placement, windowState.position, windowState.size) }.collectLatest { (mode, position, size) ->
+                if (mode == WindowPlacement.Fullscreen) return@collectLatest
+                delay(500)
                 val floating = mode == WindowPlacement.Floating
                 placement.save(SavedWindow(
                     x = position.takeIf { floating && it.isSpecified }?.x?.value?.roundToInt(), y = position.takeIf { floating && it.isSpecified }?.y?.value?.roundToInt(),

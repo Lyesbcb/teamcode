@@ -61,6 +61,7 @@ import com.adamglin.phosphoricons.regular.Files
 import com.adamglin.phosphoricons.regular.Pause
 import com.adamglin.phosphoricons.regular.Play
 import com.adamglin.phosphoricons.regular.Stop
+import kotlinx.coroutines.flow.drop
 import me.nathanfallet.teamcode.companion.domain.models.CloudSession
 import me.nathanfallet.teamcode.companion.domain.models.SessionHost
 import me.nathanfallet.teamcode.companion.domain.models.PendingMessage
@@ -334,7 +335,8 @@ private fun Transcript(state: SessionUiState, memberId: String?, viewModel: Sess
     // would otherwise leave the list above the bottom, at its top when the session opens.
     var follow by remember { mutableStateOf(true) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { scrolling -> if (!scrolling) follow = !listState.canScrollForward }
+        // Only when a scroll ends: the first value is no gesture, and a transcript measured before this ran must still be pinned.
+        snapshotFlow { listState.isScrollInProgress }.drop(1).collect { scrolling -> if (!scrolling) follow = !listState.canScrollForward }
     }
     // Hidden until the first page is pinned to the bottom: the transcript never shows its top, then jumps.
     var settled by remember { mutableStateOf(false) }
