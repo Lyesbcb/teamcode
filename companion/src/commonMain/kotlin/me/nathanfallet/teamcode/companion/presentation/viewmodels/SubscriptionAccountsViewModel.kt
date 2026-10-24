@@ -33,7 +33,7 @@ sealed interface AddAccountStep {
         val paste: String = "",
         val opened: Boolean = false,
         val sending: Boolean = false,
-        val error: String? = null,
+        val error: Failure? = null,
         val spent: Boolean = false,
     ) : AddAccountStep {
         val canSubmit: Boolean get() = !sending && !spent && paste.isNotBlank()
@@ -50,7 +50,7 @@ data class SubscriptionAccountsUiState(
     val step: AddAccountStep? = null,
     /** A sign-in being started (the enrollment check asked again). */
     val starting: Boolean = false,
-    val error: String? = null,
+    val error: Failure? = null,
     /** The last account added or reconnected, for the confirmation. */
     val added: AddedSubscriptionAccount? = null,
 ) {
@@ -140,7 +140,8 @@ class SubscriptionAccountsViewModel(
             } catch (error: Exception) {
                 // Only a paste that is not the code can be corrected; anything else used this attempt up.
                 val spent = !(error is CompanionException.ProviderSignIn && !error.restart)
-                updateSignIn { it.copy(sending = false, error = error.userMessage(), spent = spent, paste = if (spent) "" else it.paste) }
+                val message = error.userMessage()
+                updateSignIn { it.copy(sending = false, error = message, spent = spent, paste = if (spent) "" else it.paste) }
             }
         }
     }

@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.companion.presentation.viewmodels
 
+import me.nathanfallet.teamcode.companion.resources.*
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
@@ -44,7 +45,7 @@ enum class LiveState { CONNECTING, LIVE, RECONNECTING, ENDED, STOPPED }
 
 /** A short message under the composer; the fixed ones are worded by the screen, from its string resources. */
 sealed interface SessionNotice {
-    data class Text(val text: String) : SessionNotice
+    data class Text(val text: Failure) : SessionNotice
     data object NothingRunning : SessionNotice
     /** A `409`: the request was answered by someone else, expired or ended; its card is gone. */
     data class PermissionClosed(val code: String?) : SessionNotice
@@ -95,7 +96,7 @@ data class SessionUiState(
     val loadingOlder: Boolean = false,
     val live: LiveState = LiveState.STOPPED,
     /** A failure that ended the screen's stream or its first load. */
-    val error: String? = null,
+    val error: Failure? = null,
     /** True when the session is gone or no longer visible. */
     val gone: Boolean = false,
     /** Messages sent from here that the transcript does not show yet, or that failed. */
@@ -479,7 +480,7 @@ class SessionViewModel(
                     is AnswerOutcome.Invalid -> current.copy(drafts = current.drafts + (requestId to draft.edited()), notice = SessionNotice.PermissionInvalid(outcome.code))
                     is AnswerOutcome.Refused -> current.copy(
                         drafts = current.drafts + (requestId to draft.edited()),
-                        notice = if (outcome.code == "permission_answer_denied") SessionNotice.PermissionDenied else SessionNotice.Text(outcome.reason ?: outcome.code ?: "Something went wrong."),
+                        notice = if (outcome.code == "permission_answer_denied") SessionNotice.PermissionDenied else SessionNotice.Text(outcome.reason?.let { Failure(it) } ?: outcome.code?.let { Failure(it) } ?: Failure("Something went wrong.", Res.string.error_generic)),
                     )
                 }.withReconciledDrafts()
             }
