@@ -72,6 +72,7 @@ import me.nathanfallet.teamcode.companion.presentation.navigation.SessionDestina
 import me.nathanfallet.teamcode.companion.presentation.navigation.detailRoute
 import me.nathanfallet.teamcode.companion.presentation.navigation.SessionRoute
 import me.nathanfallet.teamcode.companion.presentation.navigation.SessionsListRoute
+import me.nathanfallet.teamcode.companion.presentation.navigation.GitHubLinkRoute
 import me.nathanfallet.teamcode.companion.presentation.navigation.SubscriptionAccountsRoute
 import me.nathanfallet.teamcode.companion.presentation.navigation.TransfersRoute
 import me.nathanfallet.teamcode.companion.presentation.theme.TeamCode
@@ -80,6 +81,7 @@ import me.nathanfallet.teamcode.companion.presentation.viewmodels.ArtifactsViewM
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.HomeViewModel
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SessionsViewModel
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SettingsViewModel
+import me.nathanfallet.teamcode.companion.presentation.viewmodels.GitHubLinkViewModel
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SubscriptionAccountsViewModel
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.TransfersViewModel
 import me.nathanfallet.teamcode.companion.resources.Res
@@ -302,9 +304,14 @@ fun WideMainScreen(
                         val viewModel: SubscriptionAccountsViewModel = koinViewModel { parametersOf(entry.toRoute<SubscriptionAccountsRoute>()) }
                         SubscriptionAccountsScreen(viewModel, onBack = detail.backFrom(entry), backLabel = detail.backLabel(entry))
                     }
+                    composable<GitHubLinkRoute> { entry ->
+                        val viewModel: GitHubLinkViewModel = koinViewModel { parametersOf(entry.toRoute<GitHubLinkRoute>()) }
+                        GitHubLinkScreen(viewModel, onBack = detail.backFrom(entry), backLabel = detail.backLabel(entry))
+                    }
                     composable<AccountRoute> {
                         AccountScreen(onAddAccount = onAddAccount, onSignInAgain = onSignInAgain, onSwitchAccount = { sheets.switcher = true },
-                            onOpenSubscriptions = { detail.navigate(SubscriptionAccountsRoute(it.id)) }, viewModel = settings)
+                            onOpenSubscriptions = { detail.navigate(SubscriptionAccountsRoute(it.id)) },
+                            onOpenGitHub = { detail.navigate(GitHubLinkRoute(it.id)) }, viewModel = settings)
                     }
                 }
             } }
@@ -394,7 +401,7 @@ private fun NavBackStackEntry?.selection(): SidebarSelection {
         destination.hasRoute<SessionRoute>() -> SidebarSelection.Session(toRoute<SessionRoute>().sessionId)
         destination.hasRoute<ArtifactRoute>() -> SidebarSelection.Artifact(toRoute<ArtifactRoute>().artifactId)
         destination.hasRoute<ArtifactsRoute>() -> if (toRoute<ArtifactsRoute>().sessionId == null) SidebarSelection.AllArtifacts else SidebarSelection.None
-        destination.hasRoute<AccountRoute>() || destination.hasRoute<SubscriptionAccountsRoute>() -> SidebarSelection.Settings
+        destination.hasRoute<AccountRoute>() || destination.hasRoute<SubscriptionAccountsRoute>() || destination.hasRoute<GitHubLinkRoute>() -> SidebarSelection.Settings
         else -> SidebarSelection.None
     }
 }
