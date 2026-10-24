@@ -1,5 +1,7 @@
 package me.nathanfallet.teamcode.companion.desktop
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -16,6 +18,8 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
@@ -32,6 +36,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import me.nathanfallet.teamcode.companion.App
+import me.nathanfallet.teamcode.companion.presentation.components.LocalWindowTitleBar
+import me.nathanfallet.teamcode.companion.presentation.components.WindowTitleBar
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommand
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommands
 import me.nathanfallet.teamcode.companion.di.initKoin
@@ -102,6 +108,10 @@ fun main(args: Array<String>) {
             icon = appIcon,
             state = windowState,
         ) {
+            // macOS: the app reaches the window's top edge, under the title bar and its buttons (MacTitleBar.kt); set before
+            // the window first shows. Windows and Linux keep their own bar: drawing it needs the JetBrains Runtime (Jewel's
+            // DecoratedWindow), which the app does not ship, and an undecorated window loses snapping, resize borders and the shadow.
+            if (mac) remember { window.drawUnderMacTitleBar() }
             // Wide enough for the sidebar and a readable panel: the window never falls back to the phone layout.
             LaunchedEffect(Unit) { window.minimumSize = Dimension(WindowPlacementStore.MIN_WIDTH, WindowPlacementStore.MIN_HEIGHT) }
             MenuBar {
@@ -118,7 +128,21 @@ fun main(args: Array<String>) {
                     Item("Settings…", shortcut = shortcut(Key.Comma), onClick = { AppCommands.send(AppCommand.SHOW_ACCOUNT) })
                 }
             }
-            App(menuShortcuts = true)
+            // macOS hides the bar in fullscreen: the header goes back to its own place there.
+            val fullscreen = windowState.placement == WindowPlacement.Fullscreen || (windowState.size.isSpecified && window.coversItsScreen())
+            val titleBar = if (mac && !fullscreen) WindowTitleBar.MAC else WindowTitleBar()
+            CompositionLocalProvider(LocalWindowTitleBar provides titleBar) {
+                Box(if (titleBar.height > 0.dp) Modifier.onTitleBarDoubleClick(titleBar.height) {
+                    when (readTitleBarDoubleClick()) {
+                        TitleBarDoubleClick.ZOOM -> windowState.placement =
+                            if (windowState.placement == WindowPlacement.Maximized) WindowPlacement.Floating else WindowPlacement.Maximized
+                        TitleBarDoubleClick.MINIMIZE -> windowState.isMinimized = true
+                        TitleBarDoubleClick.NONE -> Unit
+                    }
+                } else Modifier) {
+                    App(menuShortcuts = true)
+                }
+            }
         }
     }
 }

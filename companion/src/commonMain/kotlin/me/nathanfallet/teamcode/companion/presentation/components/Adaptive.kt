@@ -6,10 +6,13 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +27,7 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -60,6 +64,28 @@ fun isWideWindow(): Boolean = currentWindowAdaptiveInfoV2().windowSizeClass.let 
 
 /** Provided by the app: true when the window shows the sidebar layout ([isWideWindow]). Sheets become dialogs then. */
 val LocalWideLayout = compositionLocalOf { false }
+
+/**
+ * The window's title bar when the app draws under it (the desktop on macOS, [WindowTitleBar.MAC]): its [height], and the
+ * [start] the window's own buttons take at its left. The sidebar puts its header beside those buttons, and a screen without
+ * the sidebar starts below the bar. None elsewhere, and in fullscreen, where macOS hides the bar.
+ */
+@Immutable
+data class WindowTitleBar(val height: Dp = 0.dp, val start: Dp = 0.dp) {
+    companion object {
+        /**
+         * macOS's title bar with the full-size content view: 28 points tall, its three buttons from 9 to 63 points; the
+         * header starts one button's gap after them.
+         */
+        val MAC = WindowTitleBar(height = 28.dp, start = 76.dp)
+    }
+}
+
+/** Provided by the desktop: the title bar the app draws under, [WindowTitleBar]. */
+val LocalWindowTitleBar = staticCompositionLocalOf { WindowTitleBar() }
+
+/** Room for the window's title bar above a screen that fills the window ([LocalWindowTitleBar]). */
+fun Modifier.windowTitleBarPadding(): Modifier = composed { padding(top = LocalWindowTitleBar.current.height) }
 
 /** Provided by the app: a mouse-first platform (the desktop), where controls are denser than touch targets. */
 val LocalDense = compositionLocalOf { false }

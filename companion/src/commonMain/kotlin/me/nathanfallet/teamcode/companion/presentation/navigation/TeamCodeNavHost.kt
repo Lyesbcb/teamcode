@@ -3,6 +3,7 @@ package me.nathanfallet.teamcode.companion.presentation.navigation
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,6 +30,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavBackStackEntry
 import me.nathanfallet.teamcode.companion.presentation.components.LocalWideLayout
+import me.nathanfallet.teamcode.companion.presentation.components.windowTitleBarPadding
 import me.nathanfallet.teamcode.companion.presentation.screens.WideMainScreen
 import me.nathanfallet.teamcode.companion.resources.sessions_title
 import androidx.navigation.toRoute
@@ -138,15 +140,16 @@ fun TeamCodeNavHost(rootViewModel: RootViewModel = koinViewModel()) {
     }
 
     NavHost(navController = navController, startDestination = startDestination) {
+        // The sign-in screens fill the window: below macOS's title bar when the app draws under it.
         composable<AddServerRoute> {
-            AddServerScreen(
+            Box(Modifier.windowTitleBarPadding()) { AddServerScreen(
                 canGoBack = navController.previousBackStackEntry != null,
                 onBack = { navController.popBackStack() },
                 onContinue = { origin -> navController.navigate(LoginRoute(origin)) },
-            )
+            ) }
         }
         composable<LoginRoute> { entry ->
-            LoginScreen(
+            Box(Modifier.windowTitleBarPadding()) { LoginScreen(
                 route = entry.toRoute(),
                 onBack = { navController.popBackStack() },
                 onSignedIn = {
@@ -154,7 +157,7 @@ fun TeamCodeNavHost(rootViewModel: RootViewModel = koinViewModel()) {
                     if (navController.currentBackStackEntry?.destination?.hasRoute<MainRoute>() != true)
                         navController.navigate(MainRoute) { popUpTo(0) { inclusive = true } }
                 },
-            )
+            ) }
         }
         composable<MainRoute> {
             if (wide) WideMainScreen(

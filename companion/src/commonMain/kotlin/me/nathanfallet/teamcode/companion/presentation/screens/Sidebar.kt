@@ -64,6 +64,7 @@ import me.nathanfallet.teamcode.companion.presentation.components.BrandGlyph
 import me.nathanfallet.teamcode.companion.presentation.components.ContextMenuBox
 import me.nathanfallet.teamcode.companion.presentation.components.Dot
 import me.nathanfallet.teamcode.companion.presentation.components.IconButtonKind
+import me.nathanfallet.teamcode.companion.presentation.components.LocalWindowTitleBar
 import me.nathanfallet.teamcode.companion.presentation.components.Skeleton
 import me.nathanfallet.teamcode.companion.presentation.components.TcIconButton
 import me.nathanfallet.teamcode.companion.presentation.components.arrowKeyNavigation
@@ -158,11 +159,18 @@ fun Sidebar(state: SidebarState, actions: SidebarActions, modifier: Modifier = M
     val colors = TeamCode.colors
     val account = state.account
     Column(modifier.fillMaxSize().background(colors.sidebar).windowInsetsPadding(WindowInsets.statusBars).windowInsetsPadding(WindowInsets.navigationBars).arrowKeyNavigation().testTag("sidebar")) {
-        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        // Under macOS's title bar, the header sits in the bar, beside the window's buttons, and its button fits the bar's height.
+        val titleBar = LocalWindowTitleBar.current
+        val inBar = titleBar.height > 0.dp
+        Row(
+            Modifier.fillMaxWidth().testTag("sidebar-header")
+                .then(if (inBar) Modifier.padding(start = titleBar.start, end = 8.dp, bottom = 6.dp).height(titleBar.height) else Modifier.padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 6.dp)),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
             BrandGlyph(size = 20.dp)
-            Text("TeamCode", color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("TeamCode", color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
             if (account != null && account.signedIn) TcIconButton(PhosphorIcons.Regular.Plus, stringResource(Res.string.new_session_title), onClick = { actions.onNewSession(account) },
-                kind = IconButtonKind.OUTLINED, modifier = Modifier.testTag("sidebar-new-session"))
+                kind = IconButtonKind.OUTLINED, modifier = Modifier.then(if (inBar) Modifier.size(titleBar.height - 2.dp) else Modifier).testTag("sidebar-new-session"))
         }
         actions.onSearch?.let { search ->
             Box(Modifier.padding(horizontal = 8.dp)) {

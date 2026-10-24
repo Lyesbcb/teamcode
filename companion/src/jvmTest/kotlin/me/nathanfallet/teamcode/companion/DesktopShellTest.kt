@@ -47,6 +47,8 @@ import me.nathanfallet.teamcode.companion.domain.models.TranscriptPage
 import me.nathanfallet.teamcode.companion.domain.repositories.PreferencesRepository
 import me.nathanfallet.teamcode.companion.domain.repositories.TranscriptRepository
 import me.nathanfallet.teamcode.companion.presentation.components.LocalWideLayout
+import me.nathanfallet.teamcode.companion.presentation.components.LocalWindowTitleBar
+import me.nathanfallet.teamcode.companion.presentation.components.WindowTitleBar
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommand
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommands
 import me.nathanfallet.teamcode.companion.presentation.navigation.TeamCodeNavHost
@@ -98,6 +100,24 @@ class DesktopShellTest {
         var preferences: PreferencesRepository? = null
         app(before = { preferences = it.get() }) {
             assertNull(preferences!!.sidebarWidth)
+        }
+    }
+
+    @Test fun underMacsTitleBarTheSidebarHeaderSitsBesideTheWindowButtons() {
+        app(content = { CompositionLocalProvider(LocalWindowTitleBar provides WindowTitleBar.MAC) { App() } }) {
+            val header = onNodeWithTag("sidebar-header").getBoundsInRoot()
+            assertEquals(0.dp, header.top)
+            // The brand starts after the close, minimize and zoom buttons, on their line; the new session button fits in the bar.
+            val brand = onAllNodesWithText("TeamCode").onFirst().getBoundsInRoot()
+            assertTrue(brand.left >= WindowTitleBar.MAC.start, "brand ${brand.left}")
+            assertTrue(((brand.top + brand.bottom) / 2 - WindowTitleBar.MAC.height / 2).value in -1f..1f, "brand $brand")
+            val button = onNodeWithTag("sidebar-new-session").getBoundsInRoot()
+            assertTrue(button.top >= 0.dp && button.bottom <= WindowTitleBar.MAC.height, "button $button")
+        }
+        // Without the bar (Windows, Linux, fullscreen), the header keeps its own place.
+        app {
+            val brand = onAllNodesWithText("TeamCode").onFirst().getBoundsInRoot()
+            assertTrue(brand.top >= 12.dp && brand.left < WindowTitleBar.MAC.start, "brand $brand")
         }
     }
 
