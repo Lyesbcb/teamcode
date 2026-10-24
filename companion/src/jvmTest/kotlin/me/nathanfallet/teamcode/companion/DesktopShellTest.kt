@@ -113,6 +113,8 @@ class DesktopShellTest {
             assertTrue(((brand.top + brand.bottom) / 2 - WindowTitleBar.MAC.height / 2).value in -1f..1f, "brand $brand")
             val button = onNodeWithTag("sidebar-new-session").getBoundsInRoot()
             assertTrue(button.top >= 0.dp && button.bottom <= WindowTitleBar.MAC.height, "button $button")
+            // The panel starts below the bar, which stays the window's to drag and double-click.
+            assertEquals(WindowTitleBar.MAC.height, onNodeWithTag("content-panel").getBoundsInRoot().top)
         }
         // Without the bar (Windows, Linux, fullscreen), the header keeps its own place.
         app {

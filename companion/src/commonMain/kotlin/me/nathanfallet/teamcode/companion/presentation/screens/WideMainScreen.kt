@@ -62,6 +62,7 @@ import androidx.navigation.toRoute
 import androidx.window.core.layout.WindowSizeClass
 import me.nathanfallet.teamcode.companion.domain.models.Account
 import me.nathanfallet.teamcode.companion.presentation.components.TransfersButton
+import me.nathanfallet.teamcode.companion.presentation.components.windowTitleBarPadding
 import me.nathanfallet.teamcode.companion.presentation.navigation.AccountRoute
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommand
 import me.nathanfallet.teamcode.companion.presentation.navigation.AppCommands
@@ -257,8 +258,9 @@ fun WideMainScreen(
         },
         detailPane = {
             AnimatedPane {
+                // Under macOS's title bar, the panel starts below it: the bar above it stays the window's to drag and zoom.
                 NavHost(
-                    detail, startDestination = SessionsListRoute, modifier = Modifier.fillMaxSize().testTag("content-panel"),
+                    detail, startDestination = SessionsListRoute, modifier = Modifier.fillMaxSize().windowTitleBarPadding().testTag("content-panel"),
                     enterTransition = { fadeIn(tween(120)) }, exitTransition = { fadeOut(tween(90)) },
                     popEnterTransition = { fadeIn(tween(120)) }, popExitTransition = { fadeOut(tween(90)) },
                 ) {

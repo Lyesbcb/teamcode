@@ -114,6 +114,9 @@ class PaletteItem(
 /** How many sessions and artifacts the palette lists before anything is typed. */
 const val PALETTE_RECENT = 6
 
+private val Spaces = Regex("\\s+")
+private val WordBreaks = Regex("[^\\p{L}\\p{N}]+")
+
 /**
  * The entries for [query], grouped by section ([PaletteSection] order) and best first in each: every word typed must
  * appear in the title, the detail or the keywords, ignoring case; a title that starts with the query comes first,
@@ -121,7 +124,7 @@ const val PALETTE_RECENT = 6
  * [PALETTE_RECENT] first sessions and artifacts (the lists are newest first).
  */
 fun paletteMatches(items: List<PaletteItem>, query: String): List<PaletteItem> {
-    val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val words = query.trim().lowercase().split(Spaces).filter { it.isNotEmpty() }
     if (words.isEmpty()) return PaletteSection.entries.flatMap { section ->
         items.filter { it.section == section }.let { rows -> if (section == PaletteSection.ACTIONS) rows else rows.take(PALETTE_RECENT) }
     }
@@ -130,7 +133,7 @@ fun paletteMatches(items: List<PaletteItem>, query: String): List<PaletteItem> {
         val title = item.title.lowercase()
         val haystack = "$title ${item.detail.lowercase()} ${item.keywords.lowercase()}"
         if (words.any { it !in haystack }) return null
-        val titleWords = title.split(Regex("[^\\p{L}\\p{N}]+"))
+        val titleWords = title.split(WordBreaks)
         return when {
             title.startsWith(phrase) -> 0
             words.all { word -> titleWords.any { it.startsWith(word) } } -> 1

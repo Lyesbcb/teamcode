@@ -7,6 +7,8 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import java.awt.Window
+import java.awt.event.MouseEvent
+import java.io.IOException
 import javax.swing.RootPaneContainer
 
 /**
@@ -37,13 +39,13 @@ internal fun titleBarDoubleClick(setting: String?): TitleBarDoubleClick = when (
     else -> TitleBarDoubleClick.ZOOM
 }
 
-/** Reads the choice when the member double-clicks: it may have changed since the app started. */
+/** Reads the choice when the member double-clicks (it may have changed since the app started), off the UI thread: it runs `defaults`. */
 internal fun readTitleBarDoubleClick(): TitleBarDoubleClick = titleBarDoubleClick(
     try {
         val process = ProcessBuilder("defaults", "read", "-g", "AppleActionOnDoubleClick").redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().readText()
         if (process.waitFor() == 0) output else null
-    } catch (_: Exception) { null }
+    } catch (_: IOException) { null }
 )
 
 /**
@@ -54,12 +56,10 @@ internal fun Modifier.onTitleBarDoubleClick(height: Dp, onDoubleClick: () -> Uni
     awaitPointerEventScope {
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Final)
-            if (event.type != PointerEventType.Release || (event.awtEventOrNull?.clickCount ?: 0) != 2) continue
+            val mouse = event.awtEventOrNull
+            if (event.type != PointerEventType.Release || mouse?.button != MouseEvent.BUTTON1 || mouse.clickCount != 2) continue
             val change = event.changes.firstOrNull() ?: continue
             if (!change.isConsumed && change.position.y < height.toPx()) onDoubleClick()
         }
     }
 }
-
-/** Fullscreen: the window covers its whole screen, menu bar included, where a zoomed window stops below it. */
-internal fun Window.coversItsScreen(): Boolean = graphicsConfiguration?.bounds?.let { it == bounds } ?: false
