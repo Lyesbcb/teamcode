@@ -19,9 +19,11 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def system():
@@ -43,7 +45,7 @@ def installed_root(env):
     if os_name == 'macos':
         return Path(env['HOME']) / 'Applications' / 'TeamCode.app'
     if os_name == 'windows':
-        return Path(env['LOCALAPPDATA']) / 'Programs' / 'TeamCode'
+        return Path(env['LOCALAPPDATA']) / 'TeamCode App'
     return Path(env['XDG_DATA_HOME']) / 'teamcode-desktop' / 'current'
 
 
@@ -56,9 +58,69 @@ def version_file(root):
     return root / 'lib' / 'app' / 'resources' / 'teamcode-desktop-version'
 
 
+# What a failed call to an Apple service looks like when the service, not the app, is at fault: the same patterns and the
+# same waits (15, 30, 60, 120 and 240 s, 6 tries) as `apple()` in the notarization step of .github/workflows/build.yml.
+APPLE_TRANSIENT = re.compile(
+    r'network connection was lost|NSURLErrorDomain|could not connect|timed out|timeout|CloudKit|Error 68|offline|'
+    r'temporarily unavailable|Service Unavailable|(HTTP|status( code)?)\D*5\d\d|internal error|connection (reset|refused)', re.I)
+
+
+def apple(command, sleep=time.sleep):
+    """Run a command that asks Apple's servers (stapler, Gatekeeper); retry only when the failure is a transient one."""
+    for attempt in range(1, 7):
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        output = result.stdout + result.stderr
+        print(output, end='', flush=True)
+        if result.returncode == 0:
+            return 0
+        if attempt == 6 or not APPLE_TRANSIENT.search(output):
+            return result.returncode
+        delay = min(15 * 2 ** (attempt - 1), 240)
+        print(f'Apple service failure (try {attempt} of 6): {" ".join(command[:3])}; trying again in {delay}s', flush=True)
+        sleep(delay)
+
+
 def require(condition, message):
     if not condition:
         raise SystemExit('Desktop acceptance failed: ' + message)
+
+
+def show_installer_log(temporary, msi, control, root):
+    """What the Windows installer left behind, before the temporary folder holding it is deleted with the run's work."""
+    log = temporary / 'teamcode-desktop-msiexec.log'
+    print(f'--- installer diagnostics: {log} exists={log.is_file()}; {temporary} holds {sorted(p.name for p in temporary.iterdir())} ---', flush=True)
+    if log.is_file():
+        data = log.read_bytes()
+        text = data.decode('utf-16' if data[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8', errors='replace')
+        lines = text.splitlines()
+        where = re.compile(r'INSTALLDIR|TARGETDIR|APPLICATIONFOLDER|ALLUSERS|PERUSER|INSTALLLEVEL|ProgramFiles64Folder|TeamCode\.exe|Programs\\|CreateFolders|Action start|Action ended', re.I)
+        print('--- lines naming the install location ---\n' + '\n'.join(l[:300] for l in [l for l in lines if where.search(l)][:150]) + '\n--- end ---', flush=True)
+        for candidate in (Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'TeamCode', Path(os.environ.get('LOCALAPPDATA', '')) / 'TeamCode'):
+            print(f'--- {candidate} exists={candidate.is_dir()} ---', flush=True)
+        print(f'--- {log.name}: last 120 of {len(lines)} lines ---\n' + '\n'.join(lines[-120:]) + '\n--- end ---', flush=True)
+    shown = sorted(str(p.relative_to(root)) for p in root.rglob('*') if len(p.relative_to(root).parts) <= 3)[:80] if root.is_dir() else None
+    print(f'--- {root} exists={root.is_dir()}; first entries: {shown} ---', flush=True)
+    version = root / 'app' / 'resources' / 'teamcode-desktop-version'
+    print(f'--- version file {version} exists={version.is_file()} content={version.read_text().strip() if version.is_file() else None} ---', flush=True)
+    if system() == 'windows':
+        subprocess.run(['tasklist', '/V', '/FI', 'IMAGENAME eq msiexec.exe'], timeout=60)
+        subprocess.run(['sc', 'query', 'msiserver'], timeout=60)
+        # Control experiment: the same package installed by msiexec itself, without the CLI, to tell a broken package or
+        # runner from a broken launch by the CLI.
+        direct = temporary / 'direct-msiexec.log'
+        if not control:
+            return
+        try:
+            result = subprocess.run(['msiexec.exe', '/i', str(msi), '/qn', '/norestart', '/l*v', str(direct), 'MSIINSTALLPERUSER=1'], timeout=300)
+            print(f'--- direct msiexec exited with {result.returncode} ---', flush=True)
+        except subprocess.TimeoutExpired:
+            print('--- direct msiexec did not finish within 300 s ---', flush=True)
+        if direct.is_file():
+            data = direct.read_bytes()
+            text = data.decode('utf-16' if data[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8', errors='replace')
+            print('--- direct-msiexec.log, last 80 lines ---\n' + '\n'.join(text.splitlines()[-80:]) + '\n--- end ---', flush=True)
+        else:
+            print('--- direct msiexec wrote no log ---', flush=True)
 
 
 def main():
@@ -90,6 +152,8 @@ def main():
                                     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=900)
             output = result.stdout + result.stderr
             print(f'$ teamcode ui --bundle {source.name} --yes --no-launch -> {result.returncode}\n{output}', flush=True)
+            if result.returncode != 0:
+                show_installer_log(temporary, bundle / package, 'Windows installer' in output, root)
             return result.returncode, output
 
         # One modified byte in the middle of the package: refused before anything opens it, nothing installed.
@@ -123,7 +187,7 @@ def main():
                 for command in (['codesign', '--verify', '--deep', '--strict', str(root)],
                                 ['spctl', '--assess', '--type', 'execute', str(root)],
                                 ['xcrun', 'stapler', 'validate', str(root)]):
-                    require(subprocess.run(command, timeout=120).returncode == 0, ' '.join(command[:2]) + ' refused the installed app')
+                    require(apple(command) == 0, ' '.join(command[:2]) + ' refused the installed app')
             elif system() == 'linux':
                 require(root.is_symlink() and os.readlink(root) == version, 'current does not name the installed version')
                 require((home / '.local' / 'share' / 'applications' / 'teamcode-desktop.desktop').is_file(), 'no menu entry')
