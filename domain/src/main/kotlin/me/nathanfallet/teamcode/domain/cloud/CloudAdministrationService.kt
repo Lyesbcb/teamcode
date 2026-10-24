@@ -168,6 +168,56 @@ class CloudAdministrationService(
             else -> false
         }
 
+        /**
+         * A destination only the public internet should offer (webhooks without the operator's opt-in, MCP servers):
+         * [allowedApiHost], and also no loopback, private, unique-local, carrier-grade NAT, multicast or reserved
+         * literal address, and no `localhost` name. Other DNS names pass here and are checked against
+         * [publicAddress] when the connection resolves them.
+         */
+        fun publicApiHost(url: String): Boolean {
+            if (!allowedApiHost(url)) return false
+            val authority = url.removePrefix("https://").substringBefore('/').substringBefore('?').substringBefore('#').substringAfterLast('@')
+            val host = (if (authority.startsWith("[")) authority.substringAfter('[').substringBefore(']') else authority.substringBefore(':')).lowercase().trimEnd('.')
+            if (host == "localhost" || host.endsWith(".localhost")) return false
+            literalIpv4(host)?.let { octets -> return publicAddress(ByteArray(4) { octets[it].toByte() }) }
+            if (':' in host) return literalIpv6(host)?.let { bytes -> publicAddress(ByteArray(16) { bytes[it].toByte() }) } ?: false
+            return true
+        }
+
+        /**
+         * Whether a resolved address is on the public internet: not unspecified, loopback, link-local (cloud metadata
+         * included), private (RFC 1918, `fec0::/10`), carrier-grade NAT, multicast, benchmarking, documentation or
+         * reserved; for IPv6, global unicast (`2000::/3`) only, without the IETF protocol assignments (`2001::/23`), and no
+         * form that embeds an IPv4 destination (mapped, translated, compatible, 6to4, Teredo, NAT64) unless that
+         * destination is public. No DNS lookup happens here.
+         */
+        fun publicAddress(address: ByteArray): Boolean {
+            val parsed = when (address.size) { 4, 16 -> java.net.InetAddress.getByAddress(address); else -> return false }
+            if (parsed.isAnyLocalAddress || parsed.isLoopbackAddress || parsed.isLinkLocalAddress || parsed.isSiteLocalAddress || parsed.isMulticastAddress) return false
+            val bytes = IntArray(address.size) { address[it].toInt() and 0xff }
+            if (bytes.size == 16) {
+                // IPv4-mapped (::ffff:a.b.c.d), IPv4-translated (::ffff:0:a.b.c.d) and IPv4-compatible addresses are judged as their IPv4 address.
+                val zeros = (0 until 8).all { bytes[it] == 0 }
+                val mapped = zeros && bytes[8] == 0 && bytes[9] == 0 && ((bytes[10] == 0xff && bytes[11] == 0xff) || (bytes[10] == 0 && bytes[11] == 0))
+                val translated = zeros && bytes[8] == 0xff && bytes[9] == 0xff && bytes[10] == 0 && bytes[11] == 0
+                if (mapped || translated) return publicAddress(address.copyOfRange(12, 16))
+                // Only global unicast (2000::/3) is public: this refuses unique-local fc00::/7, discard 100::/64, NAT64
+                // 64:ff9b::/96 and 64:ff9b:1::/48 (they reach embedded IPv4 destinations), SRv6 5f00::/16 and every
+                // unassigned or reserved block.
+                if (bytes[0] and 0xe0 != 0x20) return false
+                // Inside it: 6to4 (2002::/16, embedded IPv4), the IETF protocol assignments (2001::/23: Teredo, benchmarking,
+                // ORCHID, AMT...), documentation (2001:db8::/32, 3fff::/20).
+                if (bytes[0] == 0x20 && bytes[1] == 0x02) return false
+                if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] and 0xfe == 0) return false
+                if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false
+                if (bytes[0] == 0x3f && bytes[1] == 0xff && bytes[2] and 0xf0 == 0) return false
+                return true
+            }
+            val (a, b) = bytes[0] to bytes[1]
+            return !(a == 0 || (a == 100 && b in 64..127) || (a == 192 && b == 0 && bytes[2] in setOf(0, 2)) || (a == 192 && b == 88 && bytes[2] == 99) ||
+                (a == 198 && b in 18..19) || (a == 198 && b == 51 && bytes[2] == 100) || (a == 203 && b == 0 && bytes[2] == 113) || a >= 240)
+        }
+
         /** The names of a DNS host are checked again against their resolved addresses by the cluster adapter when it connects. */
         private fun allowedIpv4(octets: IntArray) = !(octets[0] == 0 || (octets[0] == 169 && octets[1] == 254))
 
