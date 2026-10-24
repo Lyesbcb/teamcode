@@ -19,6 +19,12 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.border
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -70,6 +76,31 @@ fun Modifier.hoverHighlight(shape: Shape, color: Color? = null): Modifier = comp
     val hovered by source.collectIsHoveredAsState()
     val tint = color ?: TeamCode.colors.hover
     this.hoverable(source).then(if (hovered) Modifier.clip(shape).background(tint, shape) else Modifier)
+}
+
+/**
+ * Up and Down move the keyboard focus to the row above or below, inside a list (the sidebar, the content panel's
+ * cards); Enter or Space then opens the focused row, as `clickable` does for a focused element. Compose moves the focus
+ * with Tab and Shift+Tab on its own; the arrows are this modifier's, through Compose's focus search
+ * ([FocusDirection.Down] and [FocusDirection.Up], which also scroll a lazy list to the row they reach).
+ */
+fun Modifier.arrowKeyNavigation(): Modifier = composed {
+    val focus = LocalFocusManager.current
+    onPreviewKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown || event.isMetaPressed || event.isCtrlPressed || event.isAltPressed) return@onPreviewKeyEvent false
+        when (event.key) {
+            Key.DirectionDown -> focus.moveFocus(FocusDirection.Down)
+            Key.DirectionUp -> focus.moveFocus(FocusDirection.Up)
+            else -> false
+        }
+    }
+}
+
+/** The ring around a focused row or card, in [shape]: where the keyboard is. Put it before the element's `clickable`. */
+fun Modifier.focusRing(shape: Shape): Modifier = composed {
+    var focused by remember { mutableStateOf(false) }
+    val color = TeamCode.colors.accent
+    this.onFocusChanged { focused = it.isFocused }.then(if (focused) Modifier.border(2.dp, color, shape) else Modifier)
 }
 
 /** What Enter does in a text field that submits ([enterAction]). */

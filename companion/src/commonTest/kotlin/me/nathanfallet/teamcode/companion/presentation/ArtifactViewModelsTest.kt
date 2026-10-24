@@ -61,6 +61,13 @@ class ArtifactViewModelsTest {
         assertEquals(listOf("mine-1"), model.uiState.value.artifacts.map { it.id })
     }
 
+    @Test fun aGalleryLinkIsTheViewerPageOnTheAccountsOwnServerNotTheLinkTheServerAnswered() = runTest(dispatcher) {
+        val model = ArtifactsViewModel(ArtifactsRoute("a1"), LoadArtifactsUseCase(artifacts, features, guard), accounts)
+        val answered = artifact("r1").copy(url = "https://elsewhere.example/phish")
+        assertEquals("${accounts.accounts.value.first { it.id == "a1" }.origin}/artifact/r1", model.viewerUrl(answered))
+        assertNull(ArtifactsViewModel(ArtifactsRoute("gone"), LoadArtifactsUseCase(artifacts, features, guard), accounts).viewerUrl(answered))
+    }
+
     @Test fun theGallerySaysWhenTheServerHasNoArtifacts() = runTest(dispatcher) {
         features.features = emptySet()
         val model = ArtifactsViewModel(ArtifactsRoute("a1"), LoadArtifactsUseCase(artifacts, features, guard))

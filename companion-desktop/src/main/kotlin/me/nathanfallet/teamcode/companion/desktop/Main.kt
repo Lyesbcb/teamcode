@@ -14,6 +14,14 @@ import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.WindowPosition
+import com.russhwolf.settings.Settings
+import java.awt.GraphicsEnvironment
+import kotlin.math.roundToInt
 import androidx.compose.ui.window.rememberWindowState
 import java.awt.Desktop
 import java.awt.Dimension
@@ -49,6 +57,12 @@ fun main(args: Array<String>) {
     /** Cmd on macOS, Ctrl elsewhere. */
     fun shortcut(key: Key) = if (mac) KeyShortcut(key, meta = true) else KeyShortcut(key, ctrl = true)
     val tray = try { SystemTray.isSupported() } catch (_: Throwable) { false }
+    // The window opens where it was left, at the size it had: checked against the screens connected now.
+    val placement = WindowPlacementStore(koin.get<Settings>())
+    val screens = try {
+        GraphicsEnvironment.getLocalGraphicsEnvironment().screenDevices.map { it.defaultConfiguration.bounds }
+    } catch (_: Throwable) { emptyList() }
+    val saved = placement.load(screens)
     application {
         var visible by remember { mutableStateOf(true) }
         LaunchedEffect(Unit) {
@@ -61,15 +75,29 @@ fun main(args: Array<String>) {
             Separator()
             Item("Quit TeamCode (sessions on this device keep running)", onClick = ::exitApplication)
         })
+        val windowState = rememberWindowState(
+            placement = if (saved?.maximized == true) WindowPlacement.Maximized else WindowPlacement.Floating,
+            position = saved?.let { s -> if (s.x != null && s.y != null) WindowPosition(s.x.dp, s.y.dp) else null } ?: WindowPosition(Alignment.Center),
+            size = saved?.let { DpSize(it.width.dp, it.height.dp) } ?: DpSize(1200.dp, 800.dp),
+        )
+        LaunchedEffect(windowState) {
+            snapshotFlow { Triple(windowState.placement, windowState.position, windowState.size) }.collect { (mode, position, size) ->
+                val floating = mode == WindowPlacement.Floating
+                placement.save(SavedWindow(
+                    x = position.takeIf { floating && it.isSpecified }?.x?.value?.roundToInt(), y = position.takeIf { floating && it.isSpecified }?.y?.value?.roundToInt(),
+                    width = size.width.value.roundToInt(), height = size.height.value.roundToInt(), maximized = mode == WindowPlacement.Maximized,
+                ))
+            }
+        }
         Window(
             onCloseRequest = { if (tray) visible = false else exitApplication() },
             visible = visible,
             title = "TeamCode",
             icon = appIcon,
-            state = rememberWindowState(width = 1200.dp, height = 800.dp),
+            state = windowState,
         ) {
             // Wide enough for the sidebar and a readable panel: the window never falls back to the phone layout.
-            LaunchedEffect(Unit) { window.minimumSize = Dimension(760, 520) }
+            LaunchedEffect(Unit) { window.minimumSize = Dimension(WindowPlacementStore.MIN_WIDTH, WindowPlacementStore.MIN_HEIGHT) }
             MenuBar {
                 Menu("File") {
                     Item("New Session…", shortcut = shortcut(Key.N), onClick = { AppCommands.send(AppCommand.NEW_SESSION) })
@@ -79,6 +107,7 @@ fun main(args: Array<String>) {
                 Menu("View") {
                     Item("Sessions", shortcut = shortcut(Key.One), onClick = { AppCommands.send(AppCommand.SHOW_SESSIONS) })
                     Item("Artifacts", shortcut = shortcut(Key.Two), onClick = { AppCommands.send(AppCommand.SHOW_ARTIFACTS) })
+                    Item("Command Palette…", shortcut = shortcut(Key.K), onClick = { AppCommands.send(AppCommand.COMMAND_PALETTE) })
                     Separator()
                     Item("Settings…", shortcut = shortcut(Key.Comma), onClick = { AppCommands.send(AppCommand.SHOW_ACCOUNT) })
                 }
