@@ -135,6 +135,9 @@ cloudSessions:
 
 # Optional single MySQL instance for a self-contained installation, using the tested official 8.4 image.
 # For production HA, disable this and supply an externally managed MySQL 8.4 JDBC URL below.
+# This is the chart's own StatefulSet (templates/mysql.yaml, official mysql image, data in /var/lib/mysql), NOT the
+# Bitnami MySQL subchart: its keys are mysql.resources, mysql.persistence and mysql.config. Bitnami-style keys such as
+# mysql.primary.resources do not exist here; rendering fails on mysql.primary rather than ignoring it.
 mysql:
   enabled: true
   image: mysql:8.4
@@ -144,11 +147,32 @@ mysql:
   networkPolicy:
     enabled: true
   persistence:
-    size: 10Gi
+    # Empty = automatic: an existing release keeps the size its StatefulSet was created with (read with Helm's lookup),
+    # a new installation gets 30Gi. An explicit value is used as written. The size is read only when the StatefulSet is
+    # created: volumeClaimTemplates is immutable, so a different value on an existing release makes `helm upgrade` fail
+    # (Forbidden: updates to statefulset spec). To grow an existing volume, patch the PVC
+    # (`kubectl patch pvc data-<release>-mysql-0`, on a storage class with allowVolumeExpansion) and leave this value as is.
+    # lookup needs the cluster: `helm template` and `--dry-run=client` render 30Gi (use `--dry-run=server` to preview).
+    size: ""
     storageClass: ""
+  # Server settings written to /etc/mysql/conf.d/teamcode.cnf. MySQL 8.4 sizes some memory from the node, not the
+  # container: the TempTable engine may take 3% of the node's RAM with a 1 GiB minimum (temptable_max_ram), which alone
+  # reaches a 1 GiB limit. These bounds keep mysqld under mysql.resources.limits.memory; keep them in step when changing
+  # either. Binary logs are on by default and kept 30 days in 1 GiB files; artifact uploads pass through MySQL as 1 MiB
+  # chunks inserted then deleted, so each uploaded byte reached the log twice. The bundled instance has no replica: keep
+  # one day, in smaller files (only whole files expire), and log deleted rows by primary key only.
+  config: |
+    [mysqld]
+    innodb_buffer_pool_size = 384M
+    temptable_max_ram = 128M
+    tmp_table_size = 32M
+    max_heap_table_size = 32M
+    binlog_expire_logs_seconds = 86400
+    max_binlog_size = 256M
+    binlog_row_image = MINIMAL
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
-    limits:
       memory: 1Gi
+    limits:
+      memory: 2Gi
