@@ -28,14 +28,15 @@ private class ListAccounts : SuspendingCliktCommand(name = "list") {
     } }
 }
 private class AddAccount : SuspendingCliktCommand(name = "add") {
-    private val providerName by option("--provider").choice("claude", "claude-max", "codex").default("claude")
+    private val providerName by option("--provider").choice("claude", "claude-max", "codex", "openrouter").default("claude")
     private val noBrowser by option("--no-browser", help = "Print the sign-in link without opening a browser.").flag()
-    override fun help(context: Context) = "Sign in to Claude or Codex locally, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
+    override fun help(context: Context) = "Sign in to Claude or Codex locally, or add an OpenRouter API key, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
     override suspend fun run() {
         val config = loadConfig()
         sdk(config).use { client ->
             // Check before opening the provider sign-in, with a call every member may make.
             requireEnrollmentAllowed(client.capabilities().features, client::accountEnrollmentPolicy) { client.me().role }
+            if (providerName == "openrouter") return addOpenRouterKey(client, ::echo)
             val provider = if (providerName == "codex") CodexOAuthEnrollment else ClaudeOAuthEnrollment
             val verifier = randomCode()
             val state = randomCode()
@@ -58,6 +59,23 @@ private class AddAccount : SuspendingCliktCommand(name = "add") {
         }
     }
 }
+/**
+ * An OpenRouter account is a pay-as-you-go API key, not a sign-in: the key is read without echo, verified by the server
+ * against OpenRouter, and stored encrypted like any other credential. There is nothing to refresh, so the refresh token is
+ * a fixed marker and the expiry the end of the century.
+ */
+internal suspend fun addOpenRouterKey(client: TeamCodeClient, echo: (String) -> Unit) {
+    echo("Paste your OpenRouter API key (input is hidden). Create one at https://openrouter.ai/keys, with a credit limit if you want a hard cap.")
+    val key = Terminal().readLineOrNull(hideInput = true)?.trim().orEmpty()
+    if (key.isEmpty()) throw CliUserException("No API key was entered.")
+    val input = EnrollAccountRequest(key, OPENROUTER_REFRESH_MARKER, OPENROUTER_NEVER_EXPIRES, randomCode(), "openrouter", freshSignIn = true)
+    val result = try { client.enrollAccount(input) } catch (error: TeamCodeException) { throw enrollmentRefusal(error) ?: error }
+    echo("${if (result.created) "Added" else "Updated"} ${result.account.label}, id ${result.account.id}.")
+    echo("The account serves requests now. Route models to it in Dashboard > Accounts and models > Model routes, with the provider openrouter.")
+}
+internal const val OPENROUTER_REFRESH_MARKER = "api-key"
+/** 2100-01-01T00:00:00Z in epoch milliseconds. */
+internal const val OPENROUTER_NEVER_EXPIRES = 4_102_444_800_000L
 internal const val ENROLLMENT_POLICY_FEATURE = "accounts.enrollment-policy.v1"
 /** TeamCode's own words for the refusals of `accounts add`, safe to print; keyed by the server's error code. */
 internal object EnrollmentMessages {
