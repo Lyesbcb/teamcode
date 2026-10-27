@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.companion.presentation.viewmodels
 
+import me.nathanfallet.teamcode.companion.resources.*
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
@@ -11,6 +12,7 @@ import kotlinx.coroutines.launch
 import me.nathanfallet.teamcode.companion.domain.models.CompanionException
 import me.nathanfallet.teamcode.companion.domain.models.ServerInfo
 import me.nathanfallet.teamcode.companion.domain.models.SignInResult
+import me.nathanfallet.teamcode.companion.domain.services.CliAccountLink
 import me.nathanfallet.teamcode.companion.domain.services.PlatformInfo
 import me.nathanfallet.teamcode.companion.domain.usecases.auth.ChangePasswordUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.auth.InspectServerUseCase
@@ -28,8 +30,11 @@ data class LoginUiState(
     val newPassword: String = "",
     val confirmation: String = "",
     val working: Boolean = false,
-    val error: String? = null,
+    val error: Failure? = null,
     val signedIn: Boolean = false,
+    /** The desktop offers to give the CLI this account while the CLI has none. */
+    val cliLinkOffered: Boolean = false,
+    val useForCli: Boolean = true,
 ) {
     val canSubmit: Boolean get() = server != null && !working && when (passwordChange) {
         null -> username.isNotBlank() && password.isNotEmpty() && deviceName.isNotBlank()
@@ -47,12 +52,19 @@ class LoginViewModel(
     private val signIn: SignInUseCase,
     private val changePassword: ChangePasswordUseCase,
     platform: PlatformInfo,
+    private val cliLink: CliAccountLink? = null,
 ) : ViewModel() {
     private val state = MutableStateFlow(LoginUiState(route.origin, username = route.username.orEmpty(), deviceName = platform.defaultDeviceName))
     val uiState: StateFlow<LoginUiState> = state.asStateFlow()
 
     init {
         loadServer()
+        cliLink?.let { link ->
+            viewModelScope.launch {
+                val offered = try { link.canLink() } catch (error: CancellationException) { throw error } catch (_: Exception) { false }
+                state.update { it.copy(cliLinkOffered = offered) }
+            }
+        }
     }
 
     override fun onCleared() {
@@ -81,6 +93,7 @@ class LoginViewModel(
     fun onDeviceNameChange(value: String) = state.update { it.copy(deviceName = value, error = null) }
     fun onNewPasswordChange(value: String) = state.update { it.copy(newPassword = value, error = null) }
     fun onConfirmationChange(value: String) = state.update { it.copy(confirmation = value, error = null) }
+    fun onUseForCliChange(value: Boolean) = state.update { it.copy(useForCli = value) }
 
     fun submit() {
         val current = state.value
@@ -93,16 +106,24 @@ class LoginViewModel(
                 val result = if (pending == null) signIn(server, current.username, current.password, current.deviceName)
                 else changePassword(pending, current.password, current.newPassword, current.confirmation)
                 when (result) {
-                    is SignInResult.SignedIn -> state.update { it.copy(working = false, signedIn = true, password = "", newPassword = "", confirmation = "") }
+                    is SignInResult.SignedIn -> {
+                        val linked = state.value
+                        if (cliLink != null && linked.cliLinkOffered && linked.useForCli) {
+                            // The app's sign-in stands even if the CLI's file cannot be written: the CLI keeps its own login.
+                            try { cliLink.link(result.account.id) } catch (error: CancellationException) { throw error } catch (_: Exception) { }
+                        }
+                        state.update { it.copy(working = false, signedIn = true, password = "", newPassword = "", confirmation = "") }
+                    }
                     is SignInResult.PasswordChangeRequired -> state.update { it.copy(working = false, passwordChange = result) }
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: CompanionException.InvalidCredentials) {
                 // During a password change, the temporary session expired or was revoked: back to signing in.
+                val message = if (state.value.passwordChange == null) error.userMessage() else Failure("The temporary session ended. Sign in again: with your new password if the change went through, otherwise with the temporary one.", Res.string.error_temporary_session_ended)
                 state.update {
-                    if (it.passwordChange == null) it.copy(working = false, error = error.userMessage())
-                    else it.copy(working = false, passwordChange = null, password = "", newPassword = "", confirmation = "", error = "The temporary session ended. Sign in again: with your new password if the change went through, otherwise with the temporary one.")
+                    if (it.passwordChange == null) it.copy(working = false, error = message)
+                    else it.copy(working = false, passwordChange = null, password = "", newPassword = "", confirmation = "", error = message)
                 }
             } catch (error: CompanionException.PasswordChanged) {
                 // Back to the sign-in form: the temporary password and its session no longer exist.

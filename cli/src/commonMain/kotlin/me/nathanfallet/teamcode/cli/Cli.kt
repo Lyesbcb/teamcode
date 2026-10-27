@@ -31,7 +31,7 @@ class Cli : SuspendingNoOpCliktCommand(name = "teamcode") {
     override fun help(context: Context) = "A self-hosted team gateway. First use: teamcode login."
     // Read by main() before parsing, so a failure in any command can print it; declared here for --help.
     @Suppress("unused") private val debug by option("--debug", help = "On failure, also print the error type, HTTP status and codes (never secrets). Same as TEAMCODE_DEBUG=1.").flag()
-    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Sessions(), Service(), WhoAmI(), Auth(), Devices(), ServiceKeys(), VerifyRelease(), Update(), me.nathanfallet.teamcode.cli.update.Install(), me.nathanfallet.teamcode.cli.cloud.Cloud(), me.nathanfallet.teamcode.cli.remote.Remote(), me.nathanfallet.teamcode.cli.github.GitHub(), me.nathanfallet.teamcode.cli.hooks.Hooks(), me.nathanfallet.teamcode.cli.artifacts.Artifacts(), me.nathanfallet.teamcode.cli.mcp.Mcp()) }
+    init { subcommands(Login(), Logout(), Configure(), Status(), Version(), Proxy(), Accounts(), Agents(), Run(), Sessions(), Service(), WhoAmI(), Auth(), Devices(), ServiceKeys(), VerifyRelease(), Update(), me.nathanfallet.teamcode.cli.update.Install(), me.nathanfallet.teamcode.cli.cloud.Cloud(), me.nathanfallet.teamcode.cli.remote.Remote(), me.nathanfallet.teamcode.cli.cloud.CloudAttach(), me.nathanfallet.teamcode.cli.github.GitHub(), me.nathanfallet.teamcode.cli.hooks.Hooks(), me.nathanfallet.teamcode.cli.artifacts.Artifacts(), me.nathanfallet.teamcode.cli.mcp.Mcp(), me.nathanfallet.teamcode.cli.ui.Ui(), me.nathanfallet.teamcode.cli.daemon.Folders()) }
 }
 
 private class Version : SuspendingCliktCommand(name = "version") {
@@ -165,23 +165,13 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
 }
 
-/** Actionable text for release failures; the code stays in the output for diagnostics and scripts. */
-internal fun releaseFailureMessage(code: String): String = when (code) {
-    "release_installation_busy" ->
-        "TeamCode installation is busy ($code): an agent session started by TeamCode is still running, or the installation is being modified. Close all agent sessions, then run the command again (for example `teamcode update`)."
-    "release_writer_busy" ->
-        "TeamCode installation is busy ($code): another TeamCode update or installation change is in progress. Wait for it to finish, then run the command again."
-    else ->
-        "TeamCode release operation failed ($code). Check connectivity, release files, private permissions and platform crypto libraries."
-}
-
 expect object SystemExit { fun fail(message: String): Nothing; fun exit(code: Int): Nothing }
 
 /**
  * Safe operation identifiers only; never print raw platform/HTTP exception messages. The code is also the exception
  * message, so a test or crash report names the failing step (for example `windows_private_file_4`).
  */
-class CliOperationException(val code: String) : Exception(code) {
+class CliOperationException(val code: String, val detail: String? = null) : Exception(code) {
     init { require(Regex("[a-zA-Z0-9_]{1,120}").matches(code)) }
 }
 

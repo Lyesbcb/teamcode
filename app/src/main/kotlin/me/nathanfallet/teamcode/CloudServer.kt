@@ -2,6 +2,7 @@ package me.nathanfallet.teamcode
 
 import java.util.UUID
 import kotlinx.coroutines.*
+import me.nathanfallet.teamcode.domain.artifacts.ArtifactObjectStore
 import me.nathanfallet.teamcode.domain.cloud.*
 import me.nathanfallet.teamcode.domain.github.GitHubLinkService
 import me.nathanfallet.teamcode.domain.github.ResolveGitHubAccessUseCase
@@ -9,13 +10,17 @@ import me.nathanfallet.teamcode.domain.variants.ResolveEffectiveVariantsUseCase
 import me.nathanfallet.teamcode.infrastructure.cloud.ClusterApiException
 import me.nathanfallet.teamcode.infrastructure.cloud.KubernetesClusterPort
 import me.nathanfallet.teamcode.infrastructure.cloud.KubernetesPodOptions
+import me.nathanfallet.teamcode.infrastructure.cloud.SessionNetworkPolicy
 import me.nathanfallet.teamcode.infrastructure.database.Database
+import me.nathanfallet.teamcode.infrastructure.database.SqlArtifactAdminStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlCloudFileStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudAdminStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudConversationStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudInferenceCredentialStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudSessionStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudRuntimeStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlCloudTransferStore
+import me.nathanfallet.teamcode.infrastructure.database.SqlDeviceDaemonStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlGitHubStore
 import me.nathanfallet.teamcode.infrastructure.database.SqlMemberAllowance
 import me.nathanfallet.teamcode.infrastructure.database.SqlVariantService
@@ -26,6 +31,7 @@ import me.nathanfallet.teamcode.infrastructure.secrets.CipherSecretSealer
 import me.nathanfallet.teamcode.infrastructure.secrets.CredentialCipher
 import me.nathanfallet.teamcode.presentation.CloudConversation
 import me.nathanfallet.teamcode.presentation.CloudRunnerChannel
+import me.nathanfallet.teamcode.presentation.DeviceDaemonChannel
 
 /**
  * Cloud sessions. Built whenever the server has a database, so administrators can configure them from the dashboard;
@@ -33,7 +39,11 @@ import me.nathanfallet.teamcode.presentation.CloudRunnerChannel
  * `404` and `cloud.*` capabilities are not advertised. The runner channel and the workers keep serving the sessions that
  * already exist, so turning cloud sessions off never kills a running agent; they stay idle until a runtime is stored.
  */
-class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: String) : AutoCloseable {
+class CloudServer(
+    database: Database, cipher: CredentialCipher, publicOrigin: String, objects: ArtifactObjectStore? = null,
+    /** The operator's session network policy, from the deployment variables; never stored or set from the dashboard. */
+    sessionNetwork: SessionNetworkPolicy = SessionNetworkPolicy(),
+) : AutoCloseable {
     val runtime = CloudRuntimeService(SqlCloudRuntimeStore(database), publicOrigin)
     private val store = SqlCloudSessionStore(database)
     private val adminStore = SqlCloudAdminStore(database, cipher)
@@ -43,19 +53,26 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
         if (!current.enabled) throw CloudConfigurationException("cloud sessions are turned off; queued sessions start once they are on again")
         val image = current.runnerImage ?: throw CloudConfigurationException("no runner image is set; set it on Dashboard → Cloud sessions")
         if (!CloudRuntimeService.usableOrigin(runtime.serverUrl(current))) throw CloudConfigurationException("the callback origin for pods is not HTTPS or is loopback; set the server URL for pods on Dashboard → Cloud sessions")
-        KubernetesPodOptions(serverUrl = runtime.serverUrl(current), runnerImage = image, runnerBinary = current.runnerBinary, workspaceAccessMode = current.workspaceAccessMode)
+        KubernetesPodOptions(serverUrl = runtime.serverUrl(current), runnerImage = image, runnerBinary = current.runnerBinary, workspaceAccessMode = current.workspaceAccessMode,
+            network = sessionNetwork)
     }, workspaceAccessMode = { runtime.current.workspaceAccessMode })
     private val work = SqlScheduledWork(database)
     private val replica = UUID.randomUUID().toString()
 
     private val githubStore = SqlGitHubStore(database, cipher)
     private val githubClient = GitHubAppClient()
+    private val githubLinked: suspend (String, String) -> Boolean = { teamId, memberId -> githubStore.link(teamId, memberId) != null }
 
     private val conversationStore = SqlCloudConversationStore(database)
     // Groups do not exist in TeamCode yet; a group directory plugs in here when they land.
     private val access = CloudAccessService(conversationStore, store, CloudGroupDirectory.NONE)
-    private val conversationService = CloudConversationService(conversationStore, store, access)
-    val sessions = CloudSessionService(store, access = access, initialMessages = conversationService)
+    // A linked owner's agent holds their GitHub token: only the owner instructs it unless they share the session (audit M2).
+    private val conversationService = CloudConversationService(conversationStore, store, access,
+        githubLinked = githubLinked)
+    private val daemonStore = SqlDeviceDaemonStore(database, cipher)
+    val sessions = CloudSessionService(store, access = access, initialMessages = conversationService, daemons = daemonStore)
+    /** Members' device daemons: presence, published folders and the queue of sessions to host. */
+    val daemons = DeviceDaemonChannel(DeviceDaemonUseCase(daemonStore), sessions)
 
     // Transfers recheck the recipient with the same rules as creation, plus model policy and quota. Environment
     // variables, MCP servers and skills reach cloud sessions in other branches; their assignment checks join this list.
@@ -74,14 +91,28 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
     val github = GitHubLinkService(githubStore, githubStore, githubClient)
     /** The owner's environment variables come from the variants, resolved at every preparation. */
     private val variables = ResolveCloudVariablesUseCase(ResolveEffectiveVariantsUseCase(SqlVariantService(database, cipher)))
-    private val githubAccess = ResolveGitHubAccessUseCase(githubStore, githubStore, githubClient)
+    private val githubAccess = ResolveGitHubAccessUseCase(githubStore, githubStore, githubClient, log = { System.out.println(it) })
     /** A remote session's host presents its owner's login; it is resolved like any API call's. */
     private val logins = me.nathanfallet.teamcode.infrastructure.database.SqlTeamService(database)
     val runner = CloudRunnerChannel(RunnerChannelUseCase(store, variables = variables, github = githubAccess),
         AuthenticateRunnerUseCase(store, cluster, logins = { token -> logins.authenticate(token) }), RunnerInferenceUseCase(store, inferenceCredentials), RunnerGitHubUseCase(store, githubAccess),
         RunnerVariablesUseCase(store, variables), remoteHosts = true)
 
-    val conversation = CloudConversation(conversationService, access, RunnerConversationUseCase(store, conversationStore), me.nathanfallet.teamcode.domain.team.TeamEventService(me.nathanfallet.teamcode.infrastructure.database.SqlTeamEventStore(database)))
+    /**
+     * Files sent to sessions (`cloud.files.v1`), kept in the team's artifact bucket: without an object store the server
+     * serves no file route. A team without a tested bucket is refused `file_storage_not_configured`.
+     */
+    private val files = objects?.let { bucket ->
+        val artifactAdmin = SqlArtifactAdminStore(database, cipher)
+        CloudFileService(SqlCloudFileStore(database), store, conversationService, object : CloudFileStorage {
+            override suspend fun active(teamId: String) = artifactAdmin.testedConnection(teamId)
+            override suspend fun any(teamId: String) = artifactAdmin.connection(teamId)
+        }, bucket)
+    }
+
+    val conversation = CloudConversation(conversationService, access, RunnerConversationUseCase(store, conversationStore, githubLinked,
+        githubLogin = { teamId, memberId -> githubStore.link(teamId, memberId)?.identity?.login }),
+        me.nathanfallet.teamcode.domain.team.TeamEventService(me.nathanfallet.teamcode.infrastructure.database.SqlTeamEventStore(database)), files = files)
 
     /**
      * Seeds the runtime from the former deployment variables, only if nothing is stored yet; the database stays the
@@ -144,6 +175,8 @@ class CloudServer(database: Database, cipher: CredentialCipher, publicOrigin: St
                 try {
                     work.runDue("cloud-maintenance", intervalMillis = 60_000) { store.maintain(); transferStore.maintain(); transfers.expireOffers(); inferenceCredentials.purge(500) }
                     work.runDue("cloud-gc", intervalMillis = 10 * 60_000, timeoutMillis = 240_000) { collectGarbage() }
+                    // Bytes of files their host received, that expired or whose upload failed, then their rows.
+                    files?.let { work.runDue("cloud-files-sweep", intervalMillis = 60_000, timeoutMillis = 120_000) { it.sweep() } }
                 }
                 // runDue's deadline is a cancellation of the block only; the loop must survive it.
                 catch (_: TimeoutCancellationException) { System.err.println("TeamCode cloud maintenance deadline exceeded.") }

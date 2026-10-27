@@ -26,8 +26,10 @@ import me.nathanfallet.teamcode.companion.domain.repositories.FeaturesRepository
 import me.nathanfallet.teamcode.companion.domain.repositories.SessionRepository
 import me.nathanfallet.teamcode.companion.domain.repositories.TranscriptRepository
 import me.nathanfallet.teamcode.companion.domain.usecases.auth.AccountGuard
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.AnswerPermissionUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.ControlSessionUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.CreateSessionUseCase
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.StartLocalSessionUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.FollowSessionListUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.LoadProfilesUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.SendMessageUseCase
@@ -46,6 +48,15 @@ import me.nathanfallet.teamcode.companion.domain.usecases.artifacts.LoadArtifact
 import me.nathanfallet.teamcode.companion.domain.usecases.artifacts.OpenArtifactUseCase
 import me.nathanfallet.teamcode.companion.domain.usecases.links.ResolveLinkUseCase
 import me.nathanfallet.teamcode.companion.infrastructure.repositories.RemoteArtifactRepository
+import me.nathanfallet.teamcode.companion.domain.repositories.SessionFileRepository
+import me.nathanfallet.teamcode.companion.domain.usecases.files.SessionFilesUseCase
+import me.nathanfallet.teamcode.companion.infrastructure.repositories.RemoteSessionFileRepository
+import me.nathanfallet.teamcode.companion.domain.repositories.DeviceRepository
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.CreateDeviceSessionUseCase
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.LoadDeviceFoldersUseCase
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.LoadResumableSessionsUseCase
+import me.nathanfallet.teamcode.companion.domain.usecases.sessions.LoadHostDevicesUseCase
+import me.nathanfallet.teamcode.companion.infrastructure.repositories.RemoteDeviceRepository
 import org.koin.dsl.module
 
 /** Implementations; the platform module adds Settings, the CredentialStore, the HTTP engine and PlatformInfo. */
@@ -64,6 +75,8 @@ val infrastructureModule = module {
     single<SessionRepository> { RemoteSessionRepository(get(), get()) }
     single<TranscriptRepository> { RemoteTranscriptRepository(get(), get()) }
     single<ArtifactRepository> { RemoteArtifactRepository(get()) }
+    single<SessionFileRepository> { RemoteSessionFileRepository(get()) }
+    single<DeviceRepository> { RemoteDeviceRepository(get()) }
 }
 
 val domainModule = module {
@@ -81,10 +94,18 @@ val domainModule = module {
     single { FollowTranscriptUseCase(get(), get()) }
     single { SendMessageUseCase(get(), get(), get(), get()) }
     single { ControlSessionUseCase(get(), get(), get()) }
+    single { AnswerPermissionUseCase(get(), get(), get(), get()) }
     single { LoadProfilesUseCase(get(), get(), get()) }
     single { CreateSessionUseCase(get(), get(), get()) }
+    single { LoadHostDevicesUseCase(get(), get(), get()) }
+    single { LoadDeviceFoldersUseCase(get(), get()) }
+    single { LoadResumableSessionsUseCase(get(), get(), get()) }
+    single { CreateDeviceSessionUseCase(get(), get(), get(), get()) }
+    // Resolved only where a LocalHost exists (the desktop's platform module).
+    single { StartLocalSessionUseCase(get(), get(), get()) }
     single { LoadArtifactsUseCase(get(), get(), get()) }
     single { GetArtifactUseCase(get(), get(), get()) }
     single { OpenArtifactUseCase(get(), get(), get(), get()) }
     single { ResolveLinkUseCase(get()) }
+    single { SessionFilesUseCase(get(), get(), get(), get()) }
 }

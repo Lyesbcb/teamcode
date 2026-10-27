@@ -38,14 +38,14 @@ internal fun Route.cloudRunnerRoutes(channel: CloudRunnerChannel) {
     post(RUNNER_PATH + "heartbeat") {
         val body = call.jsonBody<RunnerHeartbeatRequest>()
         val pod = channel.authenticate(call.runnerToken(), body.teamId, body.sessionId, body.epoch)
-        call.respond(channel.runner.heartbeat(pod.teamId, pod.sessionId, pod.epoch, body.ready).view())
+        call.respond(channel.runner.heartbeat(pod.teamId, pod.sessionId, pod.epoch, body.ready, body.background).view())
     }
     post(RUNNER_PATH + "environment") {
         val body = call.jsonBody<RunnerEnvironmentRequest>()
         val pod = channel.authenticate(call.runnerToken(), body.teamId, body.sessionId, body.epoch)
         val prepared = channel.runner.environment(pod.teamId, pod.sessionId, pod.epoch)
         call.respond(RunnerEnvironmentView(prepared.spec.view(), RunnerGitIdentityView(prepared.git.name, prepared.git.email),
-            prepared.variables.values, prepared.variables.unavailable, prepared.github.view()))
+            prepared.variables.values, prepared.variables.unavailable, prepared.github.view(), prepared.untrustedWorkspace))
     }
     post(RUNNER_PATH + "preparation") {
         val body = call.jsonBody<RunnerPreparationRequest>()

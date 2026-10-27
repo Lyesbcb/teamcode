@@ -13,8 +13,12 @@ import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.domain.cloud.*
 import me.nathanfallet.teamcode.domain.team.*
 
-/** Transcript, messages, attachments and access policy; mounted with the cloud routes. */
-class CloudConversation(val service: CloudConversationService, val access: CloudAccessService, val runner: RunnerConversationUseCase, val events: TeamEventService? = null)
+/**
+ * Transcript, messages, attachments and access policy; mounted with the cloud routes. [files] receives files sent to
+ * sessions (`cloud.files.v1`); without it the file routes are not mounted and a message naming files is refused.
+ */
+class CloudConversation(val service: CloudConversationService, val access: CloudAccessService, val runner: RunnerConversationUseCase, val events: TeamEventService? = null,
+    val files: CloudFileService? = null)
 
 private const val MESSAGE_BODY_BYTES = 256 * 1024
 private const val RUNNER_BODY_BYTES = 2 * 1024 * 1024
@@ -26,6 +30,21 @@ private val DROPPED_KEYS = CloudTranscriptLimits.DROPPED_KEYS
 internal fun CloudEvent.view() = CloudEventView(seq, type.wire, at, epoch, Serialization.json.parseToJsonElement(data).jsonObject)
 private fun CloudEventPage.view() = CloudEventPageView(events.map { it.view() }, firstSeq, lastSeq, nextAfter, nextBefore)
 private fun CloudInput.view() = CloudInputView(id, kind.wire, status.wire, authorId, text, wake, woke, clientKey, createdAt, deliveredAt, deliveredEpoch, consumedAt, finishedAt, reason, eventSeq)
+private fun CloudFile.view() = CloudFileView(id, sessionId, name, size, contentType.orEmpty(), sha256.orEmpty(), createdAt, expiresAt)
+private fun CloudFilePolicy.view() = CloudFilePolicyView(available, reason, maxFileBytes, maxMessageBytes, maxFilesPerMessage, types)
+private fun CloudFileRef.view() = RunnerFileView(id, name, size, contentType, sha256)
+
+/** Up to [max] bytes of the body, fewer only at its end; null once it is exhausted. */
+private suspend fun ByteReadChannel.readPart(max: Int): ByteArray? {
+    val buffer = ByteArray(max)
+    var filled = 0
+    while (filled < max) {
+        val count = readAvailable(buffer, filled, max - filled)
+        if (count < 0) break
+        filled += count
+    }
+    return if (filled == 0) null else if (filled == max) buffer else buffer.copyOf(filled)
+}
 private fun CloudAttachment.view() = CloudAttachmentView(id, sessionId, memberId, leaseUntil, permissions.map { it.wire }.sorted(), createdAt)
 private fun CloudAccessPolicy.view() = CloudAccessPolicyView(version, rules.map { rule ->
     CloudAccessRuleView(rule.subject.wire, rule.permissions.map { it.wire }.sorted(), rule.scope.wire)
@@ -172,8 +191,12 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
         post("/sessions/{id}/messages") {
             call.refuseOnBehalf()
             val input = call.boundedJson<SendCloudMessageRequest>(MESSAGE_BODY_BYTES)
+            // Never dropped silently: a server that does not take files refuses a message that names some.
+            if (input.fileIds.isNotEmpty() && conversation.files == null) throw TeamFailure(CloudFiles.UNSUPPORTED, 400, "This server does not take files.")
             val key = call.clientKey(input.clientMessageId)
-            val request = InputRequest(input.text, input.wake, key, key?.let { digest("message\n${input.wake}\n${input.text}") }, input.expectedLastEventSeq)
+            // The files are part of the request a key stands for; a message without files keeps the digest it always had.
+            val files = if (input.fileIds.isEmpty()) "" else "\nfiles\n" + input.fileIds.joinToString(",")
+            val request = InputRequest(input.text, input.wake, key, key?.let { digest("message\n${input.wake}\n${input.text}$files") }, input.expectedLastEventSeq, input.fileIds)
             call.respondInput(service.send(call.principal, call.sessionId(), request))
         }
         get("/sessions/{id}/messages") {
@@ -188,6 +211,12 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
             val key = call.clientKey(null)
             call.respondInput(service.interrupt(call.principal, call.sessionId(), InputRequest(null, false, key, key?.let { digest("interrupt") }, null)))
         }
+        post("/sessions/{id}/tasks/stop") {
+            call.refuseOnBehalf()
+            val body = call.boundedJson<StopCloudTaskRequest>(1024)
+            val key = call.clientKey(null)
+            call.respondInput(service.stopTask(call.principal, call.sessionId(), body.taskId, InputRequest(body.taskId, false, key, key?.let { digest("stop_task\n${body.taskId}") }, null)))
+        }
 
         post("/sessions/{id}/permissions") {
             call.refuseOnBehalf()
@@ -195,7 +224,8 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
             val allow = when (body.behavior) { "allow" -> true; "deny" -> false; else -> throw TeamFailure("invalid_permission_answer", 400, "Use behavior allow or deny.") }
             val answer = PermissionAnswer(body.requestId, allow, body.message, body.answers.orEmpty().map { QuestionAnswer(it.question, it.options, it.text) })
             // The runner reads this text: the answer exactly as validated, in a fixed shape (answers by question index).
-            val text = buildJsonObject {
+            // A bare denial uses the one shape that delivery lets through to an owner-only agent (audit M2).
+            val text = if (answer.isBareDenial) CloudConversationRules.bareDenialText(answer.requestId) else buildJsonObject {
                 put("requestId", answer.requestId); put("behavior", body.behavior); answer.message?.let { put("message", it) }
                 if (answer.answers.isNotEmpty()) putJsonArray("answers") {
                     for (item in answer.answers.sortedBy { it.question }) addJsonObject {
@@ -207,6 +237,25 @@ internal fun Route.cloudConversationRoutes(conversation: CloudConversation) {
             }.toString()
             val key = call.clientKey(null)
             call.respondInput(service.answer(call.principal, call.sessionId(), answer, InputRequest(text, false, key, key?.let { digest("permission\n$text") }, null)))
+        }
+
+        conversation.files?.let { files ->
+            get("/files/policy") { call.respond(files.policy(call.principal).view()) }
+            // The raw bytes; the name in ?name=, the type recognized from the bytes. Authorized like a message.
+            post("/sessions/{id}/files") {
+                call.refuseOnBehalf()
+                val key = call.clientKey(null)
+                val name = call.request.queryParameters.getAll("name")?.let { it.singleOrNull() ?: throw TeamFailure("invalid_file_name", 400, "Send the name once.") }
+                val announced = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                val channel = call.receiveChannel()
+                when (val outcome = files.upload(call.principal, call.sessionId(), name, announced, key) { max -> channel.readPart(max) }) {
+                    is CloudFileOutcome.Created -> call.respond(HttpStatusCode.Created, outcome.file.view())
+                    is CloudFileOutcome.Replayed -> {
+                        call.response.header(CloudHeaders.IDEMPOTENCY_REPLAYED, "true")
+                        call.respond(HttpStatusCode.OK, outcome.file.view())
+                    }
+                }
+            }
         }
 
         post("/sessions/{id}/attachments") { call.respond(HttpStatusCode.Created, service.attach(call.principal, call.sessionId()).view()) }
@@ -226,7 +275,8 @@ internal fun Route.cloudRunnerConversationRoutes(channel: CloudRunnerChannel, co
         val body = call.boundedJson<RunnerAgentRequest>(4_096)
         val pod = channel.authenticate(call.token(), body.teamId, body.sessionId, body.epoch)
         val agent = runner.agent(pod.teamId, pod.sessionId, pod.epoch)
-        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = agent.permissionRelay, permissionDeadlineMinutes = agent.permissionDeadlineMinutes, permissionMode = agent.permissionMode?.wire))
+        call.respond(RunnerAgentView(agent.kind, agent.version, agent.model, agent.effort, agent.conversation.wire, permissionRelay = agent.permissionRelay, permissionDeadlineMinutes = agent.permissionDeadlineMinutes, liveText = agent.liveText, permissionMode = agent.permissionMode?.wire,
+            backgroundTasks = agent.backgroundTasks, owner = agent.owner?.let { RunnerOwnerView(it.username, it.githubLogin) }))
     }
     post(RUNNER_PATH + "events") {
         val body = call.boundedJson<RunnerEventsRequest>(RUNNER_BODY_BYTES)
@@ -242,8 +292,20 @@ internal fun Route.cloudRunnerConversationRoutes(channel: CloudRunnerChannel, co
     post(RUNNER_PATH + "inputs") {
         val body = call.boundedJson<RunnerInputsRequest>(4_096)
         val pod = channel.authenticate(call.token(), body.teamId, body.sessionId, body.epoch)
-        val polled = runner.poll(pod.teamId, pod.sessionId, pod.epoch, body.waitMillis, body.desiredState)
-        call.respond(RunnerInputsView(polled.inputs.map { RunnerInputView(it.id, it.kind.wire, it.text, it.attempts) }, polled.desiredState.wire))
+        val polled = runner.poll(pod.teamId, pod.sessionId, pod.epoch, body.waitMillis, body.desiredState, acceptsFiles = body.acceptsFiles && conversation.files != null,
+            acceptsTaskStops = body.acceptsTaskStops)
+        call.respond(RunnerInputsView(polled.inputs.map { RunnerInputView(it.id, it.kind.wire, it.text, it.attempts, it.files.map { file -> file.view() }) }, polled.desiredState.wire))
+    }
+    conversation.files?.let { files ->
+        // A GET carries the execution in its query; it is authenticated and fenced like every runner call.
+        get(RUNNER_PATH + "files/{file}") {
+            val query = call.request.queryParameters
+            val pod = channel.authenticate(call.token(), query["teamId"].orEmpty(), query["sessionId"].orEmpty(), query["epoch"]?.toIntOrNull() ?: 0)
+            val download = files.runnerFile(pod.teamId, pod.sessionId, pod.epoch, call.childId("file"))
+            call.response.header(HttpHeaders.ContentDisposition, "attachment")
+            call.response.header("X-TeamCode-Sha256", download.file.sha256.orEmpty())
+            call.respondBytesWriter(ContentType.Application.OctetStream, contentLength = download.file.size) { download.parts { writeFully(it) }; flush() }
+        }
     }
     post(RUNNER_PATH + "inputs/ack") {
         val body = call.boundedJson<RunnerInputAckRequest>(64 * 1024)
@@ -263,8 +325,17 @@ internal object CloudTranscriptSanitizer {
         val clean = sanitize(data, 0) as JsonObject
         val encoded = clean.toString()
         if (encoded.encodeToByteArray().size <= CloudConversationRules.MAX_EVENT_BYTES) return encoded
-        return buildJsonObject { put("truncated", true); put("originalBytes", encoded.encodeToByteArray().size) }.toString()
+        // The marker keeps the short fields that link events together (a tool result to its call, a subagent's events
+        // to their parent, a message to its live deltas), taken from the sanitized event; never any other field.
+        return buildJsonObject {
+            put("truncated", true); put("originalBytes", encoded.encodeToByteArray().size)
+            for ((key, limit) in IDENTITY_STRINGS) (clean[key] as? JsonPrimitive)?.takeIf { it.isString && it.content.length <= limit }?.let { put(key, it) }
+            (clean["isError"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull?.let { put("isError", it) }
+            (clean["index"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull?.takeIf { it >= 0 }?.let { put("index", it) }
+        }.toString()
     }
+    /** The identity fields a cut event keeps, with their longest kept length. */
+    private val IDENTITY_STRINGS = listOf("id", "parentToolUseId", "toolUseId", "requestId", "messageId", "inputId").map { it to 128 } + ("name" to 200)
     fun turn(type: CloudEventType, data: JsonObject): TurnMarker? = if (type != CloudEventType.TURN) null else when ((data["phase"] as? JsonPrimitive)?.contentOrNull) {
         "started" -> TurnMarker.STARTED
         in CloudConversationRules.TURN_END_PHASES -> TurnMarker.ENDED

@@ -5,8 +5,10 @@ import kotlin.uuid.Uuid
 import kotlinx.serialization.json.*
 import me.nathanfallet.teamcode.api.models.CloudEventTypes
 import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
+import me.nathanfallet.teamcode.api.models.CloudTasks
 import me.nathanfallet.teamcode.api.models.CloudTranscriptLimits
 import me.nathanfallet.teamcode.api.models.RemotePermissionModes
+import me.nathanfallet.teamcode.api.models.RunnerOwnerView
 
 /** A normalized transcript event before upload. The server masks and bounds it again. */
 data class AgentEvent(val type: String, val data: JsonObject)
@@ -19,14 +21,20 @@ data class AgentCommand(val command: String, val arguments: List<String>)
 /**
  * Agent settings from the server (`runner/agent`). [permissionRelay]: the server takes permission requests and their
  * answers. [permissionDeadlineMinutes]: how long a request waits before the host denies it; 0 for no deadline.
+ * [liveText]: the server takes `message.agent.delta` events, so the agent's text is streamed while it is written.
  */
 data class AgentSettings(val kind: String, val version: String?, val model: String?, val effort: String?, val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0,
+    val liveText: Boolean = false,
     /**
      * A remote session's mode on its host's files (`ask` or `bypass`); null in a cloud pod, which is its own sandbox and
      * always bypasses. With `ask`, Claude Code keeps its permission checks (each request is relayed) and Codex runs in
      * its `workspace-write` sandbox, limited to the session's directory.
      */
-    val permissionMode: String? = null) {
+    val permissionMode: String? = null,
+    /** The server takes `tasks` events ([CloudTasks.FEATURE]): the agent's background tasks are reported to the session's members. */
+    val backgroundTasks: Boolean = false,
+    /** Who the execution runs for, told to the agent at its start ([me.nathanfallet.teamcode.cli.launch.OwnerIdentity]); null from an older server. */
+    val owner: RunnerOwnerView? = null) {
     /** Whether the agent skips its own permission checks and sandbox. */
     val bypass get() = permissionMode != RemotePermissionModes.ASK
 }
@@ -51,7 +59,8 @@ interface AgentAdapter {
     val conversationId: String?
     /** True while a turn runs. */
     val turnActive: Boolean
-    fun command(resume: String?): AgentCommand
+    /** [fork]: continue [resume] under a new conversation id, leaving the original as it was (Claude Code only). */
+    fun command(resume: String?, fork: Boolean = false): AgentCommand
     /** Lines written right after the process starts (protocol handshake, thread start or resume). */
     fun startup(resume: String?, workingDirectory: String): List<String>
     /** Lines delivering a member message; may be held until the agent is ready. */
@@ -73,6 +82,16 @@ interface AgentAdapter {
     fun openPermissions(): Set<String> = emptySet()
     /** Events the adapter produced outside [parse] (for example a turn started by [message]); emptied by the call. */
     fun takeEvents(): List<AgentEvent> = emptyList()
+    /** Background tasks of the session's work in flight in this agent process (subagents, background commands, monitors); 0 when unknown. */
+    val backgroundTasks: Int get() = 0
+    /** Whether this agent stops one background task on request ([stopTask]). */
+    val canStopTasks: Boolean get() = false
+    /** Lines stopping the live background task [taskId]; empty when no such task runs (or this agent cannot stop one). */
+    fun stopTask(taskId: String): List<String> = emptyList()
+    /** The empty `tasks` event to upload when the process stops while it still listed tasks; null when there is nothing to clear. */
+    fun tasksEnded(): AgentEvent? = null
+    /** Records [count] scheduled wake-ups (the `Stop` hook's `session_crons`); the `tasks` event to upload when that changed it. */
+    fun scheduled(count: Int): AgentEvent? = null
 }
 
 private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -107,8 +126,16 @@ private fun resultText(content: JsonElement?): String = when (content) {
  * skips ordinary permission checks; what remains, an `ask` permission rule or a question to the user
  * (`AskUserQuestion`), arrives as a `can_use_tool` control request. It becomes a `permission.request` event, and the
  * member's answer a `control_response`. A request is open until it is answered or its turn ends.
+ *
+ * With [AgentSettings.liveText], Claude Code also gets `--include-partial-messages`: the `text_delta` lines of a text
+ * block become `message.agent.delta` events, coalesced by [LiveText] on the clock [now]. Each `message.agent` carries
+ * its API message id (and its block index, when streamed), so a client replaces the deltas it showed with it.
+ *
+ * [readableDirectories] (the session's uploads directory, where the files of a message are written) are given with
+ * `--add-dir`, so Claude Code reads them without a permission request in `ask` mode.
  */
-class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapter {
+class ClaudeStreamJsonAdapter(private val settings: AgentSettings, private val now: () -> Long = { 0L }, private val readableDirectories: List<String> = emptyList()) : AgentAdapter {
+    private val live = LiveText(now)
     override var conversationId: String? = null; private set
     /**
      * Messages written since the last `result` line. Claude Code answers every message it has read with one `result`:
@@ -117,14 +144,79 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
      */
     private var pending = 0
     override val turnActive get() = pending > 0
+    /**
+     * The live background tasks of the session's work, from Claude Code's last `background_tasks_changed` line, which
+     * carries the full live set (subagents, background commands, monitors, remote agents, backgrounded MCP calls) and is
+     * not emitted at startup; tasks marked `ambient` are Claude Code's own and are left out
+     * (https://code.claude.com/docs/en/agent-sdk/typescript#sdkbackgroundtaskschangedmessage). Nothing of it is uploaded.
+     */
+    override var backgroundTasks = 0; private set
+    override val canStopTasks get() = true
 
-    override fun command(resume: String?) = AgentCommand("claude", buildList {
+    /** The live tasks of the last `background_tasks_changed`, ambient ones left out, in Claude Code's order. */
+    private var liveTasks: List<JsonObject> = emptyList()
+    /** The tool call that started each task and when, from its `task_started`, the oldest forgotten past [MAX_TASK_ORIGINS]. */
+    private val taskOrigins = LinkedHashMap<String, Pair<String?, Long>>()
+    private fun remember(id: String, origin: Pair<String?, Long>) {
+        if (id !in taskOrigins && taskOrigins.size >= MAX_TASK_ORIGINS) taskOrigins.remove(taskOrigins.keys.first())
+        taskOrigins[id] = origin
+    }
+    /** What the last `tasks` event said, so an unchanged set (an ambient task that came or went) uploads nothing. */
+    private var reportedTasks: JsonArray? = null
+    private var reportedScheduled = 0
+    /** Scheduled wake-ups (`CronCreate`, `ScheduleWakeup`, `/loop`) from the last `Stop`; Claude Code reports only how many. */
+    private var scheduledCount = 0
+
+    /**
+     * The `tasks` event for the live set ([CloudEventTypes.TASKS]): each task's id, type, description (at most
+     * [CloudTasks.MAX_DESCRIPTION_CHARS]), subagent type, starting tool call and start time, at most [CloudTasks.MAX_TASKS]
+     * with the full [count]. Null when the server does not take it or nothing changed.
+     */
+    private fun tasksEvent(): AgentEvent? {
+        if (!settings.backgroundTasks) return null
+        val tasks = buildJsonArray {
+            for ((id, task) in liveTasks.take(CloudTasks.MAX_TASKS).mapNotNull { task -> task["task_id"].string()?.let { it to task } }) addJsonObject {
+                val origin = taskOrigins[id]
+                put("id", id)
+                put("type", task["task_type"].string()?.cut(MAX_PERMISSION_FIELD_CHARS) ?: "task")
+                put("description", task["description"].string().orEmpty().cut(CloudTasks.MAX_DESCRIPTION_CHARS))
+                task["subagent_type"].string()?.let { put("subagentType", it.cut(MAX_PERMISSION_FIELD_CHARS)) }
+                origin?.first?.let { put("toolUseId", it.cut(MAX_PERMISSION_FIELD_CHARS)) }
+                origin?.second?.let { put("startedAt", it) }
+            }
+        }
+        if (tasks == reportedTasks && scheduledCount == reportedScheduled) return null
+        reportedTasks = tasks; reportedScheduled = scheduledCount
+        return AgentEvent(CloudEventTypes.TASKS, buildJsonObject { put("tasks", tasks); put("count", liveTasks.size); put("scheduled", scheduledCount); put("stoppable", true) })
+    }
+
+    override fun stopTask(taskId: String): List<String> = if (liveTasks.none { it["task_id"].string() == taskId }) emptyList() else listOf(buildJsonObject {
+        // The control request the Agent SDK's `stopTask` sends (`SDKControlStopTaskRequest`).
+        put("type", "control_request"); put("request_id", Uuid.random().toString()); putJsonObject("request") { put("subtype", "stop_task"); put("task_id", taskId) }
+    }.toString())
+
+    override fun tasksEnded(): AgentEvent? {
+        if (!settings.backgroundTasks || (reportedTasks.isNullOrEmpty() && reportedScheduled == 0)) return null
+        // Wake-ups fire only while the process runs; `--resume` restores them, and the next `Stop` reports them again.
+        liveTasks = emptyList(); taskOrigins.clear(); scheduledCount = 0
+        return tasksEvent()
+    }
+
+    override fun scheduled(count: Int): AgentEvent? {
+        scheduledCount = count.coerceAtLeast(0)
+        return tasksEvent()
+    }
+
+    override fun command(resume: String?, fork: Boolean) = AgentCommand("claude", buildList {
         addAll(listOf("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"))
         if (settings.bypass) add("--dangerously-skip-permissions")
         if (settings.permissionRelay) addAll(listOf("--permission-prompt-tool", "stdio"))
+        if (settings.liveText) add("--include-partial-messages")
+        readableDirectories.forEach { addAll(listOf("--add-dir", it)) }
         settings.model?.let { addAll(listOf("--model", it)) }
         settings.effort?.let { addAll(listOf("--effort", it)) }
         resume?.let { addAll(listOf("--resume", it)) }
+        if (fork && resume != null) add("--fork-session")
     })
     override fun startup(resume: String?, workingDirectory: String): List<String> {
         // A resumed conversation starts from the cost it had in the previous process, which this one never saw.
@@ -137,6 +229,19 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
 
     /** A subagent's lines carry the `tool_use` id of the parent's Agent (Task) call; the main agent's carry null. */
     private fun JsonObjectBuilder.parent(line: JsonObject) { line["parent_tool_use_id"].string()?.let { put("parentToolUseId", it) } }
+
+    /**
+     * The final text's identity: its API message id, and the streamed block it ends when this line holds one text
+     * block (Claude Code writes one `assistant` line per block, before the block's `content_block_stop`). The deltas it
+     * replaces are dropped, so none goes out after it.
+     */
+    private fun JsonObjectBuilder.final(line: JsonObject) {
+        val message = line["message"].obj() ?: return
+        val id = message["id"].string() ?: return
+        put("messageId", id)
+        val single = message["content"].array().orEmpty().count { it.obj()?.get("type").string() == "text" } == 1
+        live.finish(id, single)?.let { put("index", it) }
+    }
 
     private val started = mutableListOf<AgentEvent>()
     /** Open permission requests by request id, with the tool input an `allow` passes back. */
@@ -213,7 +318,18 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
     override fun parse(line: String): AgentOutput {
         val value = parseObject(line) ?: return AgentOutput()
         return when (value["type"].string()) {
-            "system" -> if (value["subtype"].string() == "init") {
+            "system" -> if (value["subtype"].string() == "background_tasks_changed") {
+                liveTasks = value["tasks"].array().orEmpty().mapNotNull { task -> task.obj()?.takeIf { (it["ambient"] as? JsonPrimitive)?.booleanOrNull != true } }
+                backgroundTasks = liveTasks.size
+                // A task first seen here (its `task_started` missed or not sent) starts now.
+                liveTasks.mapNotNull { it["task_id"].string() }.forEach { if (it !in taskOrigins) remember(it, null to now()) }
+                AgentOutput(listOfNotNull(tasksEvent()))
+            } else if (value["subtype"].string() == "task_started") {
+                // Only remembered: the live set (`background_tasks_changed`) says when it shows, and a foreground task never does.
+                // A resumed subagent starts again under its id: its new run starts now, from the tool call that resumed it.
+                value["task_id"].string()?.let { id -> remember(id, value["tool_use_id"].string() to now()) }
+                AgentOutput()
+            } else if (value["subtype"].string() == "init") {
                 val id = value["session_id"].string()
                 val first = conversationId == null
                 conversationId = id ?: conversationId
@@ -224,7 +340,7 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
             "assistant" -> AgentOutput((if (pending == 0) listOf(turn("started")).also { pending = 1 } else emptyList()) + value["message"].obj()?.get("content").array().orEmpty().mapNotNull { block ->
                 val content = block.obj() ?: return@mapNotNull null
                 when (content["type"].string()) {
-                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it); parent(value) }) }
+                    "text" -> content["text"].string()?.takeIf { it.isNotBlank() }?.let { AgentEvent(CloudEventTypes.AGENT_MESSAGE, buildJsonObject { put("text", it); final(value); parent(value) }) }
                     "tool_use" -> AgentEvent(CloudEventTypes.TOOL_CALL, buildJsonObject {
                         content["id"].string()?.let { put("id", it) }; put("name", content["name"].string() ?: "tool"); content["input"]?.let { put("input", it) }; parent(value)
                     })
@@ -271,9 +387,11 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
             }
             // Claude Code withdrew a request (its turn was interrupted): an answer to it is rejected.
             "control_cancel_request" -> { value["request_id"].string()?.let(permissions::remove); AgentOutput() }
+            "stream_event" -> if (settings.liveText) AgentOutput(listOfNotNull(live.parse(value))) else AgentOutput()
             "result" -> {
-                // A request cannot outlive its turn.
+                // A request cannot outlive its turn, nor live text that got no final message (an interrupted turn).
                 permissions.clear()
+                live.clear()
                 pending = 0
                 val failed = (value["is_error"] as? JsonPrimitive)?.booleanOrNull == true
                 val interrupted = value["subtype"].string() == "error_during_execution"
@@ -309,6 +427,8 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
          * whole (at most about 15 KB of input or 8 KB of preview, plus 8 KB of description) stays well under the server's 60 KB.
          */
         const val MAX_PERMISSION_FIELD_CHARS = 200
+        /** Tasks whose start is remembered (foreground subagents are never listed, so they are only forgotten past this). */
+        const val MAX_TASK_ORIGINS = 500
         /** The request ids the server accepts in an answer (`CloudConversationRules.validatePermissionAnswer`). */
         val PERMISSION_REQUEST_ID = Regex("[\\x21-\\x7E]{1,128}")
         /** The server's transcript limits and the reasoning keys it drops. */
@@ -323,11 +443,80 @@ class ClaudeStreamJsonAdapter(private val settings: AgentSettings) : AgentAdapte
 }
 
 /**
+ * Coalesces Claude Code's `text_delta` lines (`--include-partial-messages`) into `message.agent.delta` events, per
+ * content block (API message id and block index): a delta goes out when [MIN_INTERVAL_MILLIS] passed since the block's
+ * previous one (or its start), when [MAX_HELD_CHARS] are held, or at the block's `content_block_stop`. The block's
+ * final `message.agent` drops what is still held ([finish]), and the end of a turn drops everything ([clear]): live
+ * text never goes out after the text that replaces it. Thinking and tool input deltas are never read.
+ */
+internal class LiveText(private val now: () -> Long) {
+    private class Block(val parent: String?, var sentAt: Long) { val held = StringBuilder() }
+    private val blocks = mutableMapOf<Pair<String, Int>, Block>()
+    /** The text blocks streaming now, by API message id: the block a single-block `assistant` line ends. */
+    private val open = mutableMapOf<String, Int>()
+    /** The message streaming now, by `parent_tool_use_id` (null for the main agent), from its `message_start`. */
+    private val current = mutableMapOf<String?, String>()
+
+    fun parse(line: JsonObject): AgentEvent? {
+        val event = line["event"].obj() ?: return null
+        val parent = line["parent_tool_use_id"].string()
+        if (event["type"].string() == "message_start") event["message"].obj()?.get("id").string()?.let { current[parent] = it }
+        // Claude Code 2.1.309 names the message on every line; the id of its `message_start` covers a version that does not.
+        val message = line["api_message_id"].string() ?: current[parent] ?: return null
+        val index = (event["index"] as? JsonPrimitive)?.intOrNull ?: return null
+        val key = message to index
+        when (event["type"].string()) {
+            "content_block_start" -> if (event["content_block"].obj()?.get("type").string() == "text") {
+                blocks[key] = Block(parent, now()); open[message] = index
+            }
+            "content_block_delta" -> {
+                val delta = event["delta"].obj()?.takeIf { it["type"].string() == "text_delta" } ?: return null
+                val block = blocks[key] ?: return null
+                block.held.append(delta["text"].string() ?: return null)
+                if (block.held.length >= MAX_HELD_CHARS || now() - block.sentAt >= MIN_INTERVAL_MILLIS) return send(key, block)
+            }
+            "content_block_stop" -> {
+                if (open[message] == index) open.remove(message)
+                return blocks.remove(key)?.let { send(key, it) }
+            }
+        }
+        return null
+    }
+
+    /** The block [messageId] ends with its final text, when [single] and known; drops what was held for it (every block of the message otherwise). */
+    fun finish(messageId: String, single: Boolean): Int? {
+        val index = open[messageId]?.takeIf { single }
+        if (index != null) blocks.remove(messageId to index) else blocks.keys.removeAll { it.first == messageId }
+        return index
+    }
+
+    fun clear() { blocks.clear(); open.clear(); current.clear() }
+
+    private fun send(key: Pair<String, Int>, block: Block): AgentEvent? {
+        if (block.held.isEmpty()) return null
+        // Never split a surrogate pair across two deltas: its high half waits for the next one.
+        val text = block.held.toString().let { if (it.last().isHighSurrogate()) it.dropLast(1) else it }.ifEmpty { return null }
+        block.held.deleteRange(0, text.length); block.sentAt = now()
+        return AgentEvent(CloudEventTypes.AGENT_MESSAGE_DELTA, buildJsonObject {
+            put("messageId", key.first); put("index", key.second); put("text", text); block.parent?.let { put("parentToolUseId", it) }
+        })
+    }
+
+    private companion object {
+        const val MIN_INTERVAL_MILLIS = 500L
+        const val MAX_HELD_CHARS = 2_000
+    }
+}
+
+/**
  * Codex through `codex app-server` (JSON-RPC over stdio, one object per line, no `jsonrpc` member). Bypass mode is
  * the thread's `approvalPolicy: never` with `sandbox: danger-full-access`, the app-server form of
  * `--dangerously-bypass-approvals-and-sandbox`. A message during a turn steers it (`turn/steer`), otherwise it
  * starts one (`turn/start`); an interrupt is `turn/interrupt`. Resume is `thread/resume` with the stored thread id;
  * when it fails a fresh thread starts and the conversation is reported `transcript_only`.
+ *
+ * The files of a message, written outside the session's directory, need no extra root: `workspace-write` limits
+ * writes only, and reads stay unrestricted unless a permission profile narrows them, which this host never sets.
  */
 class CodexAppServerAdapter(private val settings: AgentSettings, private val clientVersion: String) : AgentAdapter {
     override var conversationId: String? = null; private set
@@ -344,7 +533,7 @@ class CodexAppServerAdapter(private val settings: AgentSettings, private val cli
 
     /** `danger-full-access` in a pod or in bypass mode; on a member's device otherwise, writes stay inside the session's directory. */
     private val sandbox = if (settings.bypass) "danger-full-access" else "workspace-write"
-    override fun command(resume: String?) = AgentCommand("codex", listOf("app-server", "-c", "approval_policy=\"never\"", "-c", "sandbox_mode=\"$sandbox\""))
+    override fun command(resume: String?, fork: Boolean) = AgentCommand("codex", listOf("app-server", "-c", "approval_policy=\"never\"", "-c", "sandbox_mode=\"$sandbox\""))
 
     private fun request(method: String, params: JsonObject): String {
         val id = nextId++
@@ -507,8 +696,8 @@ class CodexAppServerAdapter(private val settings: AgentSettings, private val cli
     }
 }
 
-fun agentAdapter(settings: AgentSettings, clientVersion: String): AgentAdapter = when (settings.kind) {
-    "claude" -> ClaudeStreamJsonAdapter(settings)
+fun agentAdapter(settings: AgentSettings, clientVersion: String, now: () -> Long = { 0L }, readableDirectories: List<String> = emptyList()): AgentAdapter = when (settings.kind) {
+    "claude" -> ClaudeStreamJsonAdapter(settings, now, readableDirectories)
     "codex" -> CodexAppServerAdapter(settings, clientVersion)
     else -> throw IllegalArgumentException("Unsupported agent kind ${settings.kind}.")
 }

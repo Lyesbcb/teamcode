@@ -30,12 +30,13 @@ import me.nathanfallet.teamcode.presentation.docs.apiDocsRoutes
 internal const val CACHE_CONTROL = "no-store, no-transform"
 private const val MAX_BODY_BYTES = 2 * 1024 * 1024
 
-fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null, serviceKeys: ServiceKeyService? = null, audit: AuditService? = null, pacingSettings: me.nathanfallet.teamcode.domain.capacity.PacingSettingsStore? = null, forecasts: me.nathanfallet.teamcode.domain.capacity.ForecastService? = null, forecastLivePolicy: ForecastLivePolicy = ForecastLivePolicy(), groups: GroupService? = null, runs: AgentRunService? = null, budgetOverrides: me.nathanfallet.teamcode.domain.capacity.BudgetOverrideService? = null, reconciliation: me.nathanfallet.teamcode.domain.capacity.UsageReconciliationService? = null, variants: me.nathanfallet.teamcode.domain.variants.VariantService? = null, environment: me.nathanfallet.teamcode.domain.variants.ResolveOwnEnvironmentUseCase? = null, skills: me.nathanfallet.teamcode.domain.skills.SkillCatalog? = null, hooks: me.nathanfallet.teamcode.domain.hooks.HookCatalog? = null, mcp: me.nathanfallet.teamcode.domain.mcp.McpGateway? = null, mcpAccess: me.nathanfallet.teamcode.domain.mcp.McpAccessStore? = null, cloudRuntime: me.nathanfallet.teamcode.domain.cloud.CloudRuntimeService? = null, cloudSessions: me.nathanfallet.teamcode.domain.cloud.CloudSessionService? = null, cloudAdmin: me.nathanfallet.teamcode.domain.cloud.CloudAdministrationService? = null, cloudRunner: CloudRunnerChannel? = null, github: me.nathanfallet.teamcode.domain.github.GitHubLinkService? = null, cloudConversation: CloudConversation? = null, cloudTransfers: me.nathanfallet.teamcode.domain.cloud.CloudTransferService? = null, webhooks: me.nathanfallet.teamcode.domain.webhooks.WebhookService? = null, apiPrices: me.nathanfallet.teamcode.domain.capacity.ApiPriceStore? = null, poolSizing: me.nathanfallet.teamcode.domain.capacity.PoolSizingService? = null, artifactAdmin: me.nathanfallet.teamcode.domain.artifacts.ArtifactAdministrationService? = null, artifacts: me.nathanfallet.teamcode.domain.artifacts.ArtifactService? = null, artifactViewing: me.nathanfallet.teamcode.domain.artifacts.ArtifactViewing? = null) {
+fun Application.configureGateway(gateway: GatewayService, accessToken: String = "", team: TeamService? = null, publicOrigin: String = "http://localhost:8080", accounts: AccountManagement? = null, admission: AdmissionStore? = null, directives: DirectiveService? = null, modelPolicies: ModelPolicyStore? = null, readiness: suspend () -> Boolean = { true }, routes: me.nathanfallet.teamcode.domain.routing.RoutingStore? = null, inboundProtocols: List<InboundProtocol> = listOf(MessagesInboundProtocol(), ResponsesInboundProtocol()), cancellation: RequestCancellationService? = null, devices: DeviceService? = null, serviceKeys: ServiceKeyService? = null, audit: AuditService? = null, pacingSettings: me.nathanfallet.teamcode.domain.capacity.PacingSettingsStore? = null, forecasts: me.nathanfallet.teamcode.domain.capacity.ForecastService? = null, forecastLivePolicy: ForecastLivePolicy = ForecastLivePolicy(), groups: GroupService? = null, runs: AgentRunService? = null, budgetOverrides: me.nathanfallet.teamcode.domain.capacity.BudgetOverrideService? = null, reconciliation: me.nathanfallet.teamcode.domain.capacity.UsageReconciliationService? = null, variants: me.nathanfallet.teamcode.domain.variants.VariantService? = null, environment: me.nathanfallet.teamcode.domain.variants.ResolveOwnEnvironmentUseCase? = null, skills: me.nathanfallet.teamcode.domain.skills.SkillCatalog? = null, hooks: me.nathanfallet.teamcode.domain.hooks.HookCatalog? = null, mcp: me.nathanfallet.teamcode.domain.mcp.McpGateway? = null, mcpAccess: me.nathanfallet.teamcode.domain.mcp.McpAccessStore? = null, hostedMcp: me.nathanfallet.teamcode.domain.mcp.HostedMcpAdministration? = null, cloudRuntime: me.nathanfallet.teamcode.domain.cloud.CloudRuntimeService? = null, cloudSessions: me.nathanfallet.teamcode.domain.cloud.CloudSessionService? = null, cloudAdmin: me.nathanfallet.teamcode.domain.cloud.CloudAdministrationService? = null, cloudRunner: CloudRunnerChannel? = null, github: me.nathanfallet.teamcode.domain.github.GitHubLinkService? = null, cloudConversation: CloudConversation? = null, cloudTransfers: me.nathanfallet.teamcode.domain.cloud.CloudTransferService? = null, webhooks: me.nathanfallet.teamcode.domain.webhooks.WebhookService? = null, apiPrices: me.nathanfallet.teamcode.domain.capacity.ApiPriceStore? = null, poolSizing: me.nathanfallet.teamcode.domain.capacity.PoolSizingService? = null, artifactAdmin: me.nathanfallet.teamcode.domain.artifacts.ArtifactAdministrationService? = null, artifacts: me.nathanfallet.teamcode.domain.artifacts.ArtifactService? = null, artifactViewing: me.nathanfallet.teamcode.domain.artifacts.ArtifactViewing? = null, deviceDaemons: DeviceDaemonChannel? = null, trustedProxies: TrustedProxies = TrustedProxies.NONE) {
     require(team != null || accessToken.length >= 32) { "The development access token must contain at least 32 characters." }
     val expected = MessageDigest.getInstance("SHA-256").digest(accessToken.toByteArray())
     // Without a runtime service (tests and older wiring), mounted cloud routes are on, as before.
     val cloudOn: () -> Boolean = { cloudRuntime?.enabled ?: true }
     attributes.put(CLOUD_ENABLED, cloudOn)
+    attributes.put(TRUSTED_PROXIES, trustedProxies)
     install(io.ktor.server.resources.Resources)
     install(ContentNegotiation) { json(Serialization.json) }
     // Artifact content is cached by its own route (a ticket fixes the version); any other answer there is not stored.
@@ -198,12 +199,13 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
         if (audit != null && team != null) auditRoutes(audit)
         if (skills != null && team != null) skillRoutes(skills, team, publicOrigin)
         if (hooks != null && team != null) hookRoutes(hooks, team, publicOrigin)
-        if (variants != null && team != null) variantRoutes(variants, publicOrigin)
+        if (variants != null && team != null) variantRoutes(variants, publicOrigin, hostedCommands = { mcp?.hostsCommands == true })
         if (environment != null && team != null) environmentRoutes(environment)
         if (mcp != null && team != null) mcpGatewayRoutes(mcp, publicOrigin)
-        if (mcpAccess != null && team != null) mcpAdminRoutes(mcpAccess, variants, publicOrigin)
+        if (mcpAccess != null && team != null) mcpAdminRoutes(mcpAccess, variants, publicOrigin, hostedMcp)
         if (cloudSessions != null && cloudAdmin != null && team != null) cloudRoutes(cloudSessions, cloudAdmin, publicOrigin, cloudRuntime, team)
         if (cloudRunner != null && cloudSessions != null && team != null) cloudRunnerRoutes(cloudRunner)
+        if (deviceDaemons != null && team != null) deviceDaemonRoutes(deviceDaemons)
         if (github != null && team != null) githubRoutes(github, team, publicOrigin)
         if (cloudConversation != null && cloudSessions != null && team != null) {
             cloudConversationRoutes(cloudConversation)
@@ -244,26 +246,34 @@ fun Application.configureGateway(gateway: GatewayService, accessToken: String = 
                     (if (team != null && audit != null) listOf("team.audit.v1") else emptyList()) +
                     (if (team != null && serviceKeys != null) listOf("team.read-key.v1") else emptyList()) +
                     (if (team != null && forecasts != null) listOf("capacity.forecasts.v1", "capacity.forecasts.live.v1") else emptyList()) +
-                    (if (team != null && skills != null) listOf("team.skills.v1", "team.skills.publish-pin.v1", "team.skills.all-members.v1") else emptyList()) +
+                    (if (team != null && skills != null) listOf("team.skills.v1", "team.skills.publish-pin.v1", "team.skills.pin-scope.v1", "team.skills.all-members.v1") else emptyList()) +
                     (if (team != null && hooks != null) listOf("team.hooks.v1", "team.hooks.all-members.v1") else emptyList()) +
                     (if (team != null && variants != null) listOf("team.variants.v1") else emptyList()) +
                     (if (team != null && environment != null) listOf("team.environment.v1") else emptyList()) +
                     (if (team != null && cloudOn()) listOfNotNull<List<String>>(
                         if (cloudSessions?.acceptsInitialMessage == true) listOf("cloud.sessions.initial-message.v1") else null,
-                        if (cloudSessions != null && cloudAdmin != null) listOf("cloud.sessions.v1", "cloud.profiles.member.v1") else null,
+                        if (cloudSessions != null && cloudAdmin != null) listOf("cloud.sessions.v1", "cloud.profiles.member.v1", "cloud.sessions.github-access.v1") else null,
                         if (cloudSessions != null && cloudAdmin != null && cloudRunner != null) listOf("cloud.environment.v1") else null,
-                        if (cloudSessions != null && cloudRunner != null && cloudConversation != null) listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.permissions.v1") else null,
+                        // Runners' heartbeats report background work, and the idle pause counts it up to the team's cap.
+                        if (cloudSessions != null && cloudAdmin != null && cloudRunner != null) listOf("cloud.sessions.background-work.v1") else null,
+                        if (cloudSessions != null && cloudRunner != null && cloudConversation != null) listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.permissions.v1", "cloud.transcript.live.v1", "cloud.sessions.waiting.v1", CloudTasks.FEATURE) else null,
                         if (cloudSessions != null && cloudConversation?.events != null) listOf("cloud.events.v1") else null,
+                        // Files need the runner channel their hosts download them from; whether a team has a bucket is its policy's business.
+                        if (cloudSessions != null && cloudRunner != null && cloudConversation?.files != null) listOf("cloud.files.v1") else null,
                         if (cloudSessions != null && cloudRunner?.inference != null) listOf("cloud.inference.v1") else null,
                         if (cloudSessions != null && cloudRunner?.github != null) listOf("cloud.github.v1") else null,
                         if (cloudSessions != null && cloudRunner?.variables != null) listOf("cloud.variables.v1") else null,
-                        if (cloudSessions != null && cloudTransfers != null) listOf("cloud.transfer.v1") else null,
+                        if (cloudSessions != null && cloudTransfers != null) listOf("cloud.transfer.v1", "cloud.transfer.recipients.v1") else null,
                         // Remote sessions need their host's runner channel and the conversation it relays.
                         if (cloudSessions != null && cloudRunner?.remoteHosts == true && cloudConversation != null) listOf("cloud.sessions.remote.v1") else null,
+                        if (deviceDaemons != null && deviceDaemons.sessions.startsOnDevices && cloudRunner?.remoteHosts == true && cloudConversation != null)
+                            listOf("cloud.sessions.remote.daemon.v1", ResumableSessions.CAPABILITY) else null,
                         if (cloudSessions != null && cloudAdmin != null) listOf("cloud.keys.v1") else null,
                     ).flatten() else emptyList()) +
                     (if (team != null && webhooks != null) listOf("team.webhooks.v1") else emptyList()) +
                     (if (team != null && mcp != null) listOf("mcp.gateway.v1") else emptyList()) +
+                    // Hosted commands (transport stdio) are served: the server has an MCP host. Only displays read it.
+                    (if (team != null && mcp?.hostsCommands == true) listOf("mcp.gateway.stdio.v1") else emptyList()) +
                     (if (team != null && github != null) listOf("github.link.v1") else emptyList()) +
                     // Published, served and viewed: whether a team can use them right now is its settings' business.
                     (if (team != null && artifacts != null && artifactViewing != null) listOf("artifacts.v1", "artifacts.policy.v1", "artifacts.tickets.v1") else emptyList())))

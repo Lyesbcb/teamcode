@@ -1,5 +1,9 @@
+@file:OptIn(ExperimentalSerializationApi::class)
+
 package me.nathanfallet.teamcode.api.models
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
 /** Wire names of the closed session state enum. `phase` is open: clients must tolerate unknown values. */
@@ -82,10 +86,17 @@ data class CloudSessionView(
     /** The accepted transfer the session is moving toward (`cloud.transfer.v1`); null otherwise. */
     val transferId: String? = null,
     val environment: CloudEnvironmentView = CloudEnvironmentView(),
+    /** Set while the agent waits for a person (`cloud.sessions.waiting.v1`); null when nothing waits. */
+    val waiting: CloudWaitingView? = null,
     /** `cloud` (a pod started by the server) or `remote` (a member's device); a server without this field has cloud sessions only. */
     val kind: String = CloudSessionKinds.CLOUD,
     /** Where a remote session runs; null for cloud sessions. */
     val host: CloudSessionHostView? = null,
+    /**
+     * Whose instructions an agent holding the owner's GitHub token follows (`cloud.sessions.github-access.v1`): `owner`,
+     * `shared` or `none`. Null from a server without the feature.
+     */
+    val githubAccess: String? = null,
 )
 object CloudSessionKinds {
     const val CLOUD = "cloud"
@@ -109,7 +120,19 @@ data class CloudSessionHostView(
     val online: Boolean = false,
     val lastHeartbeatAt: Long? = null,
     val permissionMode: String? = null,
+    /** The published folder the device's daemon started the session in (`cloud.sessions.remote.daemon.v1`); null otherwise. */
+    val folderId: String? = null,
 )
+/**
+ * What the agent of a session waits for: the open `permission.request` at [eventSeq] in its transcript, since [since]
+ * (server time, milliseconds). [reason] is `permission` (a tool use to approve) or `question` (a question to answer);
+ * [requestId] is what `POST /cloud/sessions/{id}/permissions` takes: always present in this version (a request with an id
+ * that route would refuse is denied by the runner at once and never shows), optional for later reasons to wait.
+ * When several requests are open, the most recent one.
+ */
+@Serializable
+data class CloudWaitingView(val reason: String, val requestId: String? = null, val since: Long, val eventSeq: Long)
+
 object RemotePermissionModes {
     const val ASK = "ask"
     const val BYPASS = "bypass"
@@ -139,6 +162,19 @@ data class CreateCloudSessionRequest(
     val kind: String? = null,
     val directoryName: String? = null,
     val permissionMode: String? = null,
+    /**
+     * With [kind] `remote` (`cloud.sessions.remote.daemon.v1`): one of the caller's own devices, whose daemon starts the
+     * session in [folderId], one of the folders it published (`GET /devices/{id}/folders`). Omit [directoryName]: it is
+     * the folder's name. Without [deviceId], the session runs on the caller's own device.
+     */
+    val deviceId: String? = null,
+    val folderId: String? = null,
+    /**
+     * With [deviceId] and [folderId] (`cloud.sessions.remote.resume.v1`, Claude Code only): the conversation of that
+     * folder the session continues, one the device's daemon listed (`GET /devices/{id}/folders/{folderId}/resumable`).
+     * Left out of the body when null, so a request without it is the same as before.
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val resumeSessionId: String? = null,
 )
 /**
  * The execution a remote session's host just started (`POST /api/v1/cloud/sessions/{id}/host`): the host calls the
@@ -148,6 +184,9 @@ data class CreateCloudSessionRequest(
 data class CloudHostView(val teamId: String, val epoch: Int, val session: CloudSessionView)
 @Serializable
 data class PauseCloudSessionRequest(val force: Boolean = false)
+/** `PUT /cloud/sessions/{id}/github` (`cloud.sessions.github-access.v1`): `owner`, `shared` or `none`. Owner only. */
+@Serializable
+data class CloudGitHubAccessRequest(val access: String)
 
 @Serializable
 data class CloudExecutionView(
@@ -276,6 +315,16 @@ data class CloudSettingsView(
      * 0 never pauses one. Absent (null) in a `PUT` keeps the stored value.
      */
     val remoteIdleTimeoutMinutes: Int? = null,
+    /** Largest file sent to a session, in MiB (`cloud.files.v1`; 1 to 100, 20 by default). Absent (null) in a `PUT` keeps the stored value. */
+    val fileMaxMebibytes: Int? = null,
+    /** Largest total of one message's files, in MiB (1 to 100, 25 by default). Absent (null) in a `PUT` keeps the stored value. */
+    val messageFileMebibytes: Int? = null,
+    /**
+     * Minutes an unbroken stretch of the agent's background work (subagents, background commands, monitors, scheduled
+     * wake-ups) keeps an otherwise idle session running, from its start (`cloud.sessions.background-work.v1`; 1 to 1440,
+     * 240 by default); 0: background work never does. Absent (null) in a `PUT` keeps the stored value.
+     */
+    val backgroundWorkMaxMinutes: Int? = null,
 )
 
 /**
@@ -307,8 +356,12 @@ object CloudHeaders {
 /** Runner channel. The runner authenticates with its projected service-account token, never a member credential. */
 @Serializable
 data class RunnerRegisterRequest(val teamId: String, val sessionId: String, val epoch: Int)
+/**
+ * [background]: the agent has background work in flight (subagents, background commands, monitors) or scheduled
+ * wake-ups, which keeps the session from the idle pause for a bounded time. A server that predates it ignores it.
+ */
 @Serializable
-data class RunnerHeartbeatRequest(val teamId: String, val sessionId: String, val epoch: Int, val ready: Boolean)
+data class RunnerHeartbeatRequest(val teamId: String, val sessionId: String, val epoch: Int, val ready: Boolean, val background: Boolean = false)
 @Serializable
 data class RunnerCheckpointRequest(val teamId: String, val sessionId: String, val epoch: Int, val completed: Boolean)
 /** What the runner must do next: keep running, or pause before [pauseDeadline] (epoch milliseconds). */
@@ -345,8 +398,14 @@ class RunnerEnvironmentView(
     val variables: Map<String, String> = emptyMap(),
     val unavailableVariables: List<String> = emptyList(),
     val github: RunnerGitHubView,
+    /**
+     * Another member worked on this workspace since the owner's last prepared execution (a transfer). The runner then
+     * treats the workspace as untrusted input: it resets the agent's home and each repository's Git configuration and
+     * hooks before running anything with the owner's credentials.
+     */
+    val untrustedWorkspace: Boolean = false,
 ) {
-    override fun toString() = "RunnerEnvironmentView(repositories=${environment.repositories.size}, variables=${variables.keys.sorted()}, github=${github.status})"
+    override fun toString() = "RunnerEnvironmentView(repositories=${environment.repositories.size}, variables=${variables.keys.sorted()}, github=${github.status}, untrustedWorkspace=$untrustedWorkspace)"
 }
 /** A failed step as structured fields only; the server writes the message, and command output never leaves the pod. */
 @Serializable

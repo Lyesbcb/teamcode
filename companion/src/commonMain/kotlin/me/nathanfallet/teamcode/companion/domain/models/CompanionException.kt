@@ -24,9 +24,90 @@ sealed class CompanionException(message: String) : Exception(message) {
     /** A view ticket for another origin than the account's: the server's public origin is not the address signed in to. */
     class ForeignContent : CompanionException("The server shows artifacts on another address than the one you signed in with. Sign in with its public address.")
     class CredentialStorage : CompanionException("This device's secure storage refused to read or keep the sign-in. Unlock the device and try again.")
+    /**
+     * The server refused a transfer or a decision on one ([code]: `transfer_pending`, `recipient_ineligible`, ...);
+     * [problems] are the recipient's failed checks for `recipient_ineligible`. The screens word each code.
+     */
+    class TransferRefused(val code: String, val problems: List<String> = emptyList()) :
+        CompanionException("The server refused the transfer" + (code.takeIf { it.matches(CODE) }?.let { " ($it)" } ?: "") + ".")
+    /**
+     * The provider sign-in of a new subscription account did not complete; the message is TeamCode's own, never the
+     * provider's. [restart] is true when this attempt is spent (another state, a code refused or already used): the
+     * sign-in starts again; false when pasting again can work.
+     */
+    class ProviderSignIn(val restart: Boolean, message: String) : CompanionException(message)
+    /** An Anthropic API key, or any kind the server cannot hold yet: TeamCode pools hold subscription sign-ins only. */
+    class UnavailableAccountType : CompanionException("TeamCode servers hold subscription sign-ins only: add an Anthropic or Codex subscription.")
+    /** The server refused to add the account ([code]: `account_enrollment_forbidden`, `account_in_use`, or the app's `session_cannot_enroll`). */
+    class EnrollmentRefused(val code: String) : CompanionException(
+        when (code) {
+            ENROLLMENT_FORBIDDEN -> "Only administrators can add accounts on this server. Ask an administrator, or ask them to let every member add accounts (\"Who can add accounts\" on the dashboard's Subscription accounts page)."
+            "account_in_use" -> "This subscription account is already in the pool and is not waiting to be reconnected. Ask an administrator to replace its sign-in."
+            else -> "This session cannot add accounts. Finish any required password change, then try again."
+        },
+    ) {
+        companion object {
+            const val ENROLLMENT_FORBIDDEN = "account_enrollment_forbidden"
+            const val SESSION_CANNOT_ENROLL = "session_cannot_enroll"
+        }
+    }
+    /**
+     * The server refused to start a GitHub link ([code]: `github_app_not_configured`, `github_device_flow_disabled`).
+     * The screens word each code; the message is the fallback.
+     */
+    class GitHubRefused(val code: String) : CompanionException(
+        when (code) {
+            APP_NOT_CONFIGURED -> "An administrator has not configured the team's GitHub App yet."
+            DEVICE_FLOW_DISABLED -> "The team's GitHub App does not allow device flow. Link from the server's dashboard (GitHub page) instead, or ask an administrator to enable device flow on the App."
+            else -> "The server refused to start the GitHub link" + (code.takeIf { it.matches(CODE) }?.let { " ($it)" } ?: "") + "."
+        },
+    ) {
+        companion object {
+            const val APP_NOT_CONFIGURED = "github_app_not_configured"
+            const val DEVICE_FLOW_DISABLED = "github_device_flow_disabled"
+        }
+    }
+    /**
+     * The server refused a file sent to a session ([code]: `file_too_large`, `upload_quota`, ...; [statusCode] 0 for a
+     * check made here, such as `file_integrity_failed`), or the file could not be read (`file_unreadable`).
+     */
+    class FileRefused(val code: String?, val statusCode: Int, val retryAfterSeconds: Long? = null) :
+        CompanionException("The file was refused" + (code?.takeIf { it.matches(CODE) }?.let { " ($it)" } ?: "") + ".")
+    /**
+     * The server refused to start a session on one of the member's devices, or to show its folders ([code]:
+     * `device_offline`, `folder_not_published`, `device_not_found`, ...). Each known code is worded here.
+     */
+    class DeviceRefused(val code: String) : CompanionException(
+        when (code) {
+            DEVICE_OFFLINE -> "This device is offline: its TeamCode service is not connected. Start it on the device (teamcode service install), or choose another device."
+            "folder_not_published" -> "This device no longer offers this folder. Add it on the device with teamcode folders add, or choose another folder."
+            "device_not_found" -> "This device is not one of yours any more, or it was removed."
+            "remote_requires_login" -> "Only the device's owner, signed in with a password, starts a session on it."
+            "device_target_unsupported" -> "This server does not start sessions on your devices. Update it to use them."
+            "invalid_folder" -> "Choose one of the folders the device offers."
+            DAEMON_RESUME_UNSUPPORTED -> "TeamCode on this device is too old to continue a conversation. Update it on the device (teamcode update)."
+            "device_no_answer" -> "The device did not answer in time. Try again."
+            "resume_unsupported" -> "Only a Claude Code session continues a conversation of the device."
+            "invalid_resume" -> "Choose one of the conversations the device listed."
+            else -> "The server refused to start the session on this device" + (code.takeIf { it.matches(CODE) }?.let { " ($it)" } ?: "") + "."
+        },
+    ) {
+        companion object {
+            const val DEVICE_OFFLINE = "device_offline"
+            /** The codes the server answers about a device or its folders; any other failure keeps its own type. */
+            const val DAEMON_RESUME_UNSUPPORTED = "daemon_resume_unsupported"
+            val CODES = setOf(DEVICE_OFFLINE, "folder_not_published", "device_not_found", "remote_requires_login", "device_target_unsupported", "invalid_folder",
+                DAEMON_RESUME_UNSUPPORTED, "device_no_answer", "resume_unsupported", "invalid_resume",
+                // The daemon's own reasons for not reading a folder's conversations.
+                "folder_not_configured", "folder_missing", "folder_moved", "folder_refused")
+        }
+    }
     class Server(val statusCode: Int, val code: String?) :
         CompanionException("The server returned HTTP $statusCode" + (code?.takeIf { it.matches(CODE) }?.let { " ($it)" } ?: "") + ".")
 }
 
 /** Error codes are short snake_case identifiers; anything else from the server is not shown. */
 private val CODE = Regex("[a-z][a-z0-9_]{0,63}")
+
+/** [code] when it is safe to show, null otherwise. */
+internal fun visibleCode(code: String?): String? = code?.takeIf { it.matches(CODE) }

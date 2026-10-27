@@ -19,6 +19,19 @@ enum class CloudSessionKind(val wire: String) {
     companion object { fun parse(value: String) = entries.single { it.wire == value } }
 }
 /**
+ * Who may instruct an agent that holds the owner's GitHub token (audit M2). The runner serves the token of the member
+ * the execution runs for, so anyone who can send that agent a message can make it use, or print, the token.
+ */
+enum class CloudGitHubAccess(val wire: String) {
+    /** The owner's token; only the owner sends messages and answers permission requests while the owner has a GitHub link. */
+    OWNER("owner"),
+    /** The owner's token; everyone the access policy lets message the session may instruct the agent. Chosen by the owner. */
+    SHARED("shared"),
+    /** No GitHub token. A session created on someone's behalf starts here until its owner turns access on. */
+    NONE("none");
+    companion object { fun parse(value: String) = entries.singleOrNull { it.wire == value } }
+}
+/**
  * The device a remote session runs on; [device] is null once the device was removed or when it was not read with the
  * session. [online]: the current execution is registered and not ended (the reconciler ends it 90 s after the host's
  * last heartbeat), with [lastHeartbeatAt] from that execution; both are only read with the session.
@@ -30,6 +43,16 @@ data class CloudSessionHost(
     val permissionMode: RemotePermissionMode = RemotePermissionMode.ASK,
     val online: Boolean = false,
     val lastHeartbeatAt: Long? = null,
+    /**
+     * The folder the device's daemon published and the session was started in (`cloud.sessions.remote.daemon.v1`): the
+     * daemon's own key, never a path. Null for a session started on the device itself (`teamcode remote start`).
+     */
+    val folderId: String? = null,
+    /**
+     * The conversation of the folder that the session continues (`cloud.sessions.remote.resume.v1`): a Claude Code
+     * session id the device's daemon listed, which it checks again and forks at the first start. Null otherwise.
+     */
+    val resumeSessionId: String? = null,
 )
 /**
  * How a remote session's agent asks for permission on the member's own files, fixed at creation: [ASK] relays Claude
@@ -142,10 +165,24 @@ data class CloudSession(
     val transferId: String? = null,
     /** The resolved preparation recipe, fixed at creation (profile version merged with the request). */
     val environment: CloudEnvironmentSpec = CloudEnvironmentSpec(),
+    /**
+     * The newest open permission request, as the transcript writes left it (see [CloudHumanWait]); read-only here: only
+     * the conversation store writes it. [waitingForHuman] tells whether it still holds.
+     */
+    val humanWait: CloudHumanWait? = null,
     val kind: CloudSessionKind = CloudSessionKind.CLOUD,
     /** Set for remote sessions only. */
     val host: CloudSessionHost? = null,
+    /** Whose instructions an agent holding the owner's GitHub token follows ([CloudGitHubAccess]); not used by remote sessions. */
+    val githubAccess: CloudGitHubAccess = CloudGitHubAccess.OWNER,
 ) {
+    /** Whether a permission answer can reach the agent now: `ready` or `active`, desired running. */
+    val takesAnswers: Boolean get() = desiredState == DesiredState.RUNNING && (state == CloudSessionState.READY || state == CloudSessionState.ACTIVE)
+    /**
+     * The wait, while its execution still runs and can take an answer ([takesAnswers], same epoch). The store also
+     * clears it when the session stops taking answers; this check covers a read between the two.
+     */
+    val waitingForHuman: CloudHumanWait? get() = humanWait?.takeIf { it.epoch == currentEpoch && takesAnswers }
     /** The runner reported a failed preparation; the reconciler fails the session or blocks the resume. */
     val preparationFailed get() = failure?.code == CloudEnvironmentRules.PREPARATION_FAILED && (state == CloudSessionState.PREPARING || state == CloudSessionState.RESUMING)
 }
@@ -171,6 +208,13 @@ data class CloudExecution(
      * recorded before transfers existed: they predate any change of owner.
      */
     val ownerId: String? = null,
+    /**
+     * Background work of the agent reported by the runner's heartbeats (subagents, background commands, monitors and
+     * scheduled wake-ups): when the current, or last, unbroken stretch of heartbeats reporting it began, and the last
+     * heartbeat that reported it. Null until a heartbeat reports background work. See [CloudIdleRules.backgroundActivity].
+     */
+    val backgroundSince: Long? = null,
+    val backgroundSeenAt: Long? = null,
 )
 
 data class CloudResources(val cpuMillis: Int, val memoryMebibytes: Int)
@@ -256,6 +300,16 @@ data class CloudSettings(
     val permissionDeadlineMinutes: Int = 0,
     /** Minutes without activity before a remote session pauses (its host drains, checkpoints and exits); 0 never pauses. */
     val remoteIdleTimeoutMinutes: Int = 60,
+    /** Largest file a member may send to a session, in MiB (1 to [CloudFileRules.MAX_MEBIBYTES]). */
+    val fileMaxMebibytes: Int = CloudFileRules.DEFAULT_FILE_MEBIBYTES,
+    /** Largest total of the files of one message, in MiB (1 to [CloudFileRules.MAX_MEBIBYTES]). */
+    val messageFileMebibytes: Int = CloudFileRules.DEFAULT_MESSAGE_MEBIBYTES,
+    /**
+     * Minutes an unbroken stretch of background work (subagents, background commands, monitors, scheduled wake-ups) keeps
+     * an otherwise idle session from pausing, counted from its start; the idle timeout then runs as usual. 0: background
+     * work never keeps a session running. See [CloudIdleRules.backgroundActivity].
+     */
+    val backgroundWorkMaxMinutes: Int = CloudIdleRules.DEFAULT_BACKGROUND_WORK_MINUTES,
 )
 enum class MemberTransfers(val wire: String) {
     DISABLED("disabled"), OFFER("offer");
@@ -267,6 +321,18 @@ enum class TransferPendingInputs(val wire: String) {
     /** Kept queued and delivered to the next execution, under the new owner. */
     KEEP("keep");
     companion object { fun parse(value: String) = entries.singleOrNull { it.wire == value } }
+}
+
+/**
+ * The agent waits for a person: the `permission.request` at [eventSeq], stored at [since] by the execution [epoch].
+ * Set when such a request is stored; moved to the next request still open when it is answered or expires; cleared when
+ * its turn ends. [requestId] is null when the runner sent one a member could not answer with.
+ */
+data class CloudHumanWait(val reason: Reason, val requestId: String?, val since: Long, val eventSeq: Long, val epoch: Int) {
+    enum class Reason(val wire: String) {
+        PERMISSION("permission"), QUESTION("question");
+        companion object { fun parse(value: String?) = entries.singleOrNull { it.wire == value } }
+    }
 }
 
 data class CloudSessionQuery(
@@ -301,10 +367,19 @@ data class RemoteSessionDraft(
     val agentModel: String?,
     val agentEffort: String?,
     val labels: Map<String, String>,
-    /** The last segment of the directory the agent works in, never its path (which holds the member's user name). */
-    val directoryName: String,
+    /**
+     * The last segment of the directory the agent works in, never its path (which holds the member's user name). With
+     * [deviceId], it is the published folder's name: null, or equal to it.
+     */
+    val directoryName: String?,
     val permissionMode: RemotePermissionMode,
     val initialMessage: String? = null,
+    /** Another device of the caller (or this one), whose daemon starts the session; null: the caller's own device hosts it. */
+    val deviceId: String? = null,
+    /** One of the folders [deviceId]'s daemon published; required with it. */
+    val folderId: String? = null,
+    /** A conversation of [folderId] the daemon listed, continued by the session (Claude Code only). */
+    val resumeSessionId: String? = null,
 )
 
 /** Idempotency of a mutating request: scope is team + initiator + route + key, compared on a body digest. */

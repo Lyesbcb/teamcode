@@ -4,6 +4,35 @@ import me.nathanfallet.teamcode.domain.team.TeamFailure
 
 /** Bounds and masking for transcripts and inputs. */
 object CloudConversationRules {
+    /**
+     * Whether [authorId]'s instructions are kept from the agent of [session] because it holds the owner's GitHub token
+     * (audit M2), before the owner's link is checked: a non-owner, in `owner` mode, on a cloud session.
+     */
+    fun ownerOnly(session: CloudSession, authorId: String) =
+        authorId != session.ownerId && session.kind != CloudSessionKind.REMOTE && session.githubAccess == CloudGitHubAccess.OWNER
+
+    /**
+     * The runner's text for a bare denial of [requestId] ([PermissionAnswer.isBareDenial]): the only shape of a
+     * permission input that [onlyStops] lets through, so the transport encodes bare denials with this and nothing else.
+     */
+    fun bareDenialText(requestId: String) =
+        "{\"requestId\":\"" + requestId.replace("\\", "\\\\").replace("\"", "\\\"") + "\",\"behavior\":\"deny\"}"
+
+    /**
+     * An input that only stops something (an interrupt, a stop of a background task, a bare permission denial in
+     * [bareDenialText]'s shape) and so may reach an owner-only agent from anyone with `message`.
+     */
+    fun onlyStops(input: CloudInput) = input.kind == CloudInputKind.INTERRUPT ||
+        (input.kind == CloudInputKind.STOP_TASK && input.text != null && TASK_ID.matches(input.text)) ||
+        (input.kind == CloudInputKind.PERMISSION && input.text != null && BARE_DENIAL.matches(input.text))
+    private val BARE_DENIAL = Regex("""\{"requestId":"(?:[^"\\]|\\["\\])*","behavior":"deny"\}""")
+
+    /** The background task ids a stop takes (Claude Code's are short letters and digits). */
+    val TASK_ID = Regex("[A-Za-z0-9_-]{1,64}")
+    fun validateTaskId(taskId: String) {
+        if (!TASK_ID.matches(taskId)) throw TeamFailure("invalid_task", 400, "Send the id of a background task: 1 to 64 letters, digits, '-' or '_'.")
+    }
+
     /** Longest message a member may send, in characters. */
     const val MAX_MESSAGE_CHARS = 32_000
     /** Longest string kept in an event; longer strings are cut and marked. */
@@ -63,7 +92,7 @@ object CloudConversationRules {
      * and URLs with credentials. Name-based assignments (`API_KEY = "…"`) are not reported: they are ordinary code in a
      * page and say nothing about the value. Used to refuse publishing a file rather than to rewrite it.
      */
-    fun detect(text: String): String? {
+    fun detect(text: CharSequence): String? {
         secrets.forEachIndexed { index, pattern -> if (pattern.containsMatchIn(text)) return secretKinds[index] }
         if (authorizationValue.findAll(text).any { looksLikeSecretValue(it.groupValues[1], it.groupValues[2]) }) return "authorization_header"
         if (urlCredentials.containsMatchIn(text)) return "url_credentials"
@@ -124,12 +153,15 @@ object CloudConversationRules {
         return ':' in text && text.none { it.isISOControl() }
     }
 
-    fun mask(text: String): String {
-        var masked = text
-        for (pattern in secrets) masked = pattern.replace(masked, MASK)
-        masked = authorization.replace(masked) { if (looksLikeCredential(it.groupValues[2])) "${it.groupValues[1]} $MASK" else it.value }
-        masked = assignment.replace(masked) { "${it.groupValues[1]}${it.groupValues[2]}$MASK" }
-        masked = urlCredentials.replace(masked) { "${it.groupValues[1]}$MASK@" }
+    fun mask(text: CharSequence): String = mask(text) { it }
+
+    /** [mask] with every pass reading the text through [view], which lets a test count the characters each pass reads. */
+    internal fun mask(text: CharSequence, view: (CharSequence) -> CharSequence): String {
+        var masked = text.toString()
+        for (pattern in secrets) masked = pattern.replace(view(masked), MASK)
+        masked = authorization.replace(view(masked)) { if (looksLikeCredential(it.groupValues[2])) "${it.groupValues[1]} $MASK" else it.value }
+        masked = assignment.replace(view(masked)) { "${it.groupValues[1]}${it.groupValues[2]}$MASK" }
+        masked = urlCredentials.replace(view(masked)) { "${it.groupValues[1]}$MASK@" }
         return masked
     }
 
@@ -139,9 +171,10 @@ object CloudConversationRules {
         return if (masked.length <= limit) masked else masked.take(limit - TRUNCATION_MARK.length) + TRUNCATION_MARK
     }
 
-    fun validateMessage(text: String) {
-        if (text.isBlank() || text.length > MAX_MESSAGE_CHARS || text.any { it.isISOControl() && it != '\n' && it != '\t' && it != '\r' })
-            throw TeamFailure("invalid_message", 400, "Send a message of 1–$MAX_MESSAGE_CHARS characters without control characters.")
+    /** A message that carries [files] may have an empty text: the host adds the files' paths. */
+    fun validateMessage(text: String, files: Boolean = false) {
+        if ((text.isBlank() && !(files && text.isEmpty())) || text.length > MAX_MESSAGE_CHARS || text.any { it.isISOControl() && it != '\n' && it != '\t' && it != '\r' })
+            throw TeamFailure("invalid_message", 400, "Send a message of 1–$MAX_MESSAGE_CHARS characters without control characters (it may be empty when it carries files).")
     }
 
     /** Request ids are the agent's own (Claude Code uses UUIDs); answers are short: a label index or a sentence each. */

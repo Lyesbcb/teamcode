@@ -13,8 +13,15 @@ plugins {
 }
 val releasePublicKeys = rootProject.fileTree("release/trust") { include("*.pem") }
 val generatedReleaseTrust = layout.buildDirectory.dir("generated/release-trust")
+// The Apple Team ID that signs TeamCode Desktop for macOS (-PteamcodeMacosTeamId=…, given by the release pipeline):
+// `teamcode ui` installs a downloaded app only when its Developer ID signature names this team. Without it, the CLI
+// installs the desktop app everywhere but on macOS, where it points at the release page instead. An empty value (the
+// pipeline's repository variable when it is not set) counts as none.
+val macosTeamId = providers.gradleProperty("teamcodeMacosTeamId").orNull?.takeIf { it.isNotBlank() }
+    ?.also { require(Regex("[A-Z0-9]{10}").matches(it)) { "teamcodeMacosTeamId must be a 10-character Apple Team ID." } }
 val generateReleaseTrust by tasks.registering {
     inputs.files(releasePublicKeys)
+    inputs.property("macosTeamId", macosTeamId.orEmpty())
     outputs.dir(generatedReleaseTrust)
     doLast {
         fun der(tag: Int, content: ByteArray): ByteArray {
@@ -42,12 +49,16 @@ val generateReleaseTrust by tasks.registering {
         val output = generatedReleaseTrust.get().file("me/nathanfallet/teamcode/cli/update/ShippedReleaseKeys.kt").asFile
         output.parentFile.mkdirs()
         output.writeText("package me.nathanfallet.teamcode.cli.update\n\ninternal object ShippedReleaseKeys {\n    val keys = listOf(\n${keys.joinToString("\n")}\n    )\n}\n")
+        generatedReleaseTrust.get().file("me/nathanfallet/teamcode/cli/ui/DesktopPublisher.kt").asFile.apply {
+            parentFile.mkdirs()
+            writeText("package me.nathanfallet.teamcode.cli.ui\n\ninternal object DesktopPublisher {\n    val MACOS_TEAM_ID: String? = ${macosTeamId?.let { "\"$it\"" } ?: "null"}\n}\n")
+        }
     }
 }
 kotlin {
     jvmToolchain(21)
     jvm { testRuns["test"].executionTask.configure { useJUnitPlatform() } }
-    listOf(macosArm64(), macosX64(), linuxX64(), linuxArm64(), mingwX64()).forEach { target ->
+    listOf(macosArm64(), linuxX64(), linuxArm64(), mingwX64()).forEach { target ->
         if (!target.name.startsWith("mingw")) {
             target.compilations.getByName("main").cinterops.create("process") {
                 definitionFile.set(project.file("src/nativeInterop/cinterop/process.def"))
@@ -57,6 +68,16 @@ kotlin {
             target.compilations.getByName("main").cinterops.create("windows") {
                 definitionFile.set(project.file("src/nativeInterop/cinterop/windows.def"))
                 includeDirs(project.file("src/nativeInterop/cinterop"))
+            }
+        }
+        if (target.name.startsWith("linux")) {
+            // Keeps OpenSSL (linked by Ktor's Curl engine) usable until exit; see tls_exit.def.
+            target.compilations.getByName("main").cinterops.create("tlsExit") {
+                definitionFile.set(project.file("src/nativeInterop/cinterop/tls_exit.def"))
+            }
+            // Test-only destructor that checks the TLS library is still usable once atexit() handlers have run.
+            target.compilations.getByName("test").cinterops.create("tlsExitProbe") {
+                definitionFile.set(project.file("src/nativeInterop/cinterop/tls_exit_probe.def"))
             }
         }
         target.binaries.executable {
@@ -93,7 +114,7 @@ kotlin {
             implementation(libs.ktor.server.core)
             implementation(libs.ktor.server.cio)
         }
-        commonTest.dependencies { implementation(kotlin("test")); implementation(libs.coroutines.test) }
+        commonTest.dependencies { implementation(kotlin("test")); implementation(libs.coroutines.test); implementation(libs.ktor.client.mock) }
         jvmTest.dependencies {
             runtimeOnly(libs.junit)
             implementation(libs.ktor.server.tests)

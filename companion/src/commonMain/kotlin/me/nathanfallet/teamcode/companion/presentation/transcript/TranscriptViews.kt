@@ -5,6 +5,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,15 +15,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.adamglin.phosphoricons.regular.Robot
+import me.nathanfallet.teamcode.companion.presentation.screens.SubagentStateChip
+import me.nathanfallet.teamcode.companion.presentation.screens.duration
+import me.nathanfallet.teamcode.companion.resources.subagents_open
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +51,7 @@ import com.adamglin.phosphoricons.regular.CaretRight
 import com.adamglin.phosphoricons.regular.CaretUp
 import com.adamglin.phosphoricons.regular.ListBullets
 import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.model.parseMarkdown
 import me.nathanfallet.teamcode.companion.domain.models.TranscriptEvent
 import me.nathanfallet.teamcode.companion.domain.models.TurnPhase
 import me.nathanfallet.teamcode.companion.presentation.theme.MetaStyle
@@ -72,23 +81,51 @@ import me.nathanfallet.teamcode.companion.resources.transcript_turn_completed
 import me.nathanfallet.teamcode.companion.resources.transcript_turn_ended
 import me.nathanfallet.teamcode.companion.resources.transcript_turn_failed
 import me.nathanfallet.teamcode.companion.resources.transcript_turn_interrupted
+import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
 
 private val UserBubbleShape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)
 
+/**
+ * A message bubble takes the room the conversation has, up to nine tenths of it so that it still reads as a message
+ * against the right edge; there is no fixed maximum, a wide window uses its width.
+ */
+fun Modifier.atMostBubbleWidth(): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints.copy(maxWidth = (constraints.maxWidth * 0.9f).roundToInt().coerceAtLeast(constraints.minWidth)))
+    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+}
+
+/**
+ * One item. [subagents] names a subagent card's state ([TranscriptItem.Subagent]); [onOpenSubagent] opens its thread,
+ * null where the panel is not offered (its steps then stay folded in the card).
+ */
 @Composable
-fun TranscriptItemView(item: TranscriptItem, memberId: String?) {
+fun TranscriptItemView(item: TranscriptItem, memberId: String?, subagents: Map<String, Subagent> = emptyMap(), onOpenSubagent: ((String) -> Unit)? = null) {
     val indent = if (item.nested) Modifier.padding(start = 20.dp) else Modifier
     Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).then(indent)) {
         when (item) {
             is TranscriptItem.User -> UserBubble(item.event, memberId)
-            is TranscriptItem.Agent -> SelectionContainer { Markdown(item.event.text, modifier = Modifier.fillMaxWidth().testTag("agent-${item.key}")) }
+            is TranscriptItem.Agent -> AgentText(item)
             is TranscriptItem.Tool -> ToolCard(item)
+            is TranscriptItem.Subagent -> SubagentCard(item, subagents[item.call.id], onOpenSubagent)
             is TranscriptItem.Tools -> ToolGroup(item)
             is TranscriptItem.TurnEnd -> TurnSeparator(item.event)
             is TranscriptItem.System -> SystemLine(item.event)
         }
     }
+}
+
+/**
+ * The agent's text as Markdown, parsed while the row is composed. The renderer parses off the main thread by default and
+ * draws an empty box until it is done: the row would be measured 0 dp tall, then grow a frame later. The list keeps its
+ * position on the top edge of the first visible row, so rows growing as they enter at the top while the member scrolls
+ * up push the one being read down, several rows at once. Parsed here, the first measure is the final one.
+ */
+@Composable
+private fun AgentText(item: TranscriptItem.Agent) {
+    val text = item.event.text
+    val parsed = remember(text) { parseMarkdown(text) }
+    SelectionContainer { Markdown(parsed, components = remember { transcriptMarkdownComponents() }, modifier = Modifier.fillMaxWidth().testTag("agent-${item.key}")) }
 }
 
 @Composable
@@ -102,7 +139,7 @@ private fun UserBubble(event: TranscriptEvent.UserMessage, memberId: String?) {
         SelectionContainer {
             Text(
                 event.text,
-                modifier = Modifier.widthIn(max = 560.dp).clip(UserBubbleShape).background(colors.bubble).padding(horizontal = 12.dp, vertical = 9.dp),
+                modifier = Modifier.atMostBubbleWidth().clip(UserBubbleShape).background(colors.bubble).padding(horizontal = 12.dp, vertical = 9.dp),
                 color = colors.onBubble,
                 fontSize = 14.5.sp,
                 lineHeight = 21.sp,
@@ -123,10 +160,13 @@ private fun ToolCard(item: TranscriptItem.Tool) {
             .clickable(role = Role.Button) { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp).testTag("tool-${item.key}"),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(item.call?.name ?: stringResource(Res.string.transcript_output), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = if (failed) colors.danger else colors.text)
-            Text(item.call?.summary.orEmpty(), style = MetaStyle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.muted, modifier = Modifier.weight(1f))
-            Icon(if (expanded) PhosphorIcons.Regular.CaretUp else PhosphorIcons.Regular.CaretDown, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(item.call?.name ?: stringResource(Res.string.transcript_output), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = if (failed) colors.danger else colors.text)
+                Text(item.call?.summary.orEmpty(), style = MetaStyle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.muted, modifier = Modifier.weight(1f, fill = false))
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(if (expanded) PhosphorIcons.Regular.CaretUp else PhosphorIcons.Regular.CaretDown, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp).testTag("tool-chevron-${item.key}"))
         }
         if (expanded) {
             item.call?.let { call ->
@@ -138,6 +178,35 @@ private fun ToolCard(item: TranscriptItem.Tool) {
                 Code(result.output)
                 result.exitCode?.takeIf { it != 0 }?.let { Text(stringResource(Res.string.transcript_exit_code, it), color = colors.danger, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
             }
+        }
+    }
+}
+
+/** A subagent's call: its type, description and state, and the way into its own thread. */
+@Composable
+private fun SubagentCard(item: TranscriptItem.Subagent, subagent: Subagent?, onOpen: ((String) -> Unit)?) {
+    val colors = TeamCode.colors
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(shape).background(colors.panelAlt).border(1.dp, colors.line, shape)
+            .then(if (onOpen != null) Modifier.clickable(role = Role.Button) { onOpen(item.call.id) } else Modifier)
+            .padding(horizontal = 12.dp, vertical = 9.dp).testTag("subagent-card-${item.call.id}"),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(PhosphorIcons.Regular.Robot, contentDescription = null, tint = colors.muted, modifier = Modifier.size(18.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(subagent?.type ?: item.call.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subagent?.description ?: item.call.summary.orEmpty(), fontSize = 12.5.sp, color = colors.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        subagent?.let {
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                SubagentStateChip(it)
+                Text(duration(it.durationMs), style = MetaStyle.copy(fontSize = 11.sp), color = colors.muted)
+            }
+        }
+        if (onOpen != null) {
+            Text(stringResource(Res.string.subagents_open), color = colors.accentText, fontSize = 13.sp)
+            Icon(PhosphorIcons.Regular.CaretRight, contentDescription = null, tint = colors.accentText, modifier = Modifier.size(14.dp))
         }
     }
 }
@@ -154,12 +223,15 @@ private fun ToolGroup(item: TranscriptItem.Tools) {
             Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(10.dp)).background(colors.panelAlt).border(1.dp, colors.line, RoundedCornerShape(10.dp))
                 .clickable(role = Role.Button) { expanded = !expanded }.padding(horizontal = 12.dp).testTag("tools-${item.key}"),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Icon(PhosphorIcons.Regular.ListBullets, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
-            Text(stringResource(Res.string.transcript_actions, item.tools.size), fontSize = 13.sp, color = colors.muted, modifier = Modifier.weight(1f))
-            Text(summary, style = MetaStyle.copy(fontSize = 11.sp), color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-            Icon(if (expanded) PhosphorIcons.Regular.CaretDown else PhosphorIcons.Regular.CaretRight, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(PhosphorIcons.Regular.ListBullets, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
+                Text(pluralStringResource(Res.plurals.transcript_actions, item.tools.size, item.tools.size), fontSize = 13.sp, color = colors.muted)
+                Text(summary, style = MetaStyle.copy(fontSize = 11.sp), color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(if (expanded) PhosphorIcons.Regular.CaretDown else PhosphorIcons.Regular.CaretRight, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp).testTag("tools-chevron-${item.key}"))
         }
         if (expanded) item.tools.forEach { ToolCard(it) }
     }
@@ -205,7 +277,7 @@ private fun TurnSeparator(event: TranscriptEvent.Turn) {
     val details = listOfNotNull(
         label,
         event.durationMs?.let { stringResource(Res.string.transcript_seconds, (it / 1000).toInt()) },
-        event.steps?.let { stringResource(Res.string.transcript_steps, it) },
+        event.steps?.let { pluralStringResource(Res.plurals.transcript_steps, it, it) },
     ).joinToString(" · ")
     val colors = TeamCode.colors
     TranscriptSeparator(details, if (event.phase == TurnPhase.FAILED) colors.danger else if (event.phase == TurnPhase.INTERRUPTED) colors.warn else colors.muted, inset = 0.dp)

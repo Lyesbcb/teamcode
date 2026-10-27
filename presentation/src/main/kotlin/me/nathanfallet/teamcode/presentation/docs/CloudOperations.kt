@@ -157,7 +157,8 @@ private fun ApiCatalog.cloudAdministration() {
         summary = "The cloud access policy"
         description = "Rules granting `create`, `attach`, `message` and `transcript` to `everyone`, `member:<id>` or " +
             "`group:<id>`, on their own sessions (`own`) or every team session (`team`). Administrators hold every " +
-            "permission. Administrators only."
+            "permission. A `message` grant does not reach the agent of an owner who linked GitHub, unless the owner shared " +
+            "the session (`PUT /cloud/sessions/{id}/github`). Administrators only."
         responses { ok<CloudAccessPolicyView>("The policy.") }
     }
     put("/api/v1/cloud/access") {
@@ -185,7 +186,16 @@ private fun ApiCatalog.cloudSessions() {
             "(`cloud.sessions.remote.v1`), the session runs on the caller's own device instead: no profile, image, idle " +
             "timeout or environment; `agent.kind` (`claude` or `codex`), `directoryName` (the directory's last segment, " +
             "never its path) and `permissionMode` (`ask`, the default, or `bypass`). Its device is the one of the caller's " +
-            "login session; its host (`teamcode remote`) then starts it with `POST /api/v1/cloud/sessions/{id}/host`."
+            "login session; its host (`teamcode remote`) then starts it with `POST /api/v1/cloud/sessions/{id}/host`. With " +
+            "`deviceId` and `folderId` (`cloud.sessions.remote.daemon.v1`), it runs on that device instead, one of the " +
+            "caller's own, started by its daemon in one of the folders it published (`GET /api/v1/devices/{id}/folders`); " +
+            "omit `directoryName`, which is the folder's name. Only the device's owner, signed in interactively, starts " +
+            "one, and only while its daemon is online: nothing is queued for a device that is offline. With " +
+            "`resumeSessionId` as well (`cloud.sessions.remote.resume.v1`, Claude Code only), the session continues that " +
+            "conversation of the folder, one the daemon listed (`GET /api/v1/devices/{id}/folders/{folderId}/resumable`): " +
+            "the daemon checks it again and the agent forks it at its first start, leaving the original as it was. Refused " +
+            "`invalid_resume` (not a lowercase UUID, or without `deviceId`), `resume_unsupported` (another agent) and " +
+            "`daemon_resume_unsupported` (a daemon too old)."
         parameters {
             headerText("Idempotency-Key", IDEMPOTENCY_TEXT, required = true)
             onBehalfOf()
@@ -193,11 +203,11 @@ private fun ApiCatalog.cloudSessions() {
         body<CreateCloudSessionRequest>("The session's name, profile and optional overrides.")
         responses {
             ok<CloudSessionView>("Accepted: the session is being created.", HttpStatusCode.Accepted)
-            badRequest("A missing or invalid `Idempotency-Key`, or an invalid field (`idempotency_key_required`, `invalid_idempotency_key`, `invalid_session`, `invalid_kind`, `invalid_agent`, `invalid_directory_name`, `invalid_permission_mode`).")
+            badRequest("A missing or invalid `Idempotency-Key`, or an invalid field (`idempotency_key_required`, `invalid_idempotency_key`, `invalid_session`, `invalid_kind`, `invalid_agent`, `invalid_directory_name`, `invalid_permission_mode`, `invalid_folder`, `device_target_unsupported`).")
             error(HttpStatusCode.Forbidden, "The profile exists but is not assigned to the effective member (`profile_unassigned`), or a remote session was asked on behalf of another member (`on_behalf_forbidden`).")
-            notFound("No profile has this id (`profile_not_found`). `profileId` is an id: list the usable ones with `GET /api/v1/cloud/profiles`.")
-            conflict("The member's session limit is reached (`cloud_session_limit`), or the profile's cluster or namespace is gone (`cluster_unavailable`, `namespace_not_allowed`).")
-            error(HttpStatusCode.UnprocessableEntity, "The key was used with another body (`idempotency_conflict`), the effective member cannot own sessions (`invalid_effective_member`), or a remote session was asked with a service key or a login without a device (`remote_requires_device`).")
+            notFound("No profile has this id (`profile_not_found`). `profileId` is an id: list the usable ones with `GET /api/v1/cloud/profiles`. Or `deviceId` is not one of the caller's devices (`device_not_found`), whoever the caller is.")
+            conflict("The member's session limit is reached (`cloud_session_limit`), the profile's cluster or namespace is gone (`cluster_unavailable`, `namespace_not_allowed`), or the device's daemon is offline (`device_offline`).")
+            error(HttpStatusCode.UnprocessableEntity, "The key was used with another body (`idempotency_conflict`), the effective member cannot own sessions (`invalid_effective_member`), a remote session was asked with a service key or a login without a device (`remote_requires_device`), a session on a device was asked with a service key (`remote_requires_login`), or the device did not publish the folder (`folder_not_published`).")
         }
     }
     post("/api/v1/cloud/sessions/{id}/host") {
@@ -238,7 +248,8 @@ private fun ApiCatalog.cloudSessions() {
         operationId = "getCloudSession"; tag(ApiTags.CLOUD_SESSIONS)
         summary = "One cloud session"
         description = "Its state and phase, profile, image, agent, activity and idle timeout, failure, workspace " +
-            "deletion proof and environment."
+            "deletion proof and environment, and `waiting` while its agent waits for a person (the open permission " +
+            "request's `reason`, `requestId`, `since` and `eventSeq`)."
         parameters { sessionId() }
         responses {
             ok<CloudSessionView>("The session.")
@@ -268,6 +279,22 @@ private fun ApiCatalog.cloudSessions() {
             ok<CloudSessionView>("Accepted: the session is pausing.", HttpStatusCode.Accepted)
             notFound("No such session (`not_found`).")
             conflict("The session cannot pause now (`invalid_transition`, `session_preparing`, `session_transferring`, `session_busy`).")
+        }
+    }
+    put("/api/v1/cloud/sessions/{id}/github") {
+        operationId = "setCloudSessionGitHubAccess"; tag(ApiTags.CLOUD_SESSIONS)
+        summary = "Choose who instructs an agent that holds your GitHub token"
+        description = "`owner`: the owner's token, instructed by the owner only while they have linked GitHub (others get " +
+            "`403 github_owner_only` on messages, files and permission answers). `shared`: the owner's token, instructed by everyone " +
+            "the access policy lets message the session. `none`: no GitHub token; a session created on someone's behalf starts " +
+            "here. Only the owner, never on their behalf (`cloud.sessions.github-access.v1`). Turning access off waits for a pause."
+        parameters { sessionId() }
+        body<CloudGitHubAccessRequest>("`access`: `owner`, `shared` or `none`.")
+        responses {
+            ok<CloudSessionView>("The session with its new `githubAccess`.")
+            badRequest("An unknown mode (`invalid_github_access`).")
+            notFound("No such session among the caller's own (`not_found`).")
+            conflict("A running session cannot turn access off (`session_not_paused`), or the session is ending, transferring or remote (`session_not_running`, `session_transferring`, `github_access_unsupported`).")
         }
     }
     post("/api/v1/cloud/sessions/{id}/resume") {
@@ -305,8 +332,10 @@ private fun ApiCatalog.cloudConversation() {
         operationId = "listCloudEvents"; tag(ApiTags.CLOUD_CONVERSATION)
         summary = "Read a session's transcript"
         description = "Events in ascending `seq` order: user and agent messages, tool calls and results, turns, " +
-            "statuses, errors and input changes. Continue with `after` = `nextAfter`, or go back with `before` = " +
-            "`nextBefore`. Clients must tolerate unknown event types. Requires the `transcript` permission."
+            "statuses, errors and input changes, and `message.agent.delta` (live text, replaced by the `message.agent` " +
+            "with the same `messageId` and `index`; ignore it to show final messages only). An event above 60,000 bytes " +
+            "is replaced by `{truncated, originalBytes}` with its identity fields. Continue with `after` = `nextAfter`, " +
+            "or go back with `before` = `nextBefore`. Clients must tolerate unknown event types. Requires the `transcript` permission."
         parameters {
             sessionId()
             queryNumber("after", "Events after this sequence number.")
@@ -367,7 +396,9 @@ private fun ApiCatalog.cloudConversation() {
         description = "Queues a message, authored by the caller. Its `status` moves from `queued` to `delivered` and " +
             "`consumed`, or ends `cancelled` or `rejected`. `wake: false` leaves a paused session paused. " +
             "`expectedLastEventSeq` refuses the message if newer events exist. Send an `Idempotency-Key` (or " +
-            "`clientMessageId`) to retry safely. Requires the `message` permission."
+            "`clientMessageId`) to retry safely. Requires the `message` permission. With `cloud.files.v1`, `fileIds` names up to 5 files " +
+            "the caller uploaded to this session and has not sent yet; the text may then be empty. A host that does not download files " +
+            "rejects such a message (`files_unsupported`)."
         parameters {
             sessionId()
             headerText("Idempotency-Key", IDEMPOTENCY_TEXT)
@@ -375,10 +406,47 @@ private fun ApiCatalog.cloudConversation() {
         body<SendCloudMessageRequest>("The message text and options (at most 256 KiB).")
         responses {
             ok<CloudInputView>("Accepted.", HttpStatusCode.Accepted)
-            badRequest("An invalid message or key, or `TeamCode-On-Behalf-Of` was sent (`invalid_message`, `invalid_idempotency_key`, `on_behalf_unsupported`).")
+            badRequest("An invalid message, file list or key, or `TeamCode-On-Behalf-Of` was sent (`invalid_message`, `invalid_files`, `invalid_idempotency_key`, " +
+                "`on_behalf_unsupported`); files named on a server without `cloud.files.v1` (`files_unsupported`).")
             notFound("No such session (`not_found`).")
-            conflict("Newer events exist (`stale_view`), or the session cannot take messages (`session_not_running`, `session_transferring`).")
-            error(HttpStatusCode.PayloadTooLarge, "The body exceeds 256 KiB (`payload_too_large`).")
+            conflict("Newer events exist (`stale_view`), the session cannot take messages (`session_not_running`, `session_transferring`), or a file " +
+                "is unknown, expired, another member's or already sent (`file_unavailable`).")
+            error(HttpStatusCode.PayloadTooLarge, "The body exceeds 256 KiB (`payload_too_large`), or the files exceed the team's total per message (`files_too_large`).")
+        }
+    }
+    get("/api/v1/cloud/files/policy") {
+        operationId = "getCloudFilePolicy"; tag(ApiTags.CLOUD_CONVERSATION)
+        summary = "Whether files can be sent"
+        description = "Whether the caller's team can send files to sessions now, and its limits. `available` is false with `reason` " +
+            "`file_storage_not_configured` while the team has no tested artifact bucket: hide or explain file sending then. Capability `cloud.files.v1`."
+        responses { ok<CloudFilePolicyView>("The policy and limits.") }
+    }
+    post("/api/v1/cloud/sessions/{id}/files") {
+        operationId = "uploadCloudFile"; tag(ApiTags.CLOUD_CONVERSATION)
+        summary = "Upload a file for a session"
+        description = "The raw bytes of one file, sent before the message that names it in `fileIds`. Authorized exactly like a message " +
+            "(the `message` permission, a `cloud:write` key, never on behalf of another member). The type is recognized from the bytes, never " +
+            "from the request: PNG, JPEG, WebP, GIF, PDF, or UTF-8 text (plain, Markdown, CSV or JSON by extension). The name is cleaned into a " +
+            "single safe file name (no path), and a binary file gets its type's extension. The file waits in the team's artifact bucket until " +
+            "the session's host received it, 24 hours at most. Limits: the team's size per file (20 MiB by default), 20 files not sent yet and " +
+            "100 MiB not received per session, and a daily amount per member. Each upload is audited (`cloud.file.uploaded`: name, size, type). " +
+            "Capability `cloud.files.v1`."
+        parameters {
+            sessionId()
+            queryText("name", "The file's name, at most 1,024 characters; only its last segment is kept, cleaned.")
+            headerText("Idempotency-Key", IDEMPOTENCY_TEXT)
+        }
+        responses {
+            ok<CloudFileView>("Stored.", HttpStatusCode.Created)
+            ok<CloudFileView>("The same file was already uploaded with this key (`Idempotency-Replayed: true`).")
+            badRequest("An empty file (`empty_file`), a name too long (`invalid_file_name`), an invalid key or `TeamCode-On-Behalf-Of` (`invalid_idempotency_key`, `on_behalf_unsupported`).")
+            notFound("No such session (`not_found`).")
+            conflict("The team has no tested bucket (`file_storage_not_configured`), the session is ending (`session_not_running`), or a file with this key is still being uploaded (`file_upload_in_progress`).")
+            error(HttpStatusCode.PayloadTooLarge, "The file exceeds the team's size per file (`file_too_large`).")
+            error(HttpStatusCode.UnsupportedMediaType, "The bytes are not an accepted type (`file_type_not_allowed`).")
+            error(HttpStatusCode.UnprocessableEntity, "The key was used with another file (`idempotency_conflict`).")
+            error(HttpStatusCode.TooManyRequests, "The session holds too many files not sent or not received, or the member reached today's amount (`upload_quota`, with `Retry-After` for the daily amount).")
+            error(HttpStatusCode.ServiceUnavailable, "The bucket did not answer (`file_storage_unavailable`): send the file again.")
         }
     }
     get("/api/v1/cloud/sessions/{id}/messages") {
@@ -422,6 +490,25 @@ private fun ApiCatalog.cloudConversation() {
             badRequest("An invalid key, or `TeamCode-On-Behalf-Of` was sent (`invalid_idempotency_key`, `on_behalf_unsupported`).")
             notFound("No such session (`not_found`).")
             conflict("No agent is running (`nothing_to_interrupt`), or the session is not running (`session_not_running`).")
+        }
+    }
+    post("/api/v1/cloud/sessions/{id}/tasks/stop") {
+        operationId = "stopCloudTask"; tag(ApiTags.CLOUD_CONVERSATION)
+        summary = "Stop a background task"
+        description = "Stops one background task of the running agent (a subagent, a background command, a monitor), named by the `id` " +
+            "of a `tasks` event (`cloud.sessions.background-tasks.v1`). Requires the `message` permission, like an interrupt; delivered " +
+            "before queued messages and never wakes a session. Consumed when the runner handed it to the agent; rejected with " +
+            "`unknown_task` when the task ended meanwhile, or `task_stop_unsupported` when the session's runner cannot stop a task."
+        parameters {
+            sessionId()
+            headerText("Idempotency-Key", IDEMPOTENCY_TEXT)
+        }
+        body<StopCloudTaskRequest>("The task to stop.")
+        responses {
+            ok<CloudInputView>("Accepted.", HttpStatusCode.Accepted)
+            badRequest("A task id that is not 1 to 64 letters, digits, `-` or `_` (`invalid_task`), an invalid key, or `TeamCode-On-Behalf-Of` was sent.")
+            notFound("No such session (`not_found`).")
+            conflict("No agent is running (`nothing_to_stop`).")
         }
     }
     post("/api/v1/cloud/sessions/{id}/permissions") {
@@ -512,6 +599,18 @@ private fun ApiCatalog.cloudTransfers() {
             error(HttpStatusCode.UnprocessableEntity, "The key was used with another body (`idempotency_conflict`).")
         }
     }
+    get("/api/v1/cloud/transfer-recipients") {
+        operationId = "listCloudTransferRecipients"; tag(ApiTags.CLOUD_TRANSFERS)
+        summary = "Members a session can be given to"
+        description = "For a recipient picker: the team's enabled members who completed password setup, by username, " +
+            "at most 500, the caller included. Only their identifier, username and whether they are an administrator. Open " +
+            "to administrators, and to members while the team lets them offer sessions. A listed member can still be " +
+            "refused for a given session (`422 recipient_ineligible` on the transfer)."
+        responses {
+            ok<CloudTransferRecipientsView>("The members, by username.")
+            error(HttpStatusCode.Forbidden, "Members may not offer sessions in this team (`transfer_disabled`).")
+        }
+    }
     get("/api/v1/cloud/transfers") {
         operationId = "listCloudTransfers"; tag(ApiTags.CLOUD_TRANSFERS)
         summary = "List transfers"
@@ -543,7 +642,9 @@ private fun ApiCatalog.cloudTransfers() {
     post("/api/v1/cloud/transfers/{transfer}/accept") {
         operationId = "acceptCloudTransfer"; tag(ApiTags.CLOUD_TRANSFERS)
         summary = "Accept an offered session"
-        description = "The recipient accepts; `resume` overrides what the offer asked for."
+        description = "The recipient accepts; `resume` overrides what the offer asked for. The workspace comes as the former owner " +
+            "left it: on the recipient's first execution the agent's home and each repository's Git configuration and hooks are " +
+            "reset, but files in the working tree (package scripts, project settings) run with the recipient's credentials."
         parameters {
             pathId("transfer", "The transfer's identifier.")
             onBehalfOf()

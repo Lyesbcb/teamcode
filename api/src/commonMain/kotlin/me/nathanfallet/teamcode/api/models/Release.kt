@@ -14,7 +14,7 @@ object ReleaseFormat {
     const val MAX_MANIFEST_BYTES = 16 * 1024
     const val MAX_SIGNATURE_BYTES = 2048
     const val MAX_BINARY_BYTES = 256L * 1024 * 1024
-    val targets = setOf("macos-arm64", "macos-x64", "linux-arm64", "linux-x64", "windows-x64")
+    val targets = setOf("macos-arm64", "linux-arm64", "linux-x64", "windows-x64")
     private const val NUMBER = "(?:0|[1-9][0-9]*)"
     private const val PART = "(?:$NUMBER|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
     private val versionPattern = Regex("$NUMBER\\.$NUMBER\\.$NUMBER(?:-$PART(?:\\.$PART)*)?")
@@ -26,5 +26,30 @@ object ReleaseFormat {
     fun fileName(version: String, target: String): String {
         require(validVersion(version) && validTarget(target))
         return "teamcode-$version-$target" + if (target.startsWith("windows-")) ".exe" else ""
+    }
+}
+
+/**
+ * The desktop app's packages, published next to the CLI under the same version, and the signed manifest that lists them
+ * (`desktop-manifest.json` and `desktop-manifest.sig`, same envelope and keys as the CLI's). Its `product` field is
+ * `desktop`, so neither manifest can stand in for the other. Targets are the CLI's.
+ */
+object DesktopReleaseFormat {
+    const val MANIFEST = "desktop-manifest.json"
+    const val SIGNATURE = "desktop-manifest.sig"
+    const val PRODUCT = "desktop"
+    const val MAX_PACKAGE_BYTES = 512L * 1024 * 1024
+    /** The install scripts of a release (`install.sh`, `install.ps1`) are a few kilobytes. */
+    const val MAX_INSTALL_SCRIPT_BYTES = 256 * 1024
+
+    /** The `.app` zipped with `ditto` on macOS, the per-user `.msi` on Windows, the app's folder as a `.tar.gz` on Linux. */
+    fun fileName(version: String, target: String): String {
+        require(ReleaseFormat.validVersion(version) && ReleaseFormat.validTarget(target))
+        val extension = when {
+            target.startsWith("macos-") -> "zip"
+            target.startsWith("windows-") -> "msi"
+            else -> "tar.gz"
+        }
+        return "teamcode-desktop-$version-$target.$extension"
     }
 }

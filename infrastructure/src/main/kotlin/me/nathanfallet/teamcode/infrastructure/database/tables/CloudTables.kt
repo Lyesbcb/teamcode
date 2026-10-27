@@ -64,6 +64,11 @@ object CloudSettingsTable : Table("cloud_settings") {
     /** Minutes a cloud agent's permission request waits before the runner denies it; 0 waits without a deadline. */
     val permissionDeadlineMinutes = integer("permission_deadline_minutes").default(0)
     val remoteIdleTimeoutMinutes = integer("remote_idle_timeout_minutes").default(60)
+    /** Largest file sent to a session and largest total per message, in MiB. */
+    val fileMaxMebibytes = integer("file_max_mebibytes").default(20)
+    val messageFileMebibytes = integer("message_file_mebibytes").default(25)
+    /** Minutes background work keeps an idle session running, from the start of its unbroken stretch; 0 never. */
+    val backgroundWorkMaxMinutes = integer("background_work_max_minutes").default(240)
     override val primaryKey = PrimaryKey(teamId)
 }
 /** Whether cloud sessions run and how their pods are built; no row until an administrator or the initial seed saves it. */
@@ -141,14 +146,29 @@ object CloudSessions : Table("cloud_sessions") {
     val updatedAt = long("updated_at")
     /** The accepted transfer the session is moving toward, until its owner changed. */
     val transferId = varchar("transfer_id", 36).nullable()
+    /**
+     * The newest open permission request: written only by the conversation store, under the session row lock, with the
+     * transcript event that opens or closes it; the session store reads these columns and never writes them.
+     */
+    val awaitingReason = varchar("awaiting_reason", 16).nullable()
+    val awaitingRequestId = varchar("awaiting_request_id", 128).nullable()
+    val awaitingSince = long("awaiting_since").nullable()
+    val awaitingEventSeq = long("awaiting_event_seq").nullable()
+    val awaitingEpoch = integer("awaiting_epoch").nullable()
     /** `cloud` (a pod) or `remote` (a member's device); fixed at creation. */
     val kind = varchar("kind", 16).default("cloud")
+    /** Whose instructions an agent holding the owner's GitHub token follows: `owner`, `shared` or `none` (audit M2). */
+    val githubAccess = varchar("github_access", 16).default("owner")
     /** The device a remote session runs on; null for cloud sessions. */
     val hostDeviceId = optReference("host_device_id", Devices.id, onDelete = ReferenceOption.NO_ACTION, onUpdate = ReferenceOption.NO_ACTION, fkName = "cloud_sessions_host_device")
     /** The last segment of a remote session's directory, never its full path. */
     val hostDirectoryName = varchar("host_directory_name", 255).nullable()
     /** A remote session's permission mode on its host (`ask` or `bypass`); null for cloud sessions. */
     val permissionMode = varchar("permission_mode", 16).nullable()
+    /** The published folder a device's daemon was asked to start the session in (its key, never a path); null otherwise. */
+    val hostFolderId = varchar("host_folder_id", 64).nullable()
+    /** The device's conversation a session started there continues (`cloud.sessions.remote.resume.v1`). */
+    val hostResumeSessionId = varchar("host_resume_session_id", 36).nullable()
     override val primaryKey = PrimaryKey(id)
     init {
         index("cloud_session_owner", false, teamId, ownerId, createdAt)
@@ -158,6 +178,8 @@ object CloudSessions : Table("cloud_sessions") {
         index("cloud_session_team_kind", false, teamId, kind, createdAt)
         index("cloud_session_due", false, reconcileAfter)
         index("cloud_session_cluster_waiting", false, clusterId, waitingSince)
+        // The daemon's queue: a device's sessions waiting for their host, oldest request first.
+        index("cloud_session_host_waiting", false, hostDeviceId, phase, desiredState, updatedAt)
     }
 }
 object CloudSessionLabels : Table("cloud_session_labels") {
@@ -184,6 +206,9 @@ object CloudExecutions : Table("cloud_executions") {
     val checkpoint = varchar("checkpoint", 16).nullable()
     /** The owner the execution ran for; null for executions recorded before transfers existed. */
     val ownerId = varchar("owner_id", 36).nullable()
+    /** The agent's background work reported by heartbeats: start of the current or last unbroken stretch, and its last report. Written by heartbeats only. */
+    val backgroundSince = long("background_since").nullable()
+    val backgroundSeenAt = long("background_seen_at").nullable()
     override val primaryKey = PrimaryKey(sessionId, epoch)
 }
 /** The stored outcome of a mutating request, replayed for 24 hours. */

@@ -2,8 +2,11 @@
 replicaCount: 3
 image:
   repository: nathanfallet/teamcode
-  tag: latest
-  pullPolicy: Always
+  # Empty: the chart's appVersion. A released chart (teamcode-VERSION.tgz) carries its exact server version, so it
+  # deploys that image and nothing else; this directory's chart carries "latest" (tested main images).
+  tag: ""
+  # Empty: Always for "latest", IfNotPresent for an exact version.
+  pullPolicy: ""
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -95,22 +98,155 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 topologySpreadConstraints: []
+# Reverse proxies whose X-Forwarded-For the server believes (addresses or CIDR ranges), for sign-in throttling per client
+# address. Empty trusts none: every client behind the ingress then shares the ingress pods' address budget. Set it to the
+# ingress controller pods' range, for example the cluster's pod CIDR ["10.244.0.0/16"]. See docs/team-roles.md.
+trustedProxies: []
+# Team webhooks reach public addresses only. true also allows loopback and private addresses (an internal receiver),
+# which lets any administrator or admin:cloud key send signed POSTs into the server's network. See docs/webhooks.md.
+webhooks:
+  allowPrivateTargets: false
 extraEnv: []
 javaToolOptions: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError"
 
+# Network access of cloud session pods. Sessions keep full internet access; only cluster-internal and metadata
+# endpoints are blocked. Before every session pod, the server applies the NetworkPolicy `teamcode-sessions` to the
+# session namespace (its service account needs `create` and `patch` on networkpolicies there): no ingress, other
+# session pods included; egress to DNS, to the TeamCode server, and to every public address on every port, but not to
+# RFC 1918, carrier-grade NAT, link-local and cloud metadata (169.254.169.254, fd00:ec2::254), unique-local ranges or
+# the Kubernetes API server. An operator setting on purpose: a dashboard administrator cannot change it.
+# See docs/cloud-sessions.md#session-network-policy.
+cloudSessions:
+  networkPolicy:
+    # false applies no policy (pods are then unrestricted unless the cluster's own policies apply); not recommended.
+    enabled: true
+    # Stricter lockdown, off by default: true removes the internet rule, leaving DNS, the TeamCode server and
+    # `extraEgress` only (git hosts, registries, a proxy must then be listed). Web search, fetch, npm, pip and git stop
+    # working unless allowed there.
+    lockdown: false
+    # More CIDRs to block, for a pod, service or node range outside the private ranges (some IPv6 clusters).
+    blockedCidrs: []
+    # NetworkPolicy egress rules appended verbatim (`to` and `ports` only; an ipBlock may not reach link-local), for
+    # example the ingress controller when session pods reach the server URL through the cluster's own load balancer:
+    # - to:
+    #     - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
+    #   ports: [{protocol: TCP, port: 443}]
+    extraEgress: []
+
+# The MCP stdio host (docs/mcp.md): runs the team's hosted MCP servers (pinned npm and PyPI packages) for the MCP
+# gateway, one process per server (per member for a PER_MEMBER variant). A Deployment of its own, image
+# nathanfallet/teamcode-mcp at the server's tag, reached only by the server pods; it has no database, encryption key or
+# Kubernetes token. On by default: a plain `helm upgrade` deploys it and generates its token. false renders nothing
+# (and no hosted stdio server can be declared).
+mcp:
+  enabled: true
+  image:
+    repository: nathanfallet/teamcode-mcp
+    # Empty: image.tag, then the chart's appVersion, so the server and its host always run the same version.
+    tag: ""
+    # Empty: Always for "latest", IfNotPresent for an exact version.
+    pullPolicy: ""
+  # One host owns every process. More replicas would each start their own copy of a server (more memory, and state
+  # kept in a server's memory would differ by pod).
+  replicaCount: 1
+  token:
+    # Empty: the chart generates a Secret <release>-mcp (key `token`, 48 random characters), keeps its value across
+    # upgrades (read back with lookup) and leaves it on uninstall. `helm template` and `--dry-run=client` cannot read
+    # it and show a new value; use existingSecret when the chart is rendered outside the cluster (GitOps).
+    existingSecret: ""
+    # The key of existingSecret holding the token (at least 32 characters).
+    key: token
+  # Allowed launchers: npm (npx) and pypi (uvx).
+  launchers: [npm, pypi]
+  # Mirrors. Empty: registry.npmjs.org and pypi.org.
+  npmRegistry: ""
+  pypiIndex: ""
+  # Processes at once; a new server stops the idle process used the longest ago, never a busy one.
+  maxProcesses: 16
+  maxInFlightPerProcess: 16
+  # Resident memory of one process tree before the host stops it.
+  processMemoryMiB: 512
+  # A process with no call for this long is stopped (started again on demand).
+  idleMinutes: 15
+  # On SIGTERM, running calls get this long to finish (longer than the 60 s call timeout); the termination grace
+  # period must be longer still.
+  drainSeconds: 75
+  terminationGracePeriodSeconds: 90
+  # The per-process directories (npm and uv caches, a Python per PyPI server), an emptyDir.
+  dataSizeLimit: 3Gi
+  # The host's and the processes' temporary files, an emptyDir.
+  tmpSizeLimit: 512Mi
+  # The pod's memory limit is the hard bound for the JVM (at most 384 MiB of heap) and every process tree together;
+  # processMemoryMiB only stops one tree. Measured trees: about 360 MiB for a Node.js server through npx, 200 MiB for
+  # a Python one through uvx (docs/mcp.md#measurements), so 2Gi holds about four busy servers, not maxProcesses of them.
+  # Raise limits.memory (or lower maxProcesses) before declaring more.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+    limits:
+      memory: 2Gi
+      ephemeral-storage: 4Gi
+  # Ingress from this release's server pods only, on 8090; egress to DNS and the public Internet only (not pod,
+  # service, node, private, link-local or cloud metadata addresses). The cluster's API server is blocked when its
+  # address is private; list a public endpoint in blockedCidrs (the pod has no service account token either way).
+  networkPolicy:
+    enabled: true
+    # true removes the Internet rule: DNS and extraEgress only (a registry mirror or a proxy must then be listed).
+    lockdown: false
+    # More CIDRs to block (an IPv4 range is also blocked in its NAT64 and 6to4 forms).
+    blockedCidrs: []
+    # NetworkPolicy egress rules appended verbatim, for example an internal npm or PyPI mirror.
+    extraEgress: []
+  # More TEAMCODE_MCP_* variables (docs/mcp.md#configuration).
+  extraEnv: []
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 # Optional single MySQL instance for a self-contained installation, using the tested official 8.4 image.
 # For production HA, disable this and supply an externally managed MySQL 8.4 JDBC URL below.
+# This is the chart's own StatefulSet (templates/mysql.yaml, official mysql image, data in /var/lib/mysql), NOT the
+# Bitnami MySQL subchart: its keys are mysql.resources, mysql.persistence and mysql.config. Bitnami-style keys such as
+# mysql.primary.resources do not exist here; rendering fails on mysql.primary rather than ignoring it.
 mysql:
   enabled: true
   image: mysql:8.4
   database: teamcode
   jdbcUrl: ""
+  # Ingress to the bundled MySQL only from the TeamCode server pods of this release, on 3306.
+  networkPolicy:
+    enabled: true
   persistence:
-    size: 10Gi
+    # Empty = automatic: an existing release keeps the size its StatefulSet was created with (read with Helm's lookup),
+    # a new installation gets 30Gi. An explicit value is used as written. The size is read only when the StatefulSet is
+    # created: volumeClaimTemplates is immutable, so a different value on an existing release makes `helm upgrade` fail
+    # (Forbidden: updates to statefulset spec). To grow an existing volume, patch the PVC
+    # (`kubectl patch pvc data-<release>-mysql-0`, on a storage class with allowVolumeExpansion) and leave this value as is.
+    # lookup needs the cluster: `helm template` and `--dry-run=client` render 30Gi (use `--dry-run=server` to preview).
+    size: ""
     storageClass: ""
+  # Server settings written to /etc/mysql/conf.d/teamcode.cnf. MySQL 8.4 sizes some memory from the node, not the
+  # container: the TempTable engine may take 3% of the node's RAM with a 1 GiB minimum (temptable_max_ram), which alone
+  # reaches a 1 GiB limit. These bounds keep mysqld under mysql.resources.limits.memory; keep them in step when changing
+  # either. Binary logs are on by default and kept 30 days in 1 GiB files; artifact uploads pass through MySQL as 1 MiB
+  # chunks inserted then deleted, so each uploaded byte reached the log twice. The bundled instance has no replica: keep
+  # one day, in smaller files (only whole files expire), and log deleted rows by primary key only.
+  config: |
+    [mysqld]
+    innodb_buffer_pool_size = 384M
+    temptable_max_ram = 128M
+    tmp_table_size = 32M
+    max_heap_table_size = 32M
+    binlog_expire_logs_seconds = 86400
+    max_binlog_size = 256M
+    binlog_row_image = MINIMAL
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
-    limits:
       memory: 1Gi
+    limits:
+      memory: 2Gi

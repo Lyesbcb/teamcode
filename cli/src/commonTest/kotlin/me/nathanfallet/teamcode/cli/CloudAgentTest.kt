@@ -10,9 +10,18 @@ import me.nathanfallet.teamcode.cli.cloud.RunnerCalls
 import me.nathanfallet.teamcode.cli.cloud.RunnerInference
 import me.nathanfallet.teamcode.cli.cloud.RunnerLoop
 import me.nathanfallet.teamcode.cli.cloud.dollars
+import me.nathanfallet.teamcode.cli.cloud.printed
+import me.nathanfallet.teamcode.cli.cloud.shown
+import me.nathanfallet.teamcode.cli.cloud.tailStart
 import me.nathanfallet.teamcode.cli.cloud.render
 import me.nathanfallet.teamcode.cli.cloud.agent.*
 import me.nathanfallet.teamcode.cli.platform.AgentProcess
+import me.nathanfallet.teamcode.cli.platform.hostOs
+import me.nathanfallet.teamcode.cli.platform.pathStatus
+import okio.ByteString.Companion.toByteString
+import okio.FileSystem
+import kotlin.time.Clock
+import kotlin.uuid.Uuid
 import me.nathanfallet.teamcode.client.TeamCodeException
 import kotlin.test.*
 
@@ -22,11 +31,31 @@ class CloudAgentTest {
     private fun obj(line: String) = Json.parseToJsonElement(line).jsonObject
     private fun JsonObject.str(name: String) = (this[name] as JsonPrimitive).content
 
+    @Test fun claudeCountsTheLiveBackgroundTasksItReports() {
+        // `background_tasks_changed` carries the full live set; ambient tasks are Claude Code's own, not the session's work
+        // (https://code.claude.com/docs/en/agent-sdk/typescript#sdkbackgroundtaskschangedmessage).
+        val adapter = ClaudeStreamJsonAdapter(claude)
+        assertEquals(0, adapter.backgroundTasks, "Nothing is emitted at startup: an agent process starts with none")
+        fun changed(tasks: String) = adapter.parse("""{"type":"system","subtype":"background_tasks_changed","tasks":[$tasks],"uuid":"u","session_id":"c1"}""")
+        val output = changed("""{"task_id":"a1","task_type":"local_agent","subagent_type":"general-purpose","description":"Review"},""" +
+            """{"task_id":"b1","task_type":"local_bash","description":"npm test"},{"task_id":"w1","task_type":"local_bash","description":"watch","ambient":true}""")
+        assertTrue(output.events.isEmpty() && output.replies.isEmpty(), "Nothing reaches the transcript")
+        assertEquals(2, adapter.backgroundTasks)
+        assertFalse(adapter.turnActive, "Background work is not a turn")
+        changed("""{"task_id":"w1","task_type":"local_bash","description":"watch","ambient":true}""")
+        assertEquals(0, adapter.backgroundTasks)
+        adapter.parse("""{"type":"system","subtype":"background_tasks_changed","uuid":"u","session_id":"c1"}""")
+        assertEquals(0, adapter.backgroundTasks, "A malformed list counts as none")
+        assertEquals(0, CodexAppServerAdapter(codex, "1").backgroundTasks)
+    }
+
     @Test fun claudeStreamJsonIsBypassResumableAndDropsThinking() {
         val adapter = ClaudeStreamJsonAdapter(claude)
         assertTrue(adapter.takeEvents().isEmpty())
         assertEquals(listOf("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
             "--model", "opus", "--effort", "high", "--resume", "c1"), adapter.command("c1").arguments)
+        assertEquals(listOf("--resume", "c1", "--fork-session"), adapter.command("c1", fork = true).arguments.takeLast(3))
+        assertFalse("--fork-session" in adapter.command(null, fork = true).arguments, "Nothing to fork without a conversation")
         assertTrue(adapter.interrupt().isEmpty(), "No turn, nothing to interrupt")
         val message = obj(adapter.message("Fix it").single())
         assertEquals("user", message.str("type"))
@@ -309,6 +338,118 @@ class CloudAgentTest {
         assertEquals("00:00:00 #1 [result] Found a.txt", rendered(done))
     }
 
+    /**
+     * Lines shaped like Claude Code 2.1.309's `--include-partial-messages` output (captured locally, text replaced): a
+     * text block streamed by `text_delta`, its `assistant` line before its `content_block_stop`, then a tool use whose
+     * input streams as `input_json_delta`.
+     */
+    private fun stream(event: String, message: String = "msg_1", parent: String? = null) =
+        """{"type":"stream_event","event":$event,"session_id":"c1","parent_tool_use_id":${parent?.let { "\"$it\"" } ?: "null"},"uuid":"u","api_message_id":"$message"}"""
+    private fun textDelta(index: Int, text: String, message: String = "msg_1", parent: String? = null) =
+        stream("""{"type":"content_block_delta","index":$index,"delta":{"type":"text_delta","text":${JsonPrimitive(text)}}}""", message, parent)
+    private fun blockStart(index: Int, type: String, message: String = "msg_1", parent: String? = null) =
+        stream("""{"type":"content_block_start","index":$index,"content_block":{"type":"$type","text":""}}""", message, parent)
+    private fun blockStop(index: Int, message: String = "msg_1", parent: String? = null) = stream("""{"type":"content_block_stop","index":$index}""", message, parent)
+
+    @Test fun claudeStreamsAgentTextLiveInCoalescedDeltas() {
+        assertFalse("--include-partial-messages" in ClaudeStreamJsonAdapter(claude).command(null).arguments, "Only a server that takes deltas gets them")
+        var clock = 0L
+        val adapter = ClaudeStreamJsonAdapter(claude.copy(liveText = true), now = { clock })
+        assertTrue("--include-partial-messages" in adapter.command(null).arguments)
+        adapter.message("Tell me about the sea, then list files")
+        adapter.takeEvents()
+        assertTrue(adapter.parse(stream("""{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[]}}""")).events.isEmpty())
+        assertTrue(adapter.parse(blockStart(0, "text")).events.isEmpty())
+        clock = 100
+        assertTrue(adapter.parse(textDelta(0, "The sea ")).events.isEmpty(), "Held: less than 500 ms since the block started")
+        clock = 600
+        val first = adapter.parse(textDelta(0, "is wide. ")).events.single()
+        assertEquals(CloudEventTypes.AGENT_MESSAGE_DELTA, first.type)
+        assertEquals(buildJsonObject { put("messageId", "msg_1"); put("index", 0); put("text", "The sea is wide. ") }, first.data, "What was added since the last delta of this block")
+        clock = 700
+        assertTrue(adapter.parse(textDelta(0, "It is deep.")).events.isEmpty())
+        // Claude Code writes the block's `assistant` line before its `content_block_stop`: the final text replaces the deltas.
+        val final = adapter.parse("""{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"The sea is wide. It is deep."}]},"parent_tool_use_id":null,"session_id":"c1"}""").events.single()
+        assertEquals(CloudEventTypes.AGENT_MESSAGE, final.type)
+        assertEquals(buildJsonObject { put("text", "The sea is wide. It is deep."); put("messageId", "msg_1"); put("index", 0) }, final.data)
+        assertTrue(adapter.parse(blockStop(0)).events.isEmpty(), "The final message replaced what was held: no delta after it")
+
+        // A tool use's streamed input and a thinking block never become deltas.
+        assertTrue(adapter.parse(stream("""{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}}""")).events.isEmpty())
+        clock = 5_000
+        assertTrue(adapter.parse(stream("""{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls\"}"}}""")).events.isEmpty())
+        assertEquals(CloudEventTypes.TOOL_CALL, adapter.parse("""{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}""").events.single().type)
+        assertTrue(adapter.parse(blockStop(1)).events.isEmpty())
+        assertTrue(adapter.parse(blockStart(2, "thinking")).events.isEmpty())
+        clock = 9_000
+        assertTrue(adapter.parse(stream("""{"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"secret"}}""")).events.isEmpty())
+        assertTrue(adapter.parse(stream("""{"type":"content_block_delta","index":2,"delta":{"type":"signature_delta","signature":"sig"}}""")).events.isEmpty())
+        assertTrue(adapter.parse(blockStop(2)).events.isEmpty())
+        assertTrue(adapter.parse(stream("""{"type":"message_delta","delta":{"stop_reason":"tool_use"}}""")).events.isEmpty())
+        assertTrue(adapter.parse(stream("""{"type":"message_stop"}""")).events.isEmpty())
+
+        // About 2,000 characters go at once; what remains at the block's end goes with its stop when no final came first.
+        adapter.parse(blockStart(0, "text", message = "msg_2", parent = "a1"))
+        val long = adapter.parse(textDelta(0, "x".repeat(2_000), message = "msg_2", parent = "a1")).events.single()
+        assertEquals(2_000, long.data.getValue("text").jsonPrimitive.content.length)
+        assertEquals("a1", long.data.str("parentToolUseId"), "A subagent's deltas keep their parent tool call")
+        assertTrue(adapter.parse(textDelta(0, "tail", message = "msg_2", parent = "a1")).events.isEmpty())
+        val tail = adapter.parse(blockStop(0, message = "msg_2", parent = "a1")).events.single()
+        assertEquals("tail", tail.data.str("text")); assertEquals("msg_2", tail.data.str("messageId"))
+
+        // An interrupted turn: what was held is dropped with the turn, never sent after its end.
+        adapter.parse(blockStart(0, "text", message = "msg_3"))
+        adapter.parse(textDelta(0, "Half a", message = "msg_3"))
+        assertEquals(listOf(CloudEventTypes.TURN), adapter.parse("""{"type":"result","subtype":"error_during_execution","is_error":true}""").events.map { it.type })
+        assertTrue(adapter.parse(blockStop(0, message = "msg_3")).events.isEmpty())
+        assertTrue(adapter.parse("""{"type":"stream_event","event":"not an object"}""").events.isEmpty(), "A malformed line is ignored")
+    }
+
+    @Test fun claudeFinalMessagesCarryTheirMessageIdWithoutLiveText() {
+        val adapter = ClaudeStreamJsonAdapter(claude)
+        adapter.message("Hi")
+        // Without partial messages nothing streams, and the index of a block is unknown: the final replaces all of its message.
+        assertTrue(adapter.parse(blockStart(0, "text")).events.isEmpty())
+        assertTrue(adapter.parse(textDelta(0, "Hel")).events.isEmpty(), "Deltas only with liveText")
+        val events = adapter.parse("""{"type":"assistant","message":{"id":"msg_9","content":[{"type":"text","text":"One"},{"type":"text","text":"Two"}]}}""").events
+        assertEquals(listOf("msg_9", "msg_9"), events.map { it.data.str("messageId") })
+        assertTrue(events.none { "index" in it.data }, "Two text blocks in one line: no index")
+        assertEquals(buildJsonObject { put("text", "Done") }, adapter.parse("""{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}""").events.single().data, "No id, no messageId")
+    }
+
+    @Test fun liveTextNamesTheMessageFromItsStartWhenLinesDoNot() {
+        var clock = 0L
+        val adapter = ClaudeStreamJsonAdapter(claude.copy(liveText = true), now = { clock })
+        fun bare(event: String) = """{"type":"stream_event","event":$event,"session_id":"c1","parent_tool_use_id":null,"uuid":"u"}"""
+        adapter.parse(bare("""{"type":"message_start","message":{"id":"msg_9","type":"message","role":"assistant","content":[]}}"""))
+        adapter.parse(bare("""{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"""))
+        clock = 600
+        val delta = adapter.parse(bare("""{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}""")).events.single()
+        assertEquals(buildJsonObject { put("messageId", "msg_9"); put("index", 0); put("text", "Hi") }, delta.data)
+    }
+
+    @Test fun tailCountsOnlyTheEventsShown() = runTest {
+        // 1..30: every third event is a final message, the others live text deltas.
+        val all = (1L..30L).map { CloudEventView(it, if (it % 3 == 0L) CloudEventTypes.AGENT_MESSAGE else CloudEventTypes.AGENT_MESSAGE_DELTA, 0, 1, buildJsonObject { put("text", "t") }) }
+        val asked = mutableListOf<Long>()
+        val page: suspend (Long) -> CloudEventPageView = { before ->
+            asked += before
+            val rows = all.filter { it.seq < before }.takeLast(4)
+            CloudEventPageView(rows, 1, 30, null, rows.firstOrNull()?.seq?.takeIf { it > 1 })
+        }
+        assertEquals(23, tailStart(3, 30, { it.shown() }, page), "Three final messages: 24, 27 and 30")
+        assertEquals(listOf(31L, 27L), asked, "Walked back page by page")
+        assertEquals(27, tailStart(3, 30, { true }, page), "--json counts every event")
+        assertEquals(0, tailStart(50, 30, { it.shown() }, page), "Fewer shown events than asked: from the start")
+        assertEquals(30, tailStart(0, 30, { it.shown() }, page))
+    }
+
+    @Test fun cloudLogsSkipLiveDeltas() {
+        val delta = CloudEventView(3, CloudEventTypes.AGENT_MESSAGE_DELTA, 0, 1, buildJsonObject { put("messageId", "msg_1"); put("index", 0); put("text", "Half") })
+        assertNull(delta.printed(), "logs and attach print the final message only")
+        assertEquals("00:00:00 #4 Done", CloudEventView(4, CloudEventTypes.AGENT_MESSAGE, 0, 1, buildJsonObject { put("text", "Done"); put("messageId", "msg_1") }).printed())
+    }
+
     @Test fun codexAppServerHoldsSteersRetriesAndFallsBack() {
         val adapter = CodexAppServerAdapter(codex, "1.0")
         val startup = adapter.startup("th-old", "/workspace").map(::obj)
@@ -372,7 +513,16 @@ class CloudAgentTest {
         var attempts = 0
         var relay = false
         var deadline = 0
-        override suspend fun agent() = RunnerAgentView("claude", "2.1", "opus", null, "none", permissionRelay = relay, permissionDeadlineMinutes = deadline)
+        var live = false
+        var tasks = false
+        var kind = "claude"
+        /** What the host announced at its last poll. */
+        var acceptsTaskStops: Boolean? = null
+        override suspend fun agent() = RunnerAgentView(kind, "2.1", "opus", null, "none", permissionRelay = relay, permissionDeadlineMinutes = deadline, liveText = live, backgroundTasks = tasks)
+        override suspend fun poll(waitMillis: Long, desiredState: String, acceptsFiles: Boolean, acceptsTaskStops: Boolean): RunnerInputsView {
+            this.acceptsTaskStops = acceptsTaskStops
+            return RunnerInputsView(inputs(waitMillis))
+        }
         override suspend fun events(events: List<RunnerEventView>): RunnerEventsAckView {
             // An Error, not an Exception: the host cannot swallow it, so a retry loop without pause fails the test.
             if (++attempts > 10_000) throw AssertionError("The host retries the upload without pause")
@@ -391,12 +541,30 @@ class CloudAgentTest {
         override fun clear() { value = null }
     }
 
-    private fun TestScope.host(channel: FakeChannel, state: MemoryState, started: MutableList<Pair<AgentCommand, FakeProcess>>) = AgentHost(channel, { command, environment, _ ->
+    private fun TestScope.host(channel: FakeChannel, state: MemoryState, started: MutableList<Pair<AgentCommand, FakeProcess>>, environments: MutableList<Map<String, String?>> = mutableListOf()) = AgentHost(channel, { command, environment, _ ->
         assertTrue(environment.containsKey("TEAMCODE_CLOUD_TOKEN_FILE") && environment["TEAMCODE_CLOUD_TOKEN_FILE"] == null, "The token path never reaches the agent")
+        environments += environment
         FakeProcess().also { started += command to it }
     }, state, "/workspace", "1.0", now = { testScheduler.currentTime })
 
     private suspend fun TestScope.until(condition: () -> Boolean) { repeat(1_000) { if (condition()) return; delay(100) }; fail("Condition not reached") }
+
+    @Test fun hostStreamsLiveTextWhenTheServerTakesIt() = runTest {
+        val channel = FakeChannel().apply { live = true }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val job = launch { host(channel, MemoryState(), started).run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Hi", 1)))
+        until { started.isNotEmpty() }
+        val (command, process) = started.single()
+        assertTrue("--include-partial-messages" in command.arguments)
+        process.output.send(blockStart(0, "text"))
+        process.output.send(textDelta(0, "Hel"))
+        delay(600) // The host's clock: the next delta goes out, with what was held.
+        process.output.send(textDelta(0, "lo"))
+        until { channel.uploaded.any { it.type == CloudEventTypes.AGENT_MESSAGE_DELTA } }
+        assertEquals("Hello", channel.uploaded.single { it.type == CloudEventTypes.AGENT_MESSAGE_DELTA }.data.str("text"))
+        job.cancel()
+    }
 
     @Test fun hostStartsLazilyAcknowledgesUploadsAndResumes() = runTest {
         val channel = FakeChannel()
@@ -445,6 +613,33 @@ class CloudAgentTest {
         nextJob.cancel()
     }
 
+    @Test fun aConversationOfTheDeviceIsForkedOnceThenTheSessionResumesItsOwn() = runTest {
+        // `cloud.sessions.remote.resume.v1`: the daemon stored the device's conversation, marked to fork.
+        val channel = FakeChannel()
+        val state = MemoryState(AgentState("claude", "2.1", "0000000a-aaaa-4bbb-8ccc-000000000001", fork = true))
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val host = host(channel, state, started)
+        val job = launch { host.run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Go on", 1)))
+        until { started.isNotEmpty() }
+        val (command, process) = started.single()
+        assertEquals(listOf("--resume", "0000000a-aaaa-4bbb-8ccc-000000000001", "--fork-session"), command.arguments.takeLast(3))
+        process.output.send("""{"type":"system","subtype":"init","session_id":"forked-1"}""")
+        until { state.value?.conversationId == "forked-1" }
+        assertEquals(AgentState("claude", "2.1", "forked-1"), state.value, "The fork's own id replaces the device's, unmarked")
+        process.output.send("""{"type":"result","subtype":"success","is_error":false}""")
+        until { channel.uploaded.count { it.type == CloudEventTypes.TURN } == 2 }
+        assertTrue(host.drain(testScheduler.currentTime + 120_000))
+        job.cancel()
+
+        val next = host(channel, state, started)
+        val nextJob = launch { next.run() }
+        channel.inputs.send(listOf(RunnerInputView("in-2", "message", "Again", 1)))
+        until { started.size == 2 }
+        assertEquals(listOf("--resume", "forked-1"), started[1].first.arguments.takeLast(2), "Never forked again")
+        nextJob.cancel()
+    }
+
     @Test fun messagesAnsweredByOneResultDoNotHoldThePause() = runTest {
         // Session eef7f7f7: two messages delivered together, one Claude Code turn and one result. Counting a result per
         // message left a turn "running" forever, so the drain waited for the pause deadline instead of stopping at once.
@@ -462,6 +657,75 @@ class CloudAgentTest {
         assertTrue(host.drain(pausedAt + 10 * 60_000), "Nothing runs: a clean stop")
         assertTrue(testScheduler.currentTime - pausedAt < 1_000, "The drain did not wait for a turn that had ended (${testScheduler.currentTime - pausedAt} ms)")
         assertFalse(process.written.any { "\"interrupt\"" in it })
+        job.cancel()
+    }
+
+    @Test fun aPauseWaitsForBackgroundWorkBeforeStoppingTheAgent() = runTest {
+        // A pause (explicit, idle, or the device daemon stopping for `teamcode update`) stopped the agent as soon as its turn
+        // ended, killing the subagents and background commands it still ran: the drain now waits for them, up to its deadline.
+        val channel = FakeChannel()
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val host = host(channel, MemoryState(), started)
+        val job = launch { host.run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Run the suite in the background", 1)))
+        until { channel.acks.isNotEmpty() }
+        val process = started.single().second
+        process.output.send("""{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"npm test"}]}""")
+        process.output.send("""{"type":"result","subtype":"success","is_error":false}""")
+        until { channel.uploaded.count { it.type == CloudEventTypes.TURN } == 2 && host.backgroundWork }
+        val pausedAt = testScheduler.currentTime
+        val drained = async { host.drain(pausedAt + 10 * 60_000) }
+        delay(120_000)
+        assertEquals(0, process.stops, "The agent keeps running while its background work does")
+        assertFalse(drained.isCompleted)
+        // The command ends: Claude Code reports it in a turn of its own, which the drain lets finish.
+        process.output.send("""{"type":"system","subtype":"background_tasks_changed","tasks":[]}""")
+        process.output.send("""{"type":"assistant","message":{"content":[{"type":"text","text":"The suite passed"}]}}""")
+        process.output.send("""{"type":"result","subtype":"success","is_error":false}""")
+        assertTrue(drained.await(), "Background work that ended in time is a clean stop")
+        assertTrue(testScheduler.currentTime - pausedAt < 130_000)
+        job.cancel()
+    }
+
+    @Test fun scheduledWakeupsAreBackgroundWorkOfTheCurrentAgentProcessOnly() = runTest {
+        val channel = FakeChannel()
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val host = host(channel, MemoryState(), started)
+        host.scheduledWakeups(2)
+        assertFalse(host.backgroundWork, "No agent process, nothing scheduled to fire")
+        val job = launch { host.run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Check the deploy every 5 minutes", 1)))
+        until { channel.acks.isNotEmpty() }
+        val process = started.single().second
+        process.output.send("""{"type":"result","subtype":"success","is_error":false}""")
+        until { channel.uploaded.count { it.type == CloudEventTypes.TURN } == 2 }
+        assertFalse(host.backgroundWork, "A new process starts with none")
+        host.scheduledWakeups(1)
+        assertTrue(host.backgroundWork, "A /loop or a reminder keeps the session from the idle pause")
+        assertFalse(host.backgroundTasksInFlight, "But it is not work a stop kills: --resume restores it")
+        host.scheduledWakeups(0)
+        assertFalse(host.backgroundWork)
+        job.cancel()
+    }
+
+    @Test fun backgroundWorkStillRunningAtThePauseDeadlineIsStoppedAndSaid() = runTest {
+        val channel = FakeChannel()
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val host = host(channel, MemoryState(), started)
+        val job = launch { host.run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Tail the logs", 1)))
+        until { channel.acks.isNotEmpty() }
+        val process = started.single().second
+        process.output.send("""{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"tail -f"},{"task_id":"a1","task_type":"local_agent","description":"Review"}]}""")
+        process.output.send("""{"type":"result","subtype":"success","is_error":false}""")
+        until { host.backgroundWork }
+        val deadline = testScheduler.currentTime + 10 * 60_000
+        assertFalse(host.drain(deadline), "Background work stopped by the pause is not a clean stop")
+        assertTrue(testScheduler.currentTime <= deadline, "Within the pause deadline")
+        assertNotNull(process.exit, "The agent is stopped")
+        until { channel.uploaded.any { it.type == CloudEventTypes.STATUS && (it.data["agent"] as? JsonPrimitive)?.content == "background_stopped" } }
+        assertEquals(2, (channel.uploaded.single { (it.data["agent"] as? JsonPrimitive)?.content == "background_stopped" }.data["tasks"] as JsonPrimitive).int,
+            "The transcript says how much background work the pause stopped")
         job.cancel()
     }
 
@@ -494,7 +758,7 @@ class CloudAgentTest {
         val sent = mutableListOf<String>()
         val answers = Channel<String>(Channel.UNLIMITED)
         val polling = object : AgentChannel by channel {
-            override suspend fun poll(waitMillis: Long, desiredState: String): RunnerInputsView { sent += desiredState; return RunnerInputsView(emptyList(), answers.receive()) }
+            override suspend fun poll(waitMillis: Long, desiredState: String, acceptsFiles: Boolean, acceptsTaskStops: Boolean): RunnerInputsView { sent += desiredState; return RunnerInputsView(emptyList(), answers.receive()) }
         }
         var changes = 0
         val host = AgentHost(polling, { _, _, _ -> FakeProcess() }, MemoryState(), "/workspace", "1.0", now = { testScheduler.currentTime })
@@ -695,5 +959,392 @@ class CloudAgentTest {
         refuse = TeamCodeException(404, "missing", "not_found")
         assertNull(inference.token())
         assertTrue(inference.unsupported)
+    }
+
+    /** A runner channel that serves message files, counting the downloads, and records what the host announced. */
+    private class FileChannel(val channel: FakeChannel, val kind: String = "claude", val mode: String? = null) : AgentChannel by channel {
+        val bytes = mutableMapOf<String, ByteArray>()
+        var downloads = 0
+        var failure: Exception? = null
+        val announced = mutableListOf<Boolean>()
+        override suspend fun agent() = RunnerAgentView(kind, "1", null, null, "none", permissionMode = mode)
+        override suspend fun poll(waitMillis: Long, desiredState: String, acceptsFiles: Boolean, acceptsTaskStops: Boolean): RunnerInputsView {
+            announced += acceptsFiles
+            return RunnerInputsView(channel.inputs.receive())
+        }
+        override suspend fun file(fileId: String, maxBytes: Long, receive: (ByteArray, Int) -> Unit) {
+            downloads++
+            failure?.let { throw it }
+            val content = bytes.getValue(fileId)
+            // Two chunks, as the client streams them.
+            val half = content.size / 2
+            receive(content.copyOfRange(0, half), half)
+            receive(content.copyOfRange(half, content.size), content.size - half)
+        }
+        fun serve(id: String, name: String, content: ByteArray, type: String = "image/png", sha256: String = content.toByteString().sha256().hex()): RunnerFileView {
+            bytes[id] = content
+            return RunnerFileView(id, name, content.size.toLong(), type, sha256)
+        }
+    }
+
+    /** A fresh directory standing for the user's temporary directory, and another for the session's working directory. */
+    private class Scratch {
+        val root = FileSystem.SYSTEM_TEMPORARY_DIRECTORY / "teamcode-files-test-${Uuid.random()}"
+        val temporary = (root / "tmp").also { FileSystem.SYSTEM.createDirectories(it) }
+        val workspace = (root / "workspace").also { FileSystem.SYSTEM.createDirectories(it) }
+        fun close() = FileSystem.SYSTEM.deleteRecursively(root, mustExist = false)
+    }
+
+    private val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+    private val windows get() = hostOs() == "windows"
+
+    private fun TestScope.fileHost(channel: FileChannel, scratch: Scratch, started: MutableList<Pair<AgentCommand, FakeProcess>>, uploads: SessionUploads) =
+        AgentHost(channel, { command, _, _ -> FakeProcess().also { started += command to it } }, MemoryState(), scratch.workspace.toString(), "1.0",
+            now = { testScheduler.currentTime }, uploads = uploads)
+
+    @Test fun messageFilesLandInTheUserTemporaryDirectoryPrivatelyAndTheAgentReadsTheirPath() = runTest {
+        val scratch = Scratch()
+        try {
+            val channel = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val uploads = SessionUploads.remote("s-1", "501", scratch.temporary)
+            val job = launch { fileHost(channel, scratch, started, uploads).run() }
+            val file = channel.serve("f1", "shot.png", png)
+            channel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Look at this", 1, listOf(file))))
+            until { channel.channel.acks.isNotEmpty() }
+            assertEquals(CloudInputStatuses.CONSUMED, channel.channel.acks.single().status)
+            assertEquals(true, channel.announced.first(), "The host announces files once its directory is ready")
+
+            val directory = assertNotNull(uploads.directory)
+            assertEquals(FileSystem.SYSTEM.canonicalize(scratch.temporary / "teamcode-501" / "s-1"), directory)
+            val written = directory / "f1-shot.png"
+            assertContentEquals(png, FileSystem.SYSTEM.read(written) { readByteArray() })
+            assertTrue(FileSystem.SYSTEM.listRecursively(scratch.workspace).toList().isEmpty(), "Nothing under the working directory")
+            if (!windows) {
+                assertEquals(0x1C0, pathStatus((scratch.temporary / "teamcode-501").toString())!!.mode, "The user's directory is 0700")
+                assertEquals(0x1C0, pathStatus(directory.toString())!!.mode, "The session's directory is 0700")
+                assertEquals(0x180, pathStatus(written.toString())!!.mode, "The file is 0600")
+            }
+
+            // The stream-json line the agent reads: the text, then one line per file with its absolute path.
+            val (command, process) = started.single()
+            val text = obj(process.written.single())["message"]!!.jsonObject["content"]!!.jsonArray.single().jsonObject.str("text")
+            assertEquals("Look at this\n\n[Attached file: $written (image/png, 8 bytes)]", text)
+            assertTrue(written.isAbsolute)
+            // Claude Code reads the directory without a permission request.
+            val addDir = command.arguments.indexOf("--add-dir")
+            assertTrue(addDir >= 0, command.arguments.toString())
+            assertEquals(directory.toString(), command.arguments[addDir + 1])
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun aRedeliveredMessageWritesItsFilesOnce() = runTest {
+        val scratch = Scratch()
+        try {
+            val channel = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val job = launch { fileHost(channel, scratch, started, SessionUploads.remote("s-1", "501", scratch.temporary)).run() }
+            val input = RunnerInputView("in-1", "message", "", 1, listOf(channel.serve("f1", "a.txt", "hello".encodeToByteArray(), "text/plain")))
+            channel.channel.inputs.send(listOf(input))
+            until { channel.channel.acks.size == 1 }
+            channel.channel.inputs.send(listOf(input.copy(attempt = 2)))
+            until { channel.channel.acks.size == 2 }
+            assertEquals(channel.channel.acks[0], channel.channel.acks[1], "Acknowledged again")
+            assertEquals(1, channel.downloads, "Downloaded and written once")
+            assertEquals(1, started.single().second.written.size, "Handed to the agent once")
+            assertEquals("[Attached file: ", obj(started.single().second.written.single())["message"]!!.jsonObject["content"]!!.jsonArray.single().jsonObject.str("text").take(16),
+                "A message of files alone carries their lines only")
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun aFileThatDoesNotMatchOrCannotBeDownloadedRejectsTheMessageAndStartsNoTurn() = runTest {
+        val scratch = Scratch()
+        try {
+            val channel = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val uploads = SessionUploads.remote("s-1", "501", scratch.temporary)
+            val job = launch { fileHost(channel, scratch, started, uploads).run() }
+            val forged = channel.serve("f1", "shot.png", png, sha256 = "0".repeat(64))
+            channel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Look", 1, listOf(forged))))
+            until { channel.channel.acks.size == 1 }
+            assertEquals(RunnerInputAckView("in-1", CloudInputStatuses.REJECTED, "file_integrity_failed"), channel.channel.acks.single())
+            assertTrue(FileSystem.SYSTEM.list(uploads.directory!!).isEmpty(), "The mismatching file is removed")
+
+            channel.failure = IllegalStateException("network")
+            channel.channel.inputs.send(listOf(RunnerInputView("in-2", "message", "Again", 1, listOf(channel.serve("f2", "b.png", png)))))
+            until { channel.channel.acks.size == 2 }
+            assertEquals(RunnerInputAckView("in-2", CloudInputStatuses.REJECTED, "file_download_failed"), channel.channel.acks[1])
+            assertEquals(1 + AgentHost.FILE_ATTEMPTS, channel.downloads, "A failing download is retried, then the message is rejected")
+
+            channel.failure = TeamCodeException(404, "gone", "not_found")
+            channel.channel.inputs.send(listOf(RunnerInputView("in-3", "message", "Once more", 1, listOf(channel.serve("f3", "c.png", png)))))
+            until { channel.channel.acks.size == 3 }
+            assertEquals(RunnerInputAckView("in-3", CloudInputStatuses.REJECTED, "file_unavailable"), channel.channel.acks[2])
+            assertTrue(started.isEmpty(), "No agent process, so no turn")
+            assertTrue(channel.channel.uploaded.none { it.type == CloudEventTypes.TURN }, "No turn event")
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun aFileNameOrIdCannotLeaveTheUploadsDirectory() = runTest {
+        val scratch = Scratch()
+        try {
+            val channel = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val uploads = SessionUploads.remote("s-1", "501", scratch.temporary)
+            val job = launch { fileHost(channel, scratch, started, uploads).run() }
+            val names = listOf("../../workspace/evil.png", "..\\..\\evil.png", "/etc/passwd", "..", "-rf", ".hidden\u0000.png")
+            names.forEachIndexed { index, name ->
+                channel.channel.inputs.send(listOf(RunnerInputView("in-$index", "message", "x", 1, listOf(channel.serve("f$index", name, png)))))
+            }
+            until { channel.channel.acks.size == names.size }
+            assertTrue(channel.channel.acks.all { it.status == CloudInputStatuses.CONSUMED }, channel.channel.acks.toString())
+            val directory = uploads.directory!!
+            val files = FileSystem.SYSTEM.listRecursively(scratch.root).filter { FileSystem.SYSTEM.metadata(it).isRegularFile }.toList()
+            assertEquals(names.size, files.size)
+            assertTrue(files.all { FileSystem.SYSTEM.canonicalize(it).parent == directory }, "Every file stays in the session's directory: $files")
+            assertEquals(listOf("f0-evil.png", "f1-evil.png", "f2-passwd", "f3-file", "f4-rf", "f5-hidden.png"), files.map { it.name }.sorted())
+            assertTrue(FileSystem.SYSTEM.listRecursively(scratch.workspace).toList().isEmpty())
+
+            // An id that is a path is refused, and a link planted at the target is never followed.
+            channel.channel.inputs.send(listOf(RunnerInputView("in-id", "message", "x", 1, listOf(channel.serve("../f", "a.png", png)))))
+            until { channel.channel.acks.size == names.size + 1 }
+            assertEquals("invalid_file", channel.channel.acks.last().reason)
+            if (!windows) {
+                val outside = scratch.workspace / "target.png"
+                FileSystem.SYSTEM.createSymlink(directory / "fl-link.png", outside)
+                channel.channel.inputs.send(listOf(RunnerInputView("in-link", "message", "x", 1, listOf(channel.serve("fl", "link.png", png)))))
+                until { channel.channel.acks.size == names.size + 2 }
+                assertEquals("file_write_failed", channel.channel.acks.last().reason)
+                assertFalse(FileSystem.SYSTEM.exists(outside), "Nothing written through the link")
+            }
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun aMessageFileSurvivesAPauseAndAResumeOnTheRemoteHost() = runTest {
+        val scratch = Scratch()
+        try {
+            val root = scratch.temporary / "teamcode-501"
+            val first = FileChannel(FakeChannel())
+            val host = fileHost(first, scratch, mutableListOf(), SessionUploads.remote("s-1", "501", scratch.temporary))
+            val job = launch { host.run() }
+            first.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 1, listOf(first.serve("f1", "a.png", png)))))
+            until { first.channel.acks.isNotEmpty() }
+            // The pause: the agent drains, the host checkpoints and stops (as RunnerLoop does on its way out).
+            host.drain(null)
+            host.stop()
+            job.cancel()
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f1-a.png"), "A pause keeps the file")
+
+            // The resume: a new execution of the same session finds it, and still writes the next file next to it.
+            val second = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val resumed = fileHost(second, scratch, started, SessionUploads.remote("s-1", "501", scratch.temporary))
+            val resumedJob = launch { resumed.run() }
+            second.channel.inputs.send(listOf(RunnerInputView("in-2", "message", "y", 1, listOf(second.serve("f2", "b.png", png)))))
+            until { second.channel.acks.isNotEmpty() }
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f1-a.png"), "The resumed conversation can read the first file again")
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f2-b.png"))
+            // A message an earlier execution received but never acknowledged, offered again: the same bytes are reused, never rewritten.
+            second.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 2, listOf(second.serve("f1", "a.png", png)))))
+            until { second.channel.acks.size == 2 }
+            assertEquals(CloudInputStatuses.CONSUMED, second.channel.acks[1].status)
+            resumed.stop()
+            resumedJob.cancel()
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f2-b.png"), "Stopping without the session ending keeps the files")
+        } finally { scratch.close() }
+    }
+
+    @Test fun messageFilesAreRemovedWhenTheSessionEnds() = runTest {
+        val scratch = Scratch()
+        try {
+            val root = scratch.temporary / "teamcode-501"
+            val channel = FileChannel(FakeChannel())
+            val host = fileHost(channel, scratch, mutableListOf(), SessionUploads.remote("s-1", "501", scratch.temporary))
+            val heartbeats = Channel<String>(Channel.UNLIMITED)
+            val loop = RunnerLoop(object : RunnerCalls {
+                override suspend fun register() = RunnerInstructionView("running", null, 1)
+                override suspend fun heartbeat(ready: Boolean) = RunnerInstructionView(heartbeats.receive(), null, 1)
+                override suspend fun checkpoint(completed: Boolean) = RunnerInstructionView("paused", null, 1)
+            }, agent = host)
+            val job = async { loop.run() }
+            heartbeats.send("running")
+            channel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 1, listOf(channel.serve("f1", "a.png", png)))))
+            until { channel.channel.acks.isNotEmpty() }
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f1-a.png"))
+            // The server terminated the session: the runner loop exits and the session's directory goes with it.
+            heartbeats.send("terminated")
+            assertEquals(RunnerLoop.EXIT_FENCED_OR_DONE, job.await())
+            assertFalse(FileSystem.SYSTEM.exists(root / "s-1"), "Removed at the end of the session")
+
+            // A fenced host never removes anything, even for a session that ends: the execution that fenced it may use the directory.
+            val fencedChannel = FileChannel(FakeChannel())
+            val fencedHost = fileHost(fencedChannel, scratch, mutableListOf(), SessionUploads.remote("s-1", "501", scratch.temporary))
+            val fencedJob = launch { fencedHost.run() }
+            fencedChannel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 1, listOf(fencedChannel.serve("f2", "b.png", png)))))
+            until { fencedChannel.channel.acks.isNotEmpty() }
+            fencedChannel.failure = TeamCodeException(409, "fenced", "execution_fenced")
+            fencedChannel.channel.inputs.send(listOf(RunnerInputView("in-2", "message", "x", 1, listOf(fencedChannel.serve("f3", "c.png", png)))))
+            until { fencedHost.fenced }
+            fencedJob.join()
+            fencedHost.sessionEnded(); fencedHost.stop()
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "f2-b.png"), "A fenced host leaves the files")
+            assertEquals(1, fencedChannel.channel.acks.size, "and acknowledges nothing more")
+        } finally { scratch.close() }
+    }
+
+    @Test fun uploadsOlderThanAWeekAreSweptAtStart() = runTest {
+        val scratch = Scratch()
+        try {
+            val root = scratch.temporary / "teamcode-501"
+            // Left by earlier executions: this session's own files, and another session's (which may have ended while no host ran).
+            FileSystem.SYSTEM.createDirectories(root / "s-1"); FileSystem.SYSTEM.write(root / "s-1" / "old-a.txt") { writeUtf8("a") }
+            FileSystem.SYSTEM.createDirectories(root / "s-2"); FileSystem.SYSTEM.write(root / "s-2" / "old-b.txt") { writeUtf8("b") }
+            assertTrue(SessionUploads.remote("s-1", "501", scratch.temporary).prepare {})
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1" / "old-a.txt"), "This session's recent files stay")
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-2" / "old-b.txt"), "Another session's recent files stay: its host may be running")
+            val later = Clock.System.now().toEpochMilliseconds() + SessionUploads.MAX_AGE_MILLIS + 60_000
+            assertTrue(SessionUploads.remote("s-1", "501", scratch.temporary, now = { later }).prepare {})
+            assertFalse(FileSystem.SYSTEM.exists(root / "s-2"), "Anything older than a week is removed")
+            assertFalse(FileSystem.SYSTEM.exists(root / "s-1" / "old-a.txt"), "This session's too: a week at most")
+            assertTrue(FileSystem.SYSTEM.exists(root / "s-1"), "and its directory is ready again")
+        } finally { scratch.close() }
+    }
+
+    @Test fun aHostWithoutAUsableUploadsDirectoryAnnouncesNoFiles() = runTest {
+        val scratch = Scratch()
+        try {
+            // Another user's (or a planted) path where this user's directory should be: files are off, never written there.
+            FileSystem.SYSTEM.write(scratch.temporary / "teamcode-501") { writeUtf8("not a directory") }
+            val channel = FileChannel(FakeChannel())
+            val job = launch { fileHost(channel, scratch, mutableListOf(), SessionUploads.remote("s-1", "501", scratch.temporary)).run() }
+            channel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 1)))
+            until { channel.channel.acks.isNotEmpty() }
+            assertEquals(false, channel.announced.first())
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun aPodWritesItsFilesInTheUploadsVolumeReadableByTheAgentsGroup() = runTest {
+        val scratch = Scratch()
+        try {
+            val volume = (scratch.root / "uploads").also { FileSystem.SYSTEM.createDirectories(it) }
+            val channel = FileChannel(FakeChannel())
+            val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+            val uploads = SessionUploads.pod(volume.toString())
+            val job = launch { fileHost(channel, scratch, started, uploads).run() }
+            channel.channel.inputs.send(listOf(RunnerInputView("in-1", "message", "x", 1, listOf(channel.serve("f1", "a.png", png)))))
+            until { channel.channel.acks.isNotEmpty() }
+            val written = FileSystem.SYSTEM.canonicalize(volume) / "f1-a.png"
+            assertTrue(FileSystem.SYSTEM.exists(written))
+            if (!windows) assertEquals(0x1A0, pathStatus(written.toString())!!.mode, "0640: the agent's UID reads it through the pod's group")
+            job.cancel()
+        } finally { scratch.close() }
+    }
+
+    @Test fun codexInAskModeKeepsItsWorkspaceSandboxForMessageFiles() {
+        // workspace-write restricts writes only: the uploads directory is readable without an extra root, and never writable.
+        val adapter = agentAdapter(AgentSettings("codex", "0.163", null, null, permissionMode = RemotePermissionModes.ASK), "1.0", readableDirectories = listOf("/tmp/teamcode-501/s-1"))
+        val command = adapter.command(null).arguments
+        assertTrue("sandbox_mode=\"workspace-write\"" in command, command.toString())
+        assertFalse(command.any { "/tmp/teamcode-501" in it }, "No writable root for the uploads")
+        val claude = agentAdapter(AgentSettings("claude", "2.1", null, null, permissionMode = RemotePermissionModes.ASK), "1.0", readableDirectories = listOf("/tmp/teamcode-501/s-1"))
+        val arguments = claude.command(null).arguments
+        assertEquals(listOf("--add-dir", "/tmp/teamcode-501/s-1"), arguments.subList(arguments.indexOf("--add-dir"), arguments.indexOf("--add-dir") + 2))
+    }
+    @Test fun claudeReportsItsBackgroundTasksWhenTheServerTakesThem() {
+        var clock = 1_000L
+        val adapter = ClaudeStreamJsonAdapter(claude.copy(backgroundTasks = true), now = { clock })
+        fun changed(tasks: String) = adapter.parse("""{"type":"system","subtype":"background_tasks_changed","tasks":[$tasks],"uuid":"u","session_id":"c1"}""").events
+        // `task_started` names the tool call that started the task; `background_tasks_changed` does not.
+        assertTrue(adapter.parse("""{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_1","description":"Review","task_type":"local_agent","uuid":"u","session_id":"c1"}""").events.isEmpty())
+        clock = 5_000L
+        val event = changed("""{"task_id":"a1","task_type":"local_agent","subagent_type":"Explore","description":"Review"},""" +
+            """{"task_id":"b1","task_type":"local_bash","description":"${"x".repeat(300)}"},{"task_id":"w1","task_type":"local_bash","description":"watch","ambient":true}""").single()
+        assertEquals(CloudEventTypes.TASKS, event.type)
+        assertEquals(true, (event.data["stoppable"] as JsonPrimitive).boolean)
+        val tasks = event.data["tasks"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("a1", "b1"), tasks.map { it.str("id") }, "Claude Code's own (ambient) tasks are left out")
+        assertEquals("toolu_1", tasks[0].str("toolUseId")); assertEquals("Explore", tasks[0].str("subagentType")); assertEquals("local_agent", tasks[0].str("type"))
+        assertEquals(1_000L, (tasks[0]["startedAt"] as JsonPrimitive).long, "Started when Claude Code said so")
+        assertEquals(5_000L, (tasks[1]["startedAt"] as JsonPrimitive).long, "Or when the runner first saw it")
+        assertEquals(CloudTasks.MAX_DESCRIPTION_CHARS, tasks[1].str("description").length)
+        assertFalse(tasks[1].containsKey("toolUseId"))
+        clock = 9_000L
+        assertTrue(changed("""{"task_id":"a1","task_type":"local_agent","subagent_type":"Explore","description":"Review"},{"task_id":"b1","task_type":"local_bash","description":"${"x".repeat(300)}"}""").isEmpty(),
+            "The same set again (an ambient task ended) uploads nothing")
+        // A stop goes to Claude Code as its control request; a task it no longer runs is not asked for.
+        val stop = obj(adapter.stopTask("b1").single())
+        assertEquals("control_request", stop.str("type"))
+        assertEquals("stop_task", stop["request"]!!.jsonObject.str("subtype")); assertEquals("b1", stop["request"]!!.jsonObject.str("task_id"))
+        assertTrue(adapter.stopTask("gone").isEmpty())
+        assertTrue(adapter.canStopTasks)
+        val many = changed((1..60).joinToString(",") { """{"task_id":"t$it","task_type":"local_bash","description":"c$it"}""" }).single()
+        assertEquals(CloudTasks.MAX_TASKS, many.data["tasks"]!!.jsonArray.size)
+        assertEquals(60, (many.data["count"] as JsonPrimitive).int, "The event says how many there were")
+        assertEquals(0, changed("").single().data["tasks"]!!.jsonArray.size, "The last one ended: an empty set")
+        // Scheduled wake-ups (the `Stop` hook's `session_crons`): only their number is known, listed beside the tasks.
+        assertEquals(2, (adapter.scheduled(2)!!.data["scheduled"] as JsonPrimitive).int)
+        assertNull(adapter.scheduled(2), "Unchanged")
+        assertEquals(0, adapter.tasksEnded()!!.data["scheduled"]!!.jsonPrimitive.int, "They fire only while the process runs")
+        assertNull(adapter.tasksEnded(), "Nothing to clear")
+        changed("""{"task_id":"b2","task_type":"local_bash","description":"npm test"}""")
+        assertEquals(0, adapter.tasksEnded()!!.data["tasks"]!!.jsonArray.size, "A process that stops with tasks clears the set")
+        // An older server refuses the event type: nothing goes out without its flag.
+        val quiet = ClaudeStreamJsonAdapter(claude)
+        assertTrue(quiet.parse("""{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"npm test"}]}""").events.isEmpty())
+        assertNull(quiet.tasksEnded())
+        assertFalse(CodexAppServerAdapter(codex, "1").canStopTasks)
+    }
+
+    @Test fun hostStopsABackgroundTaskAndForwardsSubagentText() = runTest {
+        val channel = FakeChannel().apply { tasks = true }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val environments = mutableListOf<Map<String, String?>>()
+        val job = launch { host(channel, MemoryState(), started, environments).run() }
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Run the suite in the background", 1)))
+        until { channel.acks.isNotEmpty() }
+        assertEquals(true, channel.acceptsTaskStops, "The host announces it stops tasks: the server delivers stops to it only then")
+        // Claude Code forwards a subagent's text only when asked; an older one ignores the variable (a flag would fail it).
+        assertEquals("1", environments.single()["CLAUDE_CODE_FORWARD_SUBAGENT_TEXT"])
+        val process = started.single().second
+        process.output.send("""{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"npm test"}]}""")
+        until { channel.uploaded.any { it.type == CloudEventTypes.TASKS } }
+        channel.inputs.send(listOf(RunnerInputView("stop-1", CloudTasks.KIND, "b1", 1), RunnerInputView("stop-2", CloudTasks.KIND, "b9", 1)))
+        until { channel.acks.size == 3 }
+        assertEquals(RunnerInputAckView("stop-1", CloudInputStatuses.CONSUMED), channel.acks[1])
+        assertEquals(RunnerInputAckView("stop-2", CloudInputStatuses.REJECTED, CloudTasks.UNKNOWN), channel.acks[2], "A task that ended meanwhile")
+        assertTrue(process.written.any { "\"stop_task\"" in it && "\"b1\"" in it })
+        assertFalse(process.written.any { "\"b9\"" in it })
+        // The agent stops with the task still listed: the set is cleared, so no client shows a task nobody runs.
+        process.output.send(null); process.exit = 1
+        until { channel.uploaded.count { it.type == CloudEventTypes.TASKS } == 2 }
+        assertEquals(0, channel.uploaded.last { it.type == CloudEventTypes.TASKS }.data["tasks"]!!.jsonArray.size)
+        job.cancel()
+    }
+
+    @Test fun logsShowTheBackgroundTasksInOneLine() {
+        val tasks = buildJsonObject { putJsonArray("tasks") { addJsonObject { put("id", "b1"); put("description", "npm test") }; addJsonObject { put("id", "a1"); put("description", "Review") } } }
+        assertTrue(CloudEventView(1, CloudEventTypes.TASKS, 0, 1, tasks).render().endsWith("[tasks] 2 running: npm test, Review"))
+        assertTrue(CloudEventView(2, CloudEventTypes.TASKS, 0, 1, buildJsonObject { putJsonArray("tasks") {} }).render().endsWith("[tasks] none running"))
+    }
+
+    @Test fun aStopReachingAnAgentThatCannotStopTasksIsRejected() = runTest {
+        val channel = FakeChannel().apply { kind = "codex" }
+        val started = mutableListOf<Pair<AgentCommand, FakeProcess>>()
+        val job = launch { host(channel, MemoryState(), started).run() }
+        channel.inputs.send(listOf(RunnerInputView("stop-0", CloudTasks.KIND, "b1", 1)))
+        until { channel.acks.isNotEmpty() }
+        assertEquals(RunnerInputAckView("stop-0", CloudInputStatuses.REJECTED, CloudTasks.UNKNOWN), channel.acks.single(), "No agent runs: no task to stop")
+        assertTrue(started.isEmpty(), "A stop never starts an agent")
+        channel.inputs.send(listOf(RunnerInputView("in-1", "message", "Hello", 1)))
+        until { channel.acks.size == 2 }
+        channel.inputs.send(listOf(RunnerInputView("stop-1", CloudTasks.KIND, "b1", 1)))
+        until { channel.acks.size == 3 }
+        assertEquals(RunnerInputAckView("stop-1", CloudInputStatuses.REJECTED, CloudTasks.UNSUPPORTED), channel.acks.last(), "Codex has no task to stop")
+        job.cancel()
     }
 }

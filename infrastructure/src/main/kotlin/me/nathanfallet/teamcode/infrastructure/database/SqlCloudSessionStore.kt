@@ -69,7 +69,7 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
             it[claimName] = created.workspace.claimName; it[storageClass] = created.workspace.storageClass; it[workspaceSize] = created.workspace.sizeGibibytes
             it[environment] = encodeEnvironment(created.environment)
             it[kind] = created.kind.wire; it[hostDeviceId] = created.host?.deviceId; it[hostDirectoryName] = created.host?.directoryName
-            it[permissionMode] = created.host?.permissionMode?.wire
+            it[permissionMode] = created.host?.permissionMode?.wire; it[hostFolderId] = created.host?.folderId; it[hostResumeSessionId] = created.host?.resumeSessionId
             it[createdAt] = now
             writeSessionMutable(it, created)
             it[reconcileAfter] = now; it[reconcileRequested] = true
@@ -112,7 +112,7 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
 
     override suspend fun executions(teamId: String, sessionId: String): List<CloudExecution> = database.query {
         (CloudExecutions innerJoin CloudSessions).selectAll().where { (CloudSessions.id eq sessionId) and (CloudSessions.teamId eq teamId) }
-            .orderBy(CloudExecutions.epoch to SortOrder.DESC).limit(100).map(::readExecution)
+            .orderBy(CloudExecutions.epoch to SortOrder.DESC).limit(RunnerChannelUseCase.EXECUTION_HISTORY_LIMIT).map(::readExecution)
     }
     override suspend fun execution(sessionId: String, epoch: Int): CloudExecution? = database.query {
         CloudExecutions.selectAll().where { (CloudExecutions.sessionId eq sessionId) and (CloudExecutions.epoch eq epoch) }.singleOrNull()?.let(::readExecution)
@@ -198,7 +198,9 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
 
     override suspend fun deviceOf(principal: Principal): String? = database.query {
         if (principal.serviceScopes != null) null
-        else Tokens.select(Tokens.deviceId).where { Tokens.id eq principal.tokenId }.singleOrNull()?.get(Tokens.deviceId)
+        // A cloud session's execution credential is never a host device, whatever its row says: one pod runs one session.
+        else Tokens.select(Tokens.deviceId).where { (Tokens.id eq principal.tokenId) and notExists(CloudInferenceCredentials.select(CloudInferenceCredentials.tokenId)
+            .where { CloudInferenceCredentials.tokenId eq Tokens.id }) }.singleOrNull()?.get(Tokens.deviceId)
     }
 
     override suspend fun startHostExecution(expected: CloudSession, next: CloudSession, execution: CloudExecution, ended: CloudExecution?, actor: CloudActor): CloudSession? = database.query {
@@ -223,12 +225,21 @@ class SqlCloudSessionStore(private val database: Database) : CloudSessionStore {
         committed
     }
 
-    override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean): Boolean = database.query {
+    override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean, background: Boolean): Boolean = database.query {
         val current = CloudSessions.select(CloudSessions.currentEpoch).where { CloudSessions.id eq sessionId }.singleOrNull()?.get(CloudSessions.currentEpoch)
         if (current != epoch) return@query false
         val now = nowMillis()
-        CloudExecutions.update({ (CloudExecutions.sessionId eq sessionId) and (CloudExecutions.epoch eq epoch) and (CloudExecutions.state eq ExecutionState.RUNNING.wire) }) {
+        val running = (CloudExecutions.sessionId eq sessionId) and (CloudExecutions.epoch eq epoch) and (CloudExecutions.state eq ExecutionState.RUNNING.wire)
+        // Read by primary key only when background work is reported, to know whether it continues the previous report.
+        // Only heartbeats write these two columns ([writeExecution] leaves them), so a reconciler's stale copy never resets them.
+        val worked = if (!background) null else CloudExecutions.select(CloudExecutions.lastHeartbeatAt, CloudExecutions.backgroundSince, CloudExecutions.backgroundSeenAt)
+            .where { running }.singleOrNull()?.let { row ->
+                CloudIdleRules.heartbeat(CloudExecution(sessionId, epoch, "", ExecutionState.RUNNING, 0, lastHeartbeatAt = row[CloudExecutions.lastHeartbeatAt],
+                    backgroundSince = row[CloudExecutions.backgroundSince], backgroundSeenAt = row[CloudExecutions.backgroundSeenAt]), background = true, now = now)
+            }
+        CloudExecutions.update({ running }) {
             it[lastHeartbeatAt] = now; it[CloudExecutions.runnerReady] = runnerReady
+            if (worked != null) { it[backgroundSince] = worked.backgroundSince; it[backgroundSeenAt] = worked.backgroundSeenAt }
         } == 1
     }
 
@@ -303,8 +314,11 @@ internal fun readSessionRow(row: ResultRow, labels: Map<String, String>) = Cloud
         problem(row[CloudSessions.deletionCode], row[CloudSessions.deletionMessage], false)),
     createdAt = row[CloudSessions.createdAt], updatedAt = row[CloudSessions.updatedAt], transferId = row[CloudSessions.transferId],
     environment = decodeEnvironment(row[CloudSessions.environment]),
+    humanWait = readHumanWait(row),
     kind = CloudSessionKind.parse(row[CloudSessions.kind]),
     host = readHost(row),
+    // An unknown value (a newer server's) is the strictest mode that keeps the session usable by its owner.
+    githubAccess = CloudGitHubAccess.parse(row[CloudSessions.githubAccess]) ?: CloudGitHubAccess.OWNER,
 )
 /**
  * The host of a remote session; the device's name and system, and the liveness of the current execution, only when
@@ -316,12 +330,19 @@ private fun readHost(row: ResultRow): CloudSessionHost? {
     val execution = row.getOrNull(CloudExecutions.state)
     return CloudSessionHost(row[CloudSessions.hostDeviceId], row[CloudSessions.hostDirectoryName], device,
         RemotePermissionMode.parse(row[CloudSessions.permissionMode]) ?: RemotePermissionMode.ASK,
-        online = execution == ExecutionState.RUNNING.wire, lastHeartbeatAt = row.getOrNull(CloudExecutions.lastHeartbeatAt))
+        online = execution == ExecutionState.RUNNING.wire, lastHeartbeatAt = row.getOrNull(CloudExecutions.lastHeartbeatAt), folderId = row[CloudSessions.hostFolderId])
+}
+/** The wait columns of a session row, null when nothing was set or the row holds a reason this version does not know. */
+internal fun readHumanWait(row: ResultRow): CloudHumanWait? {
+    val reason = CloudHumanWait.Reason.parse(row[CloudSessions.awaitingReason]) ?: return null
+    return CloudHumanWait(reason, row[CloudSessions.awaitingRequestId], row[CloudSessions.awaitingSince] ?: return null,
+        row[CloudSessions.awaitingEventSeq] ?: return null, row[CloudSessions.awaitingEpoch] ?: return null)
 }
 internal fun readExecution(row: ResultRow) = CloudExecution(
     row[CloudExecutions.sessionId], row[CloudExecutions.epoch], row[CloudExecutions.podName], ExecutionState.parse(row[CloudExecutions.state]), row[CloudExecutions.createdAt],
     row[CloudExecutions.registeredAt], row[CloudExecutions.lastHeartbeatAt], row[CloudExecutions.runnerReady], row[CloudExecutions.nodeName], row[CloudExecutions.imageDigest],
     row[CloudExecutions.endedAt], row[CloudExecutions.exitReason], row[CloudExecutions.checkpoint], row[CloudExecutions.ownerId],
+    row[CloudExecutions.backgroundSince], row[CloudExecutions.backgroundSeenAt],
 )
 
 internal fun sessionGuard(expected: CloudSession, leaseOwner: String?, now: Long): Op<Boolean> {
@@ -345,7 +366,14 @@ internal fun writeSessionMutable(it: UpdateBuilder<*>, s: CloudSession) {
     it[CloudSessions.volumeName] = w.volumeName; it[CloudSessions.volumeHandle] = w.volumeHandle?.take(512); it[CloudSessions.deletionState] = w.deletion.wire
     it[CloudSessions.claimDeletedAt] = w.claimDeletedAt; it[CloudSessions.volumeDeletedAt] = w.volumeDeletedAt
     it[CloudSessions.deletionCode] = w.deletionProblem?.code; it[CloudSessions.deletionMessage] = w.deletionProblem?.message?.take(512)
-    it[CloudSessions.updatedAt] = s.updatedAt; it[CloudSessions.transferId] = s.transferId
+    it[CloudSessions.updatedAt] = s.updatedAt; it[CloudSessions.transferId] = s.transferId; it[CloudSessions.githubAccess] = s.githubAccess.wire
+    // The wait is only ever cleared here, never set (only the conversation store sets it, under the row lock): leaving
+    // the states that take an answer ends it, since a pausing runner denies its open requests without an event, and a
+    // pause cancelled on the same execution must not bring back a request already denied.
+    if (!s.takesAnswers) {
+        it[CloudSessions.awaitingReason] = null; it[CloudSessions.awaitingRequestId] = null; it[CloudSessions.awaitingSince] = null
+        it[CloudSessions.awaitingEventSeq] = null; it[CloudSessions.awaitingEpoch] = null
+    }
 }
 internal fun writeExecution(it: UpdateBuilder<*>, e: CloudExecution) {
     it[CloudExecutions.podName] = e.podName; it[CloudExecutions.state] = e.state.wire

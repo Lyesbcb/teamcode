@@ -1,6 +1,7 @@
 package me.nathanfallet.teamcode.client
 
 import kotlinx.coroutines.*
+import kotlin.coroutines.ContinuationInterceptor
 import kotlin.uuid.Uuid
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -13,6 +14,9 @@ import io.ktor.client.plugins.resources.get
 import io.ktor.client.request.*
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.readAvailable
+import io.ktor.utils.io.writeFully
+import io.ktor.utils.io.cancel
 import io.ktor.utils.io.readRemaining
 import kotlinx.io.readByteArray
 import io.ktor.http.*
@@ -219,6 +223,52 @@ class TeamCodeClient(
     }
     suspend fun revokeDevice(id: String) = revoke("devices", id)
     suspend fun revokeAuthSession(id: String) = revoke("auth/sessions", id)
+    /** The folders one of the caller's own devices offers, and whether its daemon is online (`cloud.sessions.remote.daemon.v1`). */
+    suspend fun deviceFolders(id: String): DeviceFoldersView { identifier(id); return request("/api/v1/devices/$id/folders", HttpMethod.Get) }
+    /**
+     * The daemon's channel, with this device's own login: marks the daemon online and waits up to [waitMillis] (at most
+     * 20 s on the server) for sessions to host. Call it again at once after each answer.
+     */
+    suspend fun pollDeviceDaemon(waitMillis: Long = 20_000, version: String? = null, features: List<String> = emptyList()): DaemonPollView {
+        require(waitMillis >= 0) { "Invalid wait." }
+        return request("/api/v1/devices/current/daemon/poll", HttpMethod.Post, DaemonPollRequest(waitMillis, version, features))
+    }
+    /**
+     * The agent conversations one of the caller's own devices could continue in [folderId], the most recent first
+     * (`cloud.sessions.remote.resume.v1`): the server asks the device's daemon and waits for its answer (a few seconds).
+     * [before] is the previous page's `nextBefore`.
+     */
+    suspend fun resumableSessions(deviceId: String, folderId: String, limit: Int = ResumableSessions.DEFAULT_LIMIT, before: Long? = null): ResumableSessionsView {
+        identifier(deviceId)
+        require(Regex("[A-Za-z0-9_-]{1,64}").matches(folderId)) { "Invalid folder." }
+        require(limit in 1..ResumableSessions.MAX_LIMIT)
+        val response = http.request("$origin/api/v1/devices/$deviceId/folders/$folderId/resumable") {
+            method = HttpMethod.Get; authenticate(); timeout { requestTimeoutMillis = 30_000 }
+            parameter("limit", limit); before?.let { parameter("before", it) }
+        }
+        checkResponse(response)
+        return response.body()
+    }
+    /** The daemon's answer to a member waiting for a folder's conversations ([DaemonPollView.listings]). */
+    suspend fun answerDeviceDaemonListing(requestId: String, answer: DaemonListingAnswerRequest) {
+        identifier(requestId)
+        checkResponse(http.request("$origin/api/v1/devices/current/daemon/listings/$requestId") {
+            method = HttpMethod.Post; authenticate(); timeout { requestTimeoutMillis = 10_000 }
+            contentType(ContentType.Application.Json); setBody(answer)
+        })
+    }
+    /** Marks this device's daemon offline at once, when it stops. */
+    suspend fun stopDeviceDaemon() {
+        checkResponse(http.delete("$origin/api/v1/devices/current/daemon") { authenticate(); timeout { requestTimeoutMillis = 10_000 } })
+    }
+    /** Replaces the folders this device's daemon offers: its own keys and the folders' names, never paths the server relies on. */
+    suspend fun publishDeviceFolders(folders: List<DeviceFolderView>): List<DeviceFolderView> =
+        request("/api/v1/devices/current/folders", HttpMethod.Put, PublishDeviceFoldersRequest(folders))
+    /** Refuses a session of this device's queue that the daemon's own check rejected, with a stable [reason] code. */
+    suspend fun refuseDeviceDaemonSession(id: String, reason: String): CloudSessionView {
+        identifier(id)
+        return request("/api/v1/devices/current/daemon/sessions/$id/refuse", HttpMethod.Post, RefuseDaemonOrderRequest(reason))
+    }
     private suspend fun revoke(resource: String, id: String) {
         identifier(id)
         checkResponse(http.delete("$origin/api/v1/$resource/$id") { authenticate(); timeout { requestTimeoutMillis = 10_000 } })
@@ -287,6 +337,9 @@ class TeamCodeClient(
     suspend fun pauseCloudSession(id: String, force: Boolean = false, onBehalfOf: String? = null): CloudSessionView =
         cloudAction("/api/v1/cloud/sessions/$id/pause", id, onBehalfOf, PauseCloudSessionRequest(force)).body()
     suspend fun resumeCloudSession(id: String, onBehalfOf: String? = null): CloudSessionView = cloudAction("/api/v1/cloud/sessions/$id/resume", id, onBehalfOf, null).body()
+    /** Chooses whose instructions the agent follows with the owner's GitHub token (`cloud.sessions.github-access.v1`); owner only. */
+    suspend fun setCloudGitHubAccess(id: String, access: String): CloudSessionView =
+        identifier(id).let { request("/api/v1/cloud/sessions/$id/github", HttpMethod.Put, CloudGitHubAccessRequest(access)) }
     /** Starts a remote session's next execution on this device (`cloud.sessions.remote.v1`); the host then uses the runner channel. */
     suspend fun hostCloudSession(id: String): CloudHostView = cloudAction("/api/v1/cloud/sessions/$id/host", id, null, null).body()
     suspend fun deleteCloudSession(id: String, onBehalfOf: String? = null) { cloudAction("/api/v1/cloud/sessions/$id", id, onBehalfOf, null, HttpMethod.Delete) }
@@ -558,10 +611,124 @@ class TeamCodeClient(
         idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
         return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/messages", input) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
     }
+
+    // Files sent with messages (`cloud.files.v1`).
+    /** Whether the caller's team can send files now and its limits; [CloudFilePolicyView.reason] says why it cannot. */
+    suspend fun cloudFilePolicy(): CloudFilePolicyView = coded(HttpMethod.Get, "/api/v1/cloud/files/policy", null as Unit?)
+
+    /** [uploadCloudFile] for bytes already in memory. */
+    suspend fun uploadCloudFile(sessionId: String, name: String, bytes: ByteArray, contentType: String? = null, idempotencyKey: String = Uuid.random().toString(),
+        attempts: Int = UPLOAD_ATTEMPTS, onRetry: (Throwable) -> Unit = {}, onProgress: (sent: Long, total: Long) -> Unit = { _, _ -> }): CloudFileView =
+        uploadCloudFile(sessionId, name, CloudFileSource.of(bytes), contentType, idempotencyKey, attempts, onRetry, onProgress)
+
+    /**
+     * Uploads one file to [sessionId] (`POST /cloud/sessions/{id}/files`), streamed from [source] in 64 KiB chunks;
+     * send the returned id in a message's [SendCloudMessageRequest.fileIds]. [name] is the file's name, which the server
+     * cleans; [contentType] a guess ([CloudFileTypes.forName]), since the server recognizes the type from the bytes.
+     *
+     * Every attempt sends the same [idempotencyKey], so a retry never stores the file twice. A network failure, `408`,
+     * `429` other than [CloudFiles.UPLOAD_QUOTA] and `5xx` are retried up to [attempts] times in all, with backoff (or
+     * the server's `Retry-After` up to 30 s); [onRetry] is told before each wait. Other refusals throw
+     * [TeamCodeException] with the server's code at once, a source that cannot be read [CloudFileReadException].
+     * The SHA-256 of the bytes sent is compared to the one the server stored: a difference throws [TeamCodeException]
+     * with code [FILE_INTEGRITY_FAILED]. [onProgress] runs on the caller's dispatcher with the bytes sent so far, from 0
+     * at the start of each attempt.
+     */
+    suspend fun uploadCloudFile(sessionId: String, name: String, source: CloudFileSource, contentType: String? = null, idempotencyKey: String = Uuid.random().toString(),
+        attempts: Int = UPLOAD_ATTEMPTS, onRetry: (Throwable) -> Unit = {}, onProgress: (sent: Long, total: Long) -> Unit = { _, _ -> }): CloudFileView {
+        identifier(sessionId)
+        require(name.isNotBlank() && name.length <= 1024 && name.none { it.isISOControl() }) { "Invalid file name." }
+        require(CloudHeaders.idempotencyKey.matches(idempotencyKey)) { "Invalid idempotency key." }
+        require(attempts in 1..10) { "Use 1 to 10 attempts." }
+        val type = contentType?.let { ContentType.parse(it) } ?: ContentType.Application.OctetStream
+        // Progress is reported where the caller runs (a UI thread, the CLI's input loop), not on the engine's writer.
+        val caller = currentCoroutineContext()[ContinuationInterceptor] ?: Dispatchers.Unconfined
+        val report: suspend (Long) -> Unit = { sent -> withContext(caller) { onProgress(sent, source.size) } }
+        var wait = 1_000L
+        var attempt = 1
+        while (true) {
+            try {
+                return sendCloudFile(sessionId, name, source, type, idempotencyKey, report)
+            } catch (error: CancellationException) { throw error }
+            catch (error: CloudFileReadException) { throw error }
+            catch (error: TeamCodeException) {
+                val transient = error.statusCode == 408 || error.statusCode in 500..599 || (error.statusCode == 429 && error.code != CloudFiles.UPLOAD_QUOTA)
+                if (!transient || attempt >= attempts) throw error
+                onRetry(error)
+                delay(error.retryAfterSeconds?.takeIf { it in 1..30 }?.times(1_000) ?: wait)
+            } catch (error: Exception) {
+                if (attempt >= attempts) throw error
+                onRetry(error)
+                delay(wait)
+            }
+            wait = (wait * 2).coerceAtMost(15_000)
+            attempt++
+        }
+    }
+
+    private suspend fun sendCloudFile(sessionId: String, name: String, source: CloudFileSource, type: ContentType, idempotencyKey: String, report: suspend (Long) -> Unit): CloudFileView {
+        val digest = okio.HashingSink.sha256(okio.blackholeSink())
+        // Set when the source failed: the engine may surface it wrapped, or as the cancellation of the request.
+        var unreadable: CloudFileReadException? = null
+        fun unreadable(message: String, cause: Throwable? = null): Nothing = throw CloudFileReadException(message, cause).also { unreadable = it }
+        val body = object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
+            override val contentLength = source.size
+            override val contentType = type
+            override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
+                try { write(channel) } catch (error: CloudFileReadException) {
+                    // The body ends in error, never as a shorter or longer file, whatever the engine does with the throw.
+                    channel.cancel(error); throw error
+                }
+            }
+            private suspend fun write(channel: io.ktor.utils.io.ByteWriteChannel) {
+                report(0)
+                val raw = try { source.open() } catch (error: CancellationException) { throw error } catch (error: Exception) { unreadable("The file cannot be read.", error) }
+                raw.use { input ->
+                    val buffer = kotlinx.io.Buffer()
+                    var sent = 0L
+                    while (true) {
+                        val count = try { input.readAtMostTo(buffer, UPLOAD_CHUNK_BYTES) } catch (error: CancellationException) { throw error } catch (error: Exception) { unreadable("The file cannot be read.", error) }
+                        if (count < 0) break
+                        sent += count
+                        if (sent > source.size) unreadable("The file grew while it was sent.")
+                        val bytes = buffer.readByteArray()
+                        digest.write(okio.Buffer().write(bytes), bytes.size.toLong())
+                        channel.writeFully(bytes)
+                        report(sent)
+                    }
+                    if (sent != source.size) unreadable("The file changed while it was sent.")
+                }
+                channel.flush()
+            }
+        }
+        val response = try {
+            http.request("$origin/api/v1/cloud/sessions/$sessionId/files") {
+                method = HttpMethod.Post; authenticate(); parameter("name", name)
+                header(CloudHeaders.IDEMPOTENCY_KEY, idempotencyKey); setBody(body)
+                timeout { requestTimeoutMillis = UPLOAD_TIMEOUT_MILLIS }
+            }
+        } catch (error: CancellationException) {
+            currentCoroutineContext().ensureActive(); throw unreadable ?: error
+        } catch (error: Exception) { throw unreadable ?: error }
+        unreadable?.let { throw it }
+        if (!response.status.isSuccess()) throw failure(response)
+        val file: CloudFileView = response.body()
+        if (file.size != source.size || !file.sha256.equals(digest.hash.hex(), ignoreCase = true))
+            throw TeamCodeException(0, "The server stored other bytes than the ones sent.", FILE_INTEGRITY_FAILED)
+        return file
+    }
+
     suspend fun interruptCloudSession(id: String, idempotencyKey: String? = null): CloudInputView {
         identifier(id)
         idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
         return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/interrupt", null as Unit?) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
+    }
+    /** Stops the background task [taskId] of the session's running agent (`cloud.sessions.background-tasks.v1`). */
+    suspend fun stopCloudTask(id: String, taskId: String, idempotencyKey: String? = null): CloudInputView {
+        identifier(id)
+        require(CloudTasks.TASK_ID.matches(taskId)) { "Invalid task id." }
+        idempotencyKey?.let { require(CloudHeaders.idempotencyKey.matches(it)) { "Invalid idempotency key." } }
+        return coded(HttpMethod.Post, "/api/v1/cloud/sessions/$id/tasks/stop", StopCloudTaskRequest(taskId)) { idempotencyKey?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) } }
     }
     /**
      * Answers a `permission.request` event (`cloud.permissions.v1`): allow or deny it, or answer its questions by
@@ -600,6 +767,9 @@ class TeamCodeClient(
             onBehalfOf?.let { header(CloudHeaders.ON_BEHALF_OF, it) }
         }
     }
+    /** The members a session can be given to, for a picker (`cloud.transfer.recipients.v1`). */
+    suspend fun cloudTransferRecipients(): List<CloudTransferRecipientView> =
+        coded<CloudTransferRecipientsView, Unit>(HttpMethod.Get, "/api/v1/cloud/transfer-recipients", null).recipients
     /** [direction] is `incoming`, `outgoing` or null for both; [team] lists every team transfer (administrators). */
     suspend fun cloudTransfers(direction: String? = null, team: Boolean = false, states: List<String> = emptyList(), session: String? = null, before: String? = null, limit: Int = 50): CloudTransferPageView {
         session?.let(::identifier); before?.let(::identifier)
@@ -629,6 +799,30 @@ class TeamCodeClient(
     suspend fun runnerInputs(input: RunnerInputsRequest): RunnerInputsView =
         coded(HttpMethod.Post, "/api/v1/cloud/runner/inputs", input) { timeout { requestTimeoutMillis = input.waitMillis + 30_000 } }
     suspend fun runnerAcknowledge(input: RunnerInputAckRequest) { coded<Unit, RunnerInputAckRequest>(HttpMethod.Post, "/api/v1/cloud/runner/inputs/ack", input) }
+    /**
+     * Streams the bytes of a message file delivered to this execution (`cloud.files.v1`) to [receive], chunk by chunk,
+     * never more than [maxBytes]; the caller checks the size and SHA-256 the input announced. Nothing is buffered whole.
+     */
+    suspend fun runnerFile(teamId: String, sessionId: String, epoch: Int, fileId: String, maxBytes: Long, receive: (ByteArray, Int) -> Unit) {
+        identifier(fileId)
+        http.prepareGet("$origin/api/v1/cloud/runner/files/$fileId") {
+            authenticate()
+            parameter("teamId", teamId); parameter("sessionId", sessionId); parameter("epoch", epoch)
+            timeout { requestTimeoutMillis = RUNNER_FILE_TIMEOUT_MILLIS }
+        }.execute { response ->
+            if (!response.status.isSuccess()) throw failure(response)
+            val body = response.bodyAsChannel()
+            val chunk = ByteArray(64 * 1024)
+            var total = 0L
+            while (true) {
+                val count = body.readAvailable(chunk, 0, chunk.size)
+                if (count < 0) break
+                total += count
+                if (total > maxBytes) throw TeamCodeException(502, "The file is larger than announced.", "file_too_large")
+                if (count > 0) receive(chunk, count)
+            }
+        }
+    }
     /** A `tcex_` inference credential for this execution; keep it in memory only. */
     suspend fun runnerInference(input: RunnerInferenceRequest): RunnerInferenceCredentialView = coded(HttpMethod.Post, "/api/v1/cloud/runner/inference", input)
     /** The execution owner's current GitHub token (`status` `linked`), or why there is none; keep it in memory only. */
@@ -649,23 +843,31 @@ class TeamCodeClient(
     /**
      * The failure of a non-success response, with only safe, validated fields: the API error `type` (never its
      * message or the raw body, which a proxy or provider may fill with secrets), `Retry-After` in seconds and a
-     * proxy-assigned request id.
+     * proxy-assigned request id. For `422 recipient_ineligible`, the problem codes the message names, each checked
+     * against the same alphabet as the code (the rest of the message is dropped).
      */
     private suspend fun failure(response: HttpResponse): TeamCodeException {
-        val code = try {
+        val error = try {
             // Bounded: an error envelope is small, and a proxy's large or slow body must not be buffered whole.
             val bytes = response.bodyAsChannel().readRemaining(MAX_ERROR_BODY + 1L).readByteArray()
             if (bytes.size > MAX_ERROR_BODY) null
-            else Serialization.json.decodeFromString(ApiError.serializer(), bytes.decodeToString()).error.type.takeIf { ERROR_CODE.matches(it) }
+            else Serialization.json.decodeFromString(ApiError.serializer(), bytes.decodeToString()).error.takeIf { ERROR_CODE.matches(it.type) }
         } catch (error: CancellationException) { throw error } catch (_: Exception) { null }
-        return failure(response, code)
+        val problems = if (error?.type == RECIPIENT_INELIGIBLE) problemCodes(error.message) else emptyList()
+        return failure(response, error?.type, problems)
     }
 
     /** The failure of [response] whose body was already read for its [code]. */
-    private fun failure(response: HttpResponse, code: String?): TeamCodeException {
+    private fun failure(response: HttpResponse, code: String?, problems: List<String> = emptyList()): TeamCodeException {
         return TeamCodeException(response.status.value, "TeamCode returned HTTP ${response.status.value}.", code,
             retryAfterSeconds(response.headers[HttpHeaders.RetryAfter]),
-            REQUEST_ID_HEADERS.flatMap { response.headers.getAll(it).orEmpty() }.firstOrNull { REQUEST_ID.matches(it) })
+            REQUEST_ID_HEADERS.flatMap { response.headers.getAll(it).orEmpty() }.firstOrNull { REQUEST_ID.matches(it) }, problems)
+    }
+
+    /** `The recipient cannot own this session: profile_unassigned, recipient_no_quota.`: the codes after the colon, nothing else. */
+    private fun problemCodes(message: String): List<String> {
+        val list = message.substringAfterLast(": ", "").removeSuffix(".")
+        return list.split(", ").filter { ERROR_CODE.matches(it) }.distinct().take(MAX_PROBLEMS)
     }
 
     private suspend inline fun <reified R> request(path: String, method: HttpMethod, timeoutMillis: Long = 10_000): R {
@@ -821,11 +1023,23 @@ class TeamCodeClient(
          * Reconnecting replays the same event, so a caller stops (or updates) instead of retrying forever.
          */
         const val MALFORMED_EVENT = "malformed_event"
+        /** The [TeamCodeException.code] of an upload whose stored SHA-256 or size differs from the bytes sent (status `0`). */
+        const val FILE_INTEGRITY_FAILED = "file_integrity_failed"
+        /** Attempts of [uploadCloudFile] by default, the first included. */
+        const val UPLOAD_ATTEMPTS = 5
+        private const val UPLOAD_CHUNK_BYTES = 64L * 1024
+        /** 100 MiB, the largest file a team may allow, over a slow link. */
+        private const val UPLOAD_TIMEOUT_MILLIS = 15 * 60_000L
         // The server validates the names; this only keeps what would break the comma-separated query out.
         private val TEAM_EVENT_TYPE = Regex("[A-Za-z0-9_.:-]{1,128}")
         private const val MAX_TEAM_EVENT_TYPES = 64
         private val ERROR_CODE = Regex("[a-z_]{1,64}")
+        /** `422`: the recipient of a transfer fails checks; the problem codes are kept ([TeamCodeException.problems]). */
+        const val RECIPIENT_INELIGIBLE = "recipient_ineligible"
+        private const val MAX_PROBLEMS = 16
         private const val MAX_ERROR_BODY = 16 * 1024
+        /** A 100 MiB file over a slow link; the server streams it as it reads it. */
+        private const val RUNNER_FILE_TIMEOUT_MILLIS = 10 * 60_000L
         /** A conflict carries the live manifest: up to 511 files. */
         private const val MAX_ARTIFACT_DETAIL = 1024 * 1024
         private const val ARTIFACT_RELAY_LIMIT = 16 * 1024 * 1024 + 64 * 1024
@@ -850,6 +1064,8 @@ class TeamCodeException(
     val code: String? = null,
     val retryAfterSeconds: Long? = null,
     val requestId: String? = null,
+    /** For [TeamCodeClient.RECIPIENT_INELIGIBLE]: every check the recipient failed (`profile_unassigned`, ...). */
+    val problems: List<String> = emptyList(),
 ) : Exception(message)
 
 /** `409 artifact_conflict`: the artifact changed; [current] is the live version to merge before publishing again. */

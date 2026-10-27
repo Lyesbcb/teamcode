@@ -25,6 +25,9 @@ import me.nathanfallet.teamcode.infrastructure.database.ClusterConnection
 /** A non-success Kubernetes API status. The response body is never kept: it may echo request content. */
 class ClusterApiException(val status: Int) : Exception("The Kubernetes API returned HTTP $status.")
 
+/** The server URL for pods does not resolve from the server, so the session network policy cannot name it; retried. */
+class SessionServerUnresolvedException : Exception("The server URL for pods does not resolve.")
+
 /** The cluster API host resolves to a link-local, unspecified or cloud metadata address, so the service-account token is not sent. */
 class ClusterHostNotAllowedException : Exception("The Kubernetes API host resolves to an address that is not allowed.")
 
@@ -46,6 +49,8 @@ data class KubernetesPodOptions(
     val runAsUser: Long = 1000,
     /** The agent's UID: it must not be the runner's, whose files and projected token it must never read. */
     val agentRunAsUser: Long = 1001,
+    /** Applied to the session namespace before every pod; set by the operator, see [SessionNetworkPolicy]. */
+    val network: SessionNetworkPolicy = SessionNetworkPolicy(),
 ) {
     init {
         // The runner refuses plain HTTP except on loopback, and a pod's loopback is not the server.
@@ -148,8 +153,31 @@ class KubernetesClusterPort(
         // PersistentVolumes are cluster-wide and carry no TeamCode label: read them all, with a larger page budget.
         list(clusterId, "/api/v1/persistentvolumes", null, maxPages = 200).map(::volume).filter { it.managed && (it.phase == "Released" || it.phase == "Failed") }
 
+    /**
+     * Applies the namespace's [SessionNetworkPolicy] first, on every pod, so a policy deleted or changed by hand is
+     * restored before the next pod starts; a refusal creates no pod ([SessionNetworkPolicyRefusedException]).
+     */
     override suspend fun createPod(clusterId: String, request: PodRequest) {
-        create(clusterId, "/api/v1/namespaces/${segment(request.namespace)}/pods", podManifest(request))
+        val pods = options()
+        if (pods.network.enabled) applyNetworkPolicy(clusterId, request.namespace, pods.network, pods.serverUrl)
+        create(clusterId, "/api/v1/namespaces/${segment(request.namespace)}/pods", podManifest(request, pods))
+    }
+
+    /**
+     * Server-side apply (`PATCH` with `application/apply-patch+yaml`, field manager `teamcode`, forced): creates the
+     * policy or replaces the fields TeamCode owns in one idempotent call. Needs `create` and `patch` on `networkpolicies`. The server
+     * URL and the API server are resolved here, as the TeamCode server sees them, for every pod. Either failing to
+     * resolve stops the start (retried like a cluster error): a policy without the API server would let the pod reach
+     * it, one without the server rule would cut every running pod of the namespace from the server.
+     */
+    private suspend fun applyNetworkPolicy(clusterId: String, namespace: String, policy: SessionNetworkPolicy, serverUrl: String) {
+        val path = "/apis/networking.k8s.io/v1/namespaces/${segment(namespace)}/networkpolicies/${SessionNetworkPolicy.NAME}?fieldManager=teamcode&force=true"
+        val clusterApi = resolve(client(clusterId).connection.apiUrl).ifEmpty { throw ClusterHostNotAllowedException() }
+        val server = SessionNetworkPolicy.Server(resolve(serverUrl).ifEmpty { throw SessionServerUnresolvedException() }, Url(serverUrl).port)
+        val response = call(clusterId, HttpMethod.Patch, path, policy.manifest(server, clusterApi), contentType = APPLY_PATCH)
+        // Forbidden is the missing right; 401 (a token being rotated) is retried like any cluster error.
+        if (response.status == HttpStatusCode.Forbidden) throw SessionNetworkPolicyRefusedException()
+        if (!response.status.isSuccess()) throw ClusterApiException(response.status.value)
     }
 
     override suspend fun pod(clusterId: String, namespace: String, name: String): PodObservation? =
@@ -232,7 +260,9 @@ class KubernetesClusterPort(
                         env("TEAMCODE_AGENT_SOCKET", AGENT_SOCKET)
                         env("TEAMCODE_CREDENTIAL_SOCKET", CREDENTIAL_SOCKET)
                         env("TEAMCODE_GH_CONFIG_DIR", GH_CONFIG_DIR)
-                        env("HOME", "$WORKSPACE_DIR/.home")
+                        // Off the workspace: the agent writes there, and nothing it writes may steer the runner.
+                        env("HOME", RUNNER_HOME)
+                        env("TEAMCODE_UPLOADS_DIR", UPLOADS_DIR)
                         request.env.toSortedMap().forEach { (name, value) -> env(name, value) }
                     }
                     put("securityContext", containerSecurity(pods.runAsUser))
@@ -247,6 +277,8 @@ class KubernetesClusterPort(
                         addJsonObject { put("name", "runner-token"); put("mountPath", TOKEN_DIR); put("readOnly", true) }
                         addJsonObject { put("name", "sockets"); put("mountPath", SOCKET_DIR) }
                         addJsonObject { put("name", GH_CONFIG_VOLUME); put("mountPath", GH_CONFIG_DIR) }
+                        addJsonObject { put("name", UPLOADS_VOLUME); put("mountPath", UPLOADS_DIR) }
+                        addJsonObject { put("name", RUNNER_HOME_VOLUME); put("mountPath", RUNNER_HOME) }
                     }
                 }
                 addJsonObject {
@@ -276,6 +308,7 @@ class KubernetesClusterPort(
                         addJsonObject { put("name", "runner"); put("mountPath", RUNNER_DIR); put("readOnly", true) }
                         addJsonObject { put("name", "sockets"); put("mountPath", SOCKET_DIR) }
                         addJsonObject { put("name", GH_CONFIG_VOLUME); put("mountPath", GH_CONFIG_DIR); put("readOnly", true) }
+                        addJsonObject { put("name", UPLOADS_VOLUME); put("mountPath", UPLOADS_DIR); put("readOnly", true) }
                     }
                 }
             }
@@ -285,6 +318,11 @@ class KubernetesClusterPort(
                 addJsonObject { put("name", "sockets"); putJsonObject("emptyDir") { put("medium", "Memory"); put("sizeLimit", "1Mi") } }
                 // The agent's `gh` configuration: in memory, written by the runner only, gone with the pod.
                 addJsonObject { put("name", GH_CONFIG_VOLUME); putJsonObject("emptyDir") { put("medium", "Memory"); put("sizeLimit", "1Mi") } }
+                // The files members attach to messages: on the node's disk (not memory, which counts against the
+                // containers' limits), gone with the pod. The runner keeps what it writes under the limit.
+                addJsonObject { put("name", UPLOADS_VOLUME); putJsonObject("emptyDir") { put("sizeLimit", UPLOADS_SIZE_LIMIT) } }
+                // The runner's HOME, mounted in its container only and gone with the pod.
+                addJsonObject { put("name", RUNNER_HOME_VOLUME); putJsonObject("emptyDir") { put("sizeLimit", "16Mi") } }
                 addJsonObject {
                     put("name", "runner-token")
                     putJsonObject("projected") { putJsonArray("sources") { addJsonObject { putJsonObject("serviceAccountToken") {
@@ -355,13 +393,14 @@ class KubernetesClusterPort(
         throw ClusterApiException(507) // More objects than one pass may read; refuse rather than act on a partial list.
     }
 
-    private suspend fun call(clusterId: String, method: HttpMethod, path: String, body: JsonObject?, accept: String = JSON): HttpResponse {
+    private suspend fun call(clusterId: String, method: HttpMethod, path: String, body: JsonObject?, accept: String = JSON,
+                             contentType: ContentType = ContentType.Application.Json): HttpResponse {
         val client = client(clusterId)
         return client.http.request(client.connection.apiUrl.trimEnd('/') + path) {
             this.method = method
             bearerAuth(client.connection.token)
             header(HttpHeaders.Accept, accept)
-            if (body != null) { contentType(ContentType.Application.Json); setBody(body.toString()) }
+            if (body != null) { contentType(contentType); setBody(body.toString()) }
         }
     }
     private suspend fun parse(response: HttpResponse): JsonObject {
@@ -388,7 +427,11 @@ class KubernetesClusterPort(
             expectSuccess = false
             followRedirects = false
             install(HttpTimeout) { connectTimeoutMillis = 10_000; requestTimeoutMillis = 30_000 }
-            engine { https { trustManager = trustManager(connection.caCertificate) } }
+            engine {
+                https { trustManager = trustManager(connection.caCertificate) }
+                // The connection dials the address this check accepted, never a second answer of the name (audit L2).
+                dnsResolver = me.nathanfallet.teamcode.infrastructure.network.PinnedDns.resolver(CloudAdministrationService::allowedResolvedAddress, resolver)
+            }
         }
         val created = Client(fingerprint, connection, http, System.currentTimeMillis())
         clients.put(clusterId, created)?.let { previous -> if (previous.http !== shared) retired += previous.http }
@@ -398,7 +441,7 @@ class KubernetesClusterPort(
     /**
      * A DNS name is re-resolved whenever the connection is loaded (at least every 30 s) and refused if any answer is
      * link-local, unspecified or a cloud metadata address, as for a literal address in the administration check.
-     * Resolution happens off the event loop. The check cannot pin the address the HTTP client later dials.
+     * Resolution happens off the event loop. The HTTP client applies the same check to the address it dials.
      */
     private suspend fun requireAllowedHost(apiUrl: String) {
         val host = try { Url(apiUrl).host.removePrefix("[").removeSuffix("]") } catch (_: Exception) { throw ClusterHostNotAllowedException() }
@@ -407,6 +450,12 @@ class KubernetesClusterPort(
             catch (_: Exception) { throw ClusterHostNotAllowedException() }
         if (addresses.isEmpty() || addresses.any { !CloudAdministrationService.allowedResolvedAddress(it.address) }) throw ClusterHostNotAllowedException()
     }
+
+    /** The addresses of a URL's host, off the event loop; none when it does not resolve. */
+    private suspend fun resolve(url: String): List<ByteArray> = try {
+        val host = Url(url).host.removePrefix("[").removeSuffix("]")
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { resolver(host) }.map { it.address }
+    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { emptyList() }
 
     override fun close() {
         clients.values.forEach { if (it.http !== shared) it.http.close() }; clients.clear()
@@ -431,7 +480,22 @@ class KubernetesClusterPort(
          */
         const val GH_CONFIG_DIR = "/run/teamcode-gh"
         const val GH_CONFIG_VOLUME = "gh-config"
-        /** The agent's `HOME`, created by the agent's UID on the workspace volume (the runner's lives in `.home`). */
+        /**
+         * The files of members' messages, written by the runner (UID [KubernetesPodOptions.runAsUser], mode 0640) and
+         * read by the agent through the pod's group (`runAsGroup` and `fsGroup`), on a volume its container mounts
+         * read-only. Outside the workspace, so they are never committed and never outlive the pod.
+         */
+        const val UPLOADS_DIR = "/var/teamcode/uploads"
+        const val UPLOADS_VOLUME = "uploads"
+        /** Above the runner's own bound of 768 MiB per execution: going over the limit would evict the pod. */
+        const val UPLOADS_SIZE_LIMIT = "1Gi"
+        /**
+         * The runner's `HOME`: an `emptyDir` only its container mounts. It used to be `/workspace/.home`, which the
+         * agent can write; the runner's state (the conversation id) stays there, read and written by the runner only.
+         */
+        const val RUNNER_HOME = "/var/teamcode/runner-home"
+        const val RUNNER_HOME_VOLUME = "runner-home"
+        /** The agent's `HOME`, created by the agent's UID on the workspace volume (the runner's state lives in `.home`). */
         const val AGENT_HOME = "$WORKSPACE_DIR/.agent-home"
         private const val RUNNER_CPU = "250m"
         private const val RUNNER_MEMORY = "256Mi"
@@ -443,6 +507,8 @@ class KubernetesClusterPort(
         private const val MAX_RESPONSE_CHARS = 16 * 1024 * 1024
         private val safeReason = Regex("[A-Za-z]{1,64}")
         private const val JSON = "application/json"
+        /** JSON is YAML, so the manifest is sent as built. */
+        private val APPLY_PATCH = ContentType("application", "apply-patch+yaml")
         /** Metadata only, with no fallback to a full list: the API server answers `406` rather than send secret data. */
         internal const val METADATA_ONLY = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
         private val DEFAULT_CLASS_ANNOTATIONS = listOf("storageclass.kubernetes.io/is-default-class", "storageclass.beta.kubernetes.io/is-default-class")

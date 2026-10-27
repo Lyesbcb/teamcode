@@ -12,6 +12,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import me.nathanfallet.teamcode.cli.CliOperationException
 import me.nathanfallet.teamcode.cli.VERSION
+import me.nathanfallet.teamcode.cli.config.configPath
 import me.nathanfallet.teamcode.client.ReleaseClient
 import me.nathanfallet.teamcode.client.ReleaseDownloadException
 
@@ -20,10 +21,11 @@ catch (error: TimeoutCancellationException) {
     currentCoroutineContext().ensureActive()
     throw CliOperationException("release_operation_timeout")
 } catch (error: CancellationException) { throw error }
-catch (error: ReleaseDownloadException) { throw CliOperationException(error.code) }
+catch (error: ReleaseDownloadException) { throw CliOperationException(error.code, error.detail) }
 
 internal class Update : SuspendingCliktCommand(name = "update") {
     private val check by option("--check", help = "Check signed metadata without installing or restarting anything.").flag()
+    private val json by option("--json", help = "With --check: print the result as one JSON object (what TeamCode Desktop reads).").flag()
     private val rollback by option("--rollback", help = "Restore the previous verified local version without network access.").flag()
     private val version by option("--version", help = "Choose a published version, including prereleases or an explicit downgrade.")
     private val bundle by option("--bundle", help = "Use an offline signed release directory.")
@@ -31,7 +33,9 @@ internal class Update : SuspendingCliktCommand(name = "update") {
     private val notifications by option("--notifications", help = "Configure background signed release notifications for this managed installation.").choice("on", "off", "status")
     private val automatic by option("--automatic", help = "Opt into an hourly user update job, disable it, inspect it or remove its registration.").choice("on", "off", "status", "uninstall")
     private val automaticRun by option("--automatic-run", help = "Run one enabled automatic update attempt; supplied by the OS scheduler.").flag()
-    override fun help(context: Context) = "Check or update a managed native installation; preserve login. Running agent sessions keep their version; the owned service restarts when they end."
+    private val noService by option("--no-service", help = "Do not install the local service or check its login startup this time (teamcode service automatic off keeps this setting).").flag()
+    override fun help(context: Context) = "Check or update a managed native installation; preserve login. Running agent sessions keep their version; the owned service restarts when they end. " +
+        "Then installs the local service if it is missing, or checks that it starts at login and repairs it."
 
     override suspend fun run() = releaseOperation {
         if (listOf(notifications != null, automatic != null, automaticRun).count { it } > 1)
@@ -40,7 +44,7 @@ internal class Update : SuspendingCliktCommand(name = "update") {
             if (check || rollback || version != null || bundle != null) throw UsageError("Automatic updates cannot be combined with a check, version, bundle or rollback.")
             val store = root?.let { InstallationStore(defaultInstallationPaths(it)) } ?: managedInstallation()
                 ?: throw CliOperationException("release_not_managed")
-            automaticUpdateCommand(store, automatic, automaticRun) { echo(it) }
+            automaticUpdateCommand(store, automatic, automaticRun, noService) { echo(it) }
             return@releaseOperation
         }
         if (notifications != null) {
@@ -54,10 +58,12 @@ internal class Update : SuspendingCliktCommand(name = "update") {
             if (!me.nathanfallet.teamcode.cli.platform.environment("TEAMCODE_DISABLE_AUTOUPDATE").isNullOrEmpty()) echo("Environment override: background checks are disabled.")
             return@releaseOperation
         }
+        if (json && !check) throw UsageError("--json only applies to --check.")
         if (check) {
             if (rollback || bundle != null || root != null) throw UsageError("--check cannot be combined with --rollback, --bundle or --root.")
             val result = ReleaseClient { configure -> HttpClient { configure(this) } }.use { CheckRelease(it, currentVersion = VERSION)(version) }
-            if (result == null) echo("No stable published release is available. Current version: $VERSION.")
+            if (json) echo(releaseCheckJson(VERSION, result))
+            else if (result == null) echo("No stable published release is available. Current version: $VERSION.")
             else {
                 echo("Current version: ${result.currentVersion}")
                 echo("Verified release: ${result.release.manifest.version} (${result.release.manifest.sourceCommit})")
@@ -78,6 +84,8 @@ internal class Update : SuspendingCliktCommand(name = "update") {
                 echo("The managed installation is already up to date.")
                 pendingRestartReport(store)?.let { echo(it) }
             } else activationReport(activation, store).forEach { echo(it) }
+            // Decision 10: the binary update is done and kept; a service failure is reported, never thrown.
+            setUpInstallationService(store, configPath(), noService).let { echo(it.line, err = it.failed) }
         }
     }
 }

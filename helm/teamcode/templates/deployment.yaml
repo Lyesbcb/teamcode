@@ -15,9 +15,14 @@ spec:
       {{- include "teamcode.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations (include "teamcode.mcp.enabled" .) }}
       annotations:
+        {{- if include "teamcode.mcp.enabled" . }}
+        checksum/mcp-token: {{ include "teamcode.mcp.tokenChecksum" . }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "teamcode.labels" . | nindent 8 }}
@@ -42,8 +47,9 @@ spec:
         - name: teamcode
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
+          image: "{{ .Values.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default (ternary "Always" "IfNotPresent" (eq $tag "latest")) }}
           ports:
             - name: http
               containerPort: 8080
@@ -80,6 +86,32 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.existingSecret }}
                   key: encryption-key
+            {{- /* Values missing from an older release (helm upgrade --reuse-values) keep the defaults. */}}
+            {{- $sessionNetwork := dig "networkPolicy" (dict) (.Values.cloudSessions | default (dict)) }}
+            - name: TEAMCODE_CLOUD_SESSION_NETWORK_POLICY
+              value: {{ dig "enabled" true $sessionNetwork | toString | quote }}
+            - name: TEAMCODE_CLOUD_SESSION_EGRESS_LOCKDOWN
+              value: {{ dig "lockdown" false $sessionNetwork | toString | quote }}
+            - name: TEAMCODE_CLOUD_SESSION_EGRESS_BLOCKED_CIDRS
+              value: {{ join "," ($sessionNetwork.blockedCidrs | default (list)) | quote }}
+            - name: TEAMCODE_CLOUD_SESSION_EGRESS_EXTRA
+              value: {{ toJson ($sessionNetwork.extraEgress | default (list)) | quote }}
+            - name: TEAMCODE_TRUSTED_PROXIES
+              value: {{ join "," (.Values.trustedProxies | default (list)) | quote }}
+            - name: TEAMCODE_WEBHOOK_PRIVATE_TARGETS
+              value: {{ dig "allowPrivateTargets" false (.Values.webhooks | default dict) | toString | quote }}
+            {{- if include "teamcode.mcp.enabled" . }}
+            # The MCP stdio host of this release (templates/mcp.yaml) and its token. Optional, so a server pod still
+            # starts while the Secret is missing (during a rotation, or an operator Secret not created yet).
+            - name: TEAMCODE_MCP_URL
+              value: {{ include "teamcode.mcp.url" . | quote }}
+            - name: TEAMCODE_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "teamcode.mcp.tokenSecretName" . }}
+                  key: {{ include "teamcode.mcp.tokenSecretKey" . }}
+                  optional: true
+            {{- end }}
             - name: JAVA_TOOL_OPTIONS
               value: {{ .Values.javaToolOptions | quote }}
             {{- with .Values.extraEnv }}

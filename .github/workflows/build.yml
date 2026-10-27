@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       full_validation:
-        description: 'Run all five native platforms and signed installation acceptance (paid macOS/Windows runners)'
+        description: 'Run all four native platforms and signed installation acceptance (paid macOS/Windows runners)'
         type: boolean
         default: false
       validation_version:
@@ -19,8 +19,11 @@ on:
         type: boolean
         default: false
 env:
-  ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.full_validation && inputs.validation_version) || '0.1.0-SNAPSHOT' }}
+  ORG_GRADLE_PROJECT_teamcodeVersion: ${{ github.ref_type == 'tag' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.full_validation && inputs.validation_version) || '1.0.0-SNAPSHOT' }}
   TEAMCODE_INSTALLATION_VERSION: 0.0.0-installation.g${{ github.sha }}
+  # The Apple Team ID of the desktop app's Developer ID (public): compiled into the CLI, whose `teamcode ui` installs a
+  # macOS app only when its signature names this team. Empty when the repository variable is not set.
+  ORG_GRADLE_PROJECT_teamcodeMacosTeamId: ${{ vars.TEAMCODE_MACOS_TEAM_ID }}
 permissions:
   contents: read
 concurrency:
@@ -31,19 +34,22 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - run: python3 scripts/release-request.py
       - run: python3 scripts/check-module-graph.py
       - run: python3 -m unittest discover -s scripts -p 'test_acceptance_*.py'
       - run: python3 -m unittest discover -s scripts -p 'test_release_*.py'
-      - run: ./gradlew :api:jvmTest :client:jvmTest :client:testAndroidHostTest :api:compileAndroidMain :domain:test :infrastructure:test :presentation:test :config:jvmTest :cli:jvmTest :app:test :app:buildFatJar
+      - run: ./gradlew :api:jvmTest :client:jvmTest :client:testAndroidHostTest :api:compileAndroidMain :domain:test :infrastructure:test :presentation:test :config:jvmTest :cli:jvmTest :app:test :mcp:test :app:buildFatJar :mcp:buildFatJar
       - run: python3 scripts/smoke-replicas.py --jar app/build/libs/app-all.jar
-      - uses: actions/upload-artifact@v4
+      - run: python3 scripts/smoke-mcp-stdio.py --jar app/build/libs/app-all.jar --host-jar mcp/build/libs/mcp-all.jar --fixture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-jar
           path: app/build/libs/app-all.jar
@@ -52,22 +58,24 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - name: Install the Android platform the app compiles against
         # `yes` ends on SIGPIPE once sdkmanager exits; that status must not fail the step under pipefail.
         run: '{ yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" > /dev/null'
-      - run: ./gradlew :companion:jvmTest :companion:testAndroidHostTest :companion-android:assembleDebug
+      - run: ./gradlew :companion:jvmTest :companion-desktop:test :companion:testAndroidHostTest :companion-android:assembleDebug
   helm:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.19.0
       - run: python3 -m pip install PyYAML==6.0.3
@@ -79,13 +87,15 @@ jobs:
           curl --fail --location --retry 2 https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
           helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org | ./kubeconform -strict -summary
           helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org --set mysql.enabled=false --set mysql.jdbcUrl=jdbc:mysql://db:3306/teamcode --set autoscaling.enabled=true | ./kubeconform -strict -summary
-      - uses: actions/upload-artifact@v4
+          helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org --set mcp.enabled=false | ./kubeconform -strict -summary
+          helm template teamcode "chart-dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}.tgz" --set publicUrl=https://teamcode.example.org --set mcp.token.existingSecret=teamcode-mcp-token --set 'mcp.networkPolicy.blockedCidrs={203.0.113.0/24,2001:db8::/32}' | ./kubeconform -strict -summary
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-helm-chart
           path: chart-dist/*.tgz
           retention-days: 7
   image:
-    timeout-minutes: 20
+    timeout-minutes: 35
     needs: [jvm, helm, signed_installation]
     if: >-
       !cancelled() && needs.jvm.result == 'success' && needs.helm.result == 'success' &&
@@ -97,12 +107,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - name: Select image tags
         run: |
           if [ "${{ github.ref_type }}" = tag ] || [ "${{ github.event_name }}" = workflow_dispatch -a "${{ inputs.publish_release }}" = true ]; then
@@ -110,6 +122,19 @@ jobs:
           else
             echo "IMAGE_TAGS=latest,sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
           fi
+      # The MCP stdio host (docs/mcp.md): a Dockerfile image, since it carries Node.js, uv, tini and prlimit next to its
+      # JVM. It is built and checked before anything is pushed, so a failing host never leaves a server tag without its
+      # host; it is pushed after the server image, with the same tags, where the server image is pushed.
+      - name: Build the MCP host jar
+        run: ./gradlew :mcp:buildFatJar
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the MCP host image for amd64 and check its contract
+        run: |
+          docker buildx build --platform linux/amd64 --file mcp/Dockerfile --tag teamcode-mcp:contract --load mcp
+          python3 scripts/smoke-mcp-image.py teamcode-mcp:contract
+      - name: Build the MCP host image for arm64
+        run: docker buildx build --platform linux/arm64 --file mcp/Dockerfile mcp
       - name: Build the image without pushing
         if: ${{ !((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.full_validation && github.ref == 'refs/heads/main')) }}
         run: ./gradlew :app:buildImage -PimagePlatforms=amd64 "-PimageTags=${IMAGE_TAGS}"
@@ -119,6 +144,15 @@ jobs:
           DOCKER_HUB_USERNAME: nathanfallet
           DOCKER_HUB_PASSWORD: ${{ secrets.DOCKER_HUB_PASSWORD }}
         run: ./gradlew :app:publishImage "-PimageTags=${IMAGE_TAGS}"
+      - name: Push the multi-architecture MCP host image
+        if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.full_validation && github.ref == 'refs/heads/main') }}
+        env:
+          DOCKER_HUB_PASSWORD: ${{ secrets.DOCKER_HUB_PASSWORD }}
+        run: |
+          printf '%s' "$DOCKER_HUB_PASSWORD" | docker login --username nathanfallet --password-stdin
+          set --
+          for tag in $(printf '%s' "$IMAGE_TAGS" | tr ',' ' '); do set -- "$@" --tag "nathanfallet/teamcode-mcp:${tag}"; done
+          docker buildx build --platform linux/amd64,linux/arm64 --file mcp/Dockerfile "$@" --push mcp
   native:
     # Keep paid native runners off ordinary pushes and pull requests.
     if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.full_validation)
@@ -129,12 +163,14 @@ jobs:
         os: [macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - name: Install Linux transport dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
@@ -143,7 +179,6 @@ jobs:
         run: |
           case "$(uname -s)-$(uname -m)" in
             Darwin-arm64) target=MacosArm64; directory=macosArm64; asset=macos-arm64 ;;
-            Darwin-x86_64) target=MacosX64; directory=macosX64; asset=macos-x64 ;;
             Linux-x86_64) target=LinuxX64; directory=linuxX64; asset=linux-x64 ;;
             *) echo 'Unsupported runner architecture'; exit 1 ;;
           esac
@@ -180,12 +215,12 @@ jobs:
         run: python3 scripts/smoke-team.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
       - name: Stage the tested native release asset
         run: python3 scripts/release-bundle.py stage --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --target "$NATIVE_ASSET" --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ env.NATIVE_ASSET }}
           path: dist/*
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-${{ env.NATIVE_DIRECTORY }}
           path: cli/build/bin/${{ env.NATIVE_DIRECTORY }}/releaseExecutable/teamcode.kexe
@@ -194,7 +229,7 @@ jobs:
         run: ./gradlew "-PteamcodeVersion=$TEAMCODE_INSTALLATION_VERSION" ":cli:linkReleaseExecutable${NATIVE_TARGET}"
       - name: Stage the actual installation-baseline executable
         run: python3 scripts/release-bundle.py stage --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --target "$NATIVE_ASSET" --version "$TEAMCODE_INSTALLATION_VERSION" --commit "$GITHUB_SHA" --output installation-dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installation-release-${{ env.NATIVE_ASSET }}
           path: installation-dist/*
@@ -204,15 +239,17 @@ jobs:
     timeout-minutes: 30
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - run: .\gradlew.bat :cli:linkReleaseExecutableMingwX64 :cli:linkDebugTestMingwX64 :config:linkDebugTestMingwX64
       - run: .\cli\build\bin\mingwX64\debugTest\test.exe
       - run: .\config\build\bin\mingwX64\debugTest\test.exe
@@ -228,12 +265,12 @@ jobs:
         run: |
           $releaseVersion = $env:ORG_GRADLE_PROJECT_teamcodeVersion
           python scripts/release-bundle.py stage --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --target windows-x64 --version $releaseVersion --commit $env:GITHUB_SHA --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows-x64
           path: dist/*
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-windows-x64
           path: cli/build/bin/mingwX64/releaseExecutable/teamcode.exe
@@ -244,7 +281,7 @@ jobs:
       - name: Stage the actual installation-baseline executable
         shell: pwsh
         run: python scripts/release-bundle.py stage --binary cli/build/bin/mingwX64/releaseExecutable/teamcode.exe --target windows-x64 --version $env:TEAMCODE_INSTALLATION_VERSION --commit $env:GITHUB_SHA --output installation-dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installation-release-windows-x64
           path: installation-dist/*
@@ -261,36 +298,34 @@ jobs:
             target: LinuxArm64
             directory: linuxArm64
             asset: linux-arm64
-          - os: macos-latest
-            target: MacosX64
-            directory: macosX64
-            asset: macos-x64
     runs-on: ${{ matrix.os }}
     env:
       NATIVE_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - run: ./gradlew ":cli:linkReleaseExecutable${NATIVE_TARGET}" ":cli:linkDebugTest${NATIVE_TARGET}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: candidate-tests-${{ matrix.asset }}
           path: cli/build/bin/${{ matrix.directory }}/debugTest/test.kexe
           retention-days: 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: candidate-${{ matrix.asset }}
           path: cli/build/bin/${{ matrix.directory }}/releaseExecutable/teamcode.kexe
           retention-days: 1
       - name: Compile the distinct installation-baseline version
         run: ./gradlew "-PteamcodeVersion=$TEAMCODE_INSTALLATION_VERSION" ":cli:linkReleaseExecutable${NATIVE_TARGET}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installation-candidate-${{ matrix.asset }}
           path: cli/build/bin/${{ matrix.directory }}/releaseExecutable/teamcode.kexe
@@ -306,36 +341,32 @@ jobs:
             directory: linuxArm64
             asset: linux-arm64
             architecture: aarch64
-          - os: macos-15-intel
-            directory: macosX64
-            asset: macos-x64
-            architecture: x86_64
     runs-on: ${{ matrix.os }}
     env:
       NATIVE_DIRECTORY: ${{ matrix.directory }}
       NATIVE_ASSET: ${{ matrix.asset }}
       EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '21'
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: candidate-${{ matrix.asset }}
           path: cli/build/bin/${{ matrix.directory }}/releaseExecutable
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: candidate-tests-${{ matrix.asset }}
           path: cli/build/bin/${{ matrix.directory }}/debugTest
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: installation-candidate-${{ matrix.asset }}
           path: installation-candidate
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: server-jar
           path: app/build/libs
@@ -367,7 +398,7 @@ jobs:
         run: python3 scripts/smoke-team.py --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --jar app/build/libs/app-all.jar
       - name: Stage the tested native release asset
         run: python3 scripts/release-bundle.py stage --binary "cli/build/bin/${NATIVE_DIRECTORY}/releaseExecutable/teamcode.kexe" --target "$NATIVE_ASSET" --version "$TEAMCODE_VERSION" --commit "$GITHUB_SHA" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.asset }}
           path: dist/*
@@ -376,7 +407,7 @@ jobs:
         run: |
           chmod 755 installation-candidate/teamcode.kexe
           python3 scripts/release-bundle.py stage --binary installation-candidate/teamcode.kexe --target "$NATIVE_ASSET" --version "$TEAMCODE_INSTALLATION_VERSION" --commit "$GITHUB_SHA" --output installation-dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installation-release-${{ matrix.asset }}
           path: installation-dist/*
@@ -386,40 +417,45 @@ jobs:
     needs: [native, windows, cross_native]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           merge-multiple: true
           path: staged
-      - name: Verify and assemble all five tested targets
+      - name: Verify and assemble all four tested targets
         run: python3 scripts/release-bundle.py assemble --inputs staged --version "${ORG_GRADLE_PROJECT_teamcodeVersion}" --commit "$GITHUB_SHA" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-release-bundle
           path: dist/*
           retention-days: 7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: installation-release-*
           merge-multiple: true
           path: installation-staged
-      - name: Verify and assemble all five distinct-version baselines
+      - name: Verify and assemble all four distinct-version baselines
         run: python3 scripts/release-bundle.py assemble --inputs installation-staged --version "$TEAMCODE_INSTALLATION_VERSION" --commit "$GITHUB_SHA" --output installation-dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-installation-bundle
           path: installation-dist/*
           retention-days: 7
   signed_bundle:
     timeout-minutes: 5
-    # Pull-request code never receives the publisher key, including same-repository PRs.
+    # Pull-request code never receives the publisher key, including same-repository PRs. The key belongs in the
+    # release-signing environment, whose deployment branch rules decide which refs may sign (docs/distribution.md).
     if: github.event_name != 'pull_request'
+    environment: release-signing
     needs: [bundle]
     runs-on: ubuntu-latest
+    outputs:
+      install_sh_sha256: ${{ steps.installers.outputs.install_sh_sha256 }}
+      install_ps1_sha256: ${{ steps.installers.outputs.install_ps1_sha256 }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-release-bundle
           path: dist
@@ -431,7 +467,12 @@ jobs:
         run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Generate version-pinned one-command installers from the signed bundle
         run: python3 scripts/release-bootstrap.py --bundle dist --public-key release/trust/teamcode-release-2026.pem
-      - uses: actions/download-artifact@v4
+      - name: Expose the installers' SHA-256 to the desktop builds
+        id: installers
+        run: |
+          echo "install_sh_sha256=$(sha256sum dist/install.sh | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "install_ps1_sha256=$(sha256sum dist/install.ps1 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-installation-bundle
           path: installation-dist
@@ -439,18 +480,19 @@ jobs:
         env:
           TEAMCODE_RELEASE_SIGNING_KEY: ${{ secrets.TEAMCODE_RELEASE_SIGNING_KEY }}
         run: python3 scripts/release-signature.py sign --manifest installation-dist/manifest.json --signature installation-dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-signed-release-bundle
           path: dist/*
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: teamcode-signed-installation-bundle
           path: installation-dist/*
           retention-days: 7
-  signed_installation:
-    timeout-minutes: 10
+  desktop:
+    # The desktop app of the same version, built on each OS once the install scripts it may run are known.
+    timeout-minutes: 60
     needs: [signed_bundle]
     strategy:
       fail-fast: false
@@ -458,10 +500,284 @@ jobs:
         include:
           - os: macos-latest
             target: macos-arm64
+          - os: windows-latest
+            target: windows-x64
+          - os: ubuntu-24.04
+            target: linux-x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      DESKTOP_TARGET: ${{ matrix.target }}
+      INSTALL_SH_SHA256: ${{ needs.signed_bundle.outputs.install_sh_sha256 }}
+      INSTALL_PS1_SHA256: ${{ needs.signed_bundle.outputs.install_ps1_sha256 }}
+      BINARIES: companion-desktop/build/compose/binaries/main
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+      - name: Install the Linux packaging tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
+      - name: Import the Developer ID into a temporary keychain
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE_P12: ${{ secrets.TEAMCODE_MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.TEAMCODE_MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.TEAMCODE_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.TEAMCODE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.TEAMCODE_NOTARY_ISSUER_ID }}
+          TEAM_ID: ${{ vars.TEAMCODE_MACOS_TEAM_ID }}
+          RELEASING: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
+        run: |
+          present=0
+          for value in "$CERTIFICATE_P12" "$CERTIFICATE_PASSWORD" "$NOTARY_KEY" "$NOTARY_KEY_ID" "$NOTARY_ISSUER_ID" "$TEAM_ID"; do
+            if [ -n "$value" ]; then present=$((present + 1)); fi
+          done
+          if [ "$present" -eq 0 ] && [ "$RELEASING" != true ]; then
+            echo "::warning::No Developer ID configured: this validation builds an unsigned macOS app, which teamcode ui must refuse."
+            echo "DESKTOP_SIGNED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ "$present" -ne 6 ]; then
+            echo "::error::A release needs the Developer ID and notarization secrets (TEAMCODE_MACOS_CERTIFICATE_P12, TEAMCODE_MACOS_CERTIFICATE_PASSWORD, TEAMCODE_NOTARY_KEY, TEAMCODE_NOTARY_KEY_ID, TEAMCODE_NOTARY_ISSUER_ID) and the TEAMCODE_MACOS_TEAM_ID variable, all of them."
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/teamcode-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          umask 077
+          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          printf '%s\n' "$NOTARY_KEY" > "$RUNNER_TEMP/notary-key.p8"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046 # one argument per keychain already in the search list
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"Developer ID Application: \(.*\)"$/\1/p' | head -n 1)"
+          case "$identity" in
+            *"($TEAM_ID)") ;;
+            *) echo "::error::The imported certificate is not a Developer ID Application of team $TEAM_ID."; exit 1 ;;
+          esac
+          {
+            echo "DESKTOP_SIGNED=true"
+            # Compose prefixes "Developer ID Application: " itself.
+            echo "TEAMCODE_MACOS_SIGNING_IDENTITY=$identity"
+            echo "TEAMCODE_MACOS_SIGNING_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+      - name: Build the desktop packages with the release's version and install-script hashes
+        run: |
+          case "$DESKTOP_TARGET" in
+            macos-*) tasks=(createDistributable packageDmg) ;;
+            windows-*) tasks=(packageMsi) ;;
+            linux-*) tasks=(createDistributable packageDeb packageRpm) ;;
+          esac
+          ./gradlew "${tasks[@]/#/:companion-desktop:}" "-PteamcodeInstallShSha256=$INSTALL_SH_SHA256" "-PteamcodeInstallPs1Sha256=$INSTALL_PS1_SHA256"
+      - name: Check that no jar of the macOS app hides an unsigned native library
+        if: runner.os == 'macOS' && env.DESKTOP_SIGNED == 'true'
+        env:
+          TEAM_ID: ${{ vars.TEAMCODE_MACOS_TEAM_ID }}
+        run: |
+          # jpackage signs the files of the app, not the native libraries inside its jars, and notarization rejects those.
+          app="$BINARIES/app/TeamCode.app"
+          scratch="$(mktemp -d)"
+          failed=0
+          while IFS= read -r -d '' jar; do
+            while IFS= read -r entry; do
+              rm -rf "$scratch/entry" && mkdir "$scratch/entry"
+              unzip -q -o "$jar" "$entry" -d "$scratch/entry"
+              # Only Mach-O files matter to notarization: jars also carry the libraries of other systems.
+              file "$scratch/entry/$entry" | grep -q 'Mach-O' || continue
+              details="$(codesign -dvv "$scratch/entry/$entry" 2>&1 || true)"
+              if ! grep -q "^TeamIdentifier=$TEAM_ID\$" <<< "$details" || ! grep -q '^Timestamp=' <<< "$details" || ! grep -q 'flags=.*runtime' <<< "$details"; then
+                echo "::error::$(basename "$jar")!$entry is not signed with the Developer ID, a secure timestamp and the hardened runtime."
+                failed=1
+              fi
+            done < <(unzip -Z1 "$jar" | grep -E '\.(so|dylib|jnilib)$' || true)
+          done < <(find "$app" -name '*.jar' -print0)
+          exit "$failed"
+      - name: Notarize, staple and check the macOS app and disk image
+        if: runner.os == 'macOS' && env.DESKTOP_SIGNED == 'true'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.TEAMCODE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.TEAMCODE_NOTARY_ISSUER_ID }}
+          TEAM_ID: ${{ vars.TEAMCODE_MACOS_TEAM_ID }}
+        run: |
+          app="$BINARIES/app/TeamCode.app"
+          dmg="$(ls "$BINARIES"/dmg/*.dmg)"
+          # Every call to Apple's services (notarytool, stapler's CloudKit lookups) goes through apple(): up to 6 tries
+          # with 15, 30, 60, 120 and 240 s between them, and only when the failure is a network or service one (a lost
+          # connection, a timeout, CloudKit, stapler's error 68, an HTTP 5xx). Anything else fails at once. Its output
+          # is left in $apple_out (stdout) and $apple_err (stderr).
+          apple_failure='network connection was lost|NSURLErrorDomain|could not connect|timed out|timeout|CloudKit|Error 68|offline|temporarily unavailable|Service Unavailable|(HTTP|status( code)?)[^0-9]*5[0-9][0-9]|internal error|connection (reset|refused)'
+          apple_out="$RUNNER_TEMP/apple.out"
+          apple_err="$RUNNER_TEMP/apple.err"
+          apple() {
+            local attempt status delay
+            for attempt in 1 2 3 4 5 6; do
+              status=0
+              "$@" > "$apple_out" 2> "$apple_err" || status=$?
+              cat "$apple_out"
+              cat "$apple_err" >&2
+              if [ "$status" -eq 0 ]; then return 0; fi
+              if ! cat "$apple_out" "$apple_err" | grep -qiE "$apple_failure"; then
+                return "$status"
+              fi
+              if [ "$attempt" -eq 6 ]; then break; fi
+              delay=$((15 * 2 ** (attempt - 1)))
+              if [ "$delay" -gt 240 ]; then delay=240; fi
+              echo "::warning::Apple service failure (try $attempt of 6): $* ; trying again in ${delay}s"
+              sleep "$delay"
+            done
+            return "$status"
+          }
+          notary=(--key "$RUNNER_TEMP/notary-key.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID")
+          notarize() {
+            local id status
+            # A real rejection (Invalid) is a finished submission, not a failure of the call: it is not retried.
+            apple xcrun notarytool submit "$1" "${notary[@]}" --wait --timeout 30m --output-format json || true
+            id="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < "$apple_out" 2>/dev/null || true)"
+            status="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' < "$apple_out" 2>/dev/null || true)"
+            echo "Notarization ${id:-unknown} ${status:-no status}"
+            if [ "$status" != Accepted ]; then
+              if [ -n "$id" ]; then apple xcrun notarytool log "$id" "${notary[@]}" || true; fi
+              return 1
+            fi
+          }
+          # The ticket is stapled, then validated: each retried on its own, so a lost connection while validating does
+          # not staple again. A failed `stapler staple` always fails the release. `stapler validate` looks the ticket up
+          # in CloudKit, which macOS runners sometimes cannot reach (the dropped Intel ones most of the time: actions/runner-images#14924; Apple DTS
+          # advises retrying: https://developer.apple.com/forums/thread/824494). When it still fails after its retries
+          # with a network-only error, the offline gate below replaces it; any other failure still fails.
+          offline_gate() {
+            local artifact="$1" kind="$2" details
+            details="$(codesign -dvv "$artifact" 2>&1)" || { echo "::error::Offline gate: cannot read the signature of $artifact."; return 1; }
+            codesign --verify --deep --strict --verbose=2 "$artifact" || return 1
+            grep -q '^Authority=Developer ID Application: ' <<< "$details" || { echo "::error::Offline gate: $artifact is not signed by a Developer ID Application."; return 1; }
+            grep -qx "TeamIdentifier=$TEAM_ID" <<< "$details" || { echo "::error::Offline gate: $artifact is not signed by team $TEAM_ID."; return 1; }
+            if [ "$kind" = app ]; then
+              grep -q 'flags=.*runtime' <<< "$details" || { echo "::error::Offline gate: $artifact lacks the hardened runtime."; return 1; }
+              # `stapler staple` writes the ticket at Contents/CodeResources of the bundle.
+              [ -s "$artifact/Contents/CodeResources" ] || { echo "::error::Offline gate: no stapled ticket in $artifact."; return 1; }
+              spctl --assess --type execute --verbose=2 "$artifact" || return 1
+            else
+              # The ticket is appended after the signed image: the file must have grown, its signed part untouched.
+              local before_size
+              before_size="$(cat "$RUNNER_TEMP/dmg-before-staple.size")"
+              [ "$(stat -f %z "$artifact")" -gt "$before_size" ] || { echo "::error::Offline gate: no stapled ticket in $artifact."; return 1; }
+              cmp -n "$before_size" "$artifact" "$RUNNER_TEMP/dmg-before-staple.dmg" || { echo "::error::Offline gate: the signed image changed while stapling."; return 1; }
+              spctl --assess --type open --context context:primary-signature --verbose=2 "$artifact" || return 1
+            fi
+          }
+          staple() {
+            apple xcrun stapler staple "$1" || return $?
+            local status=0
+            apple xcrun stapler validate "$1" && return 0 || status=$?
+            if ! cat "$apple_out" "$apple_err" | grep -qiE "$apple_failure"; then return "$status"; fi
+            echo "::warning::stapler validate could not reach Apple's CloudKit after 6 tries; checked $1 with the offline gate instead (signature, Developer ID, stapled ticket, spctl)."
+            offline_gate "$1" "$2"
+          }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-app.zip"
+          notarize "$RUNNER_TEMP/notarize-app.zip"
+          staple "$app" app
+          spctl --assess --type execute --verbose=2 "$app"
+          # The disk image carries its own signature, then its notarization ticket.
+          codesign --force --timestamp --keychain "$TEAMCODE_MACOS_SIGNING_KEYCHAIN" --sign "Developer ID Application: $TEAMCODE_MACOS_SIGNING_IDENTITY" "$dmg"
+          notarize "$dmg"
+          cp "$dmg" "$RUNNER_TEMP/dmg-before-staple.dmg"
+          stat -f %z "$dmg" > "$RUNNER_TEMP/dmg-before-staple.size"
+          staple "$dmg" dmg
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+      - name: Stage the package teamcode ui installs and the hand-installed ones
+        run: |
+          version="$ORG_GRADLE_PROJECT_teamcodeVersion"
+          case "$DESKTOP_TARGET" in
+            macos-*)
+              package="$RUNNER_TEMP/teamcode-desktop.zip"
+              ditto -c -k --keepParent "$BINARIES/app/TeamCode.app" "$package"
+              extras=("$BINARIES"/dmg/*.dmg) ;;
+            windows-*)
+              package="$(ls "$BINARIES"/msi/*.msi)"
+              extras=() ;;
+            linux-*)
+              package="$RUNNER_TEMP/teamcode-desktop.tar.gz"
+              tar -czf "$package" -C "$BINARIES/app" TeamCode
+              extras=("$BINARIES"/deb/*.deb "$BINARIES"/rpm/*.rpm) ;;
+          esac
+          python3 scripts/release-desktop.py stage --package "$package" --target "$DESKTOP_TARGET" --version "$version" --commit "$GITHUB_SHA" --output desktop-staged
+          for extra in "${extras[@]}"; do
+            python3 scripts/release-desktop.py extra --package "$extra" --target "$DESKTOP_TARGET" --version "$version" --output desktop-extras
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-package-${{ matrix.target }}
+          path: desktop-staged/*
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os != 'Windows'
+        with:
+          name: desktop-extra-${{ matrix.target }}
+          path: desktop-extras/*
+          retention-days: 7
+      - name: Remove the temporary keychain and notarization key
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [ -n "${TEAMCODE_MACOS_SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$TEAMCODE_MACOS_SIGNING_KEYCHAIN" || true; fi
+          rm -f "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/developer-id.p12"
+  desktop_manifest:
+    timeout-minutes: 10
+    # Signed with the publisher key, like the CLI's manifest: never for pull-request code.
+    if: github.event_name != 'pull_request'
+    environment: release-signing
+    needs: [desktop]
+    runs-on: ubuntu-latest
+    outputs:
+      macos_signed: ${{ steps.signed.outputs.macos_signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-package-*
+          merge-multiple: true
+          path: desktop-staged
+      - name: Verify and assemble the four desktop packages
+        run: python3 scripts/release-desktop.py assemble --inputs desktop-staged --version "$ORG_GRADLE_PROJECT_teamcodeVersion" --commit "$GITHUB_SHA" --output desktop-dist
+      - name: Sign desktop-manifest.json with the independent publisher key
+        env:
+          TEAMCODE_RELEASE_SIGNING_KEY: ${{ secrets.TEAMCODE_RELEASE_SIGNING_KEY }}
+        run: python3 scripts/release-signature.py sign --manifest desktop-dist/desktop-manifest.json --signature desktop-dist/desktop-manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - name: Verify the signature against the pinned public key
+        run: python3 scripts/release-signature.py verify --manifest desktop-dist/desktop-manifest.json --signature desktop-dist/desktop-manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - name: Tell the acceptance whether the macOS app carries the Developer ID
+        id: signed
+        run: echo "macos_signed=${{ secrets.TEAMCODE_MACOS_CERTIFICATE_P12 != '' && vars.TEAMCODE_MACOS_TEAM_ID != '' }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: teamcode-signed-desktop-bundle
+          path: desktop-dist/*
+          retention-days: 7
+  signed_installation:
+    timeout-minutes: 20
+    needs: [signed_bundle, desktop_manifest]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
             architecture: arm64
-          - os: macos-15-intel
-            target: macos-x64
-            architecture: x86_64
           - os: ubuntu-24.04
             target: linux-x64
             architecture: x86_64
@@ -474,19 +790,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     # These jobs receive public signed files, never signing or team/provider credentials.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: runner.os == 'Windows'
         with:
           node-version: '22'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-signed-release-bundle
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-signed-installation-bundle
           path: installation-dist
@@ -528,29 +844,70 @@ jobs:
           if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
           binary="installation-fixtures/second/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}-${INSTALLATION_TARGET}${suffix}"
           python scripts/smoke-automatic-updates.py --binary "$binary" --first-bundle installation-fixtures/first --second-bundle installation-fixtures/second
+      - name: Exercise the service step of install and update on the actual OS service manager
+        shell: bash
+        env:
+          INSTALLATION_TARGET: ${{ matrix.target }}
+        run: |
+          suffix=""
+          if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
+          binary="installation-fixtures/second/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}-${INSTALLATION_TARGET}${suffix}"
+          python scripts/smoke-service-setup.py --binary "$binary" --bundle installation-fixtures/first
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: teamcode-signed-desktop-bundle
+          path: desktop-dist
+      - name: Install the signed desktop app with the signed CLI of the same release
+        shell: bash
+        env:
+          INSTALLATION_TARGET: ${{ matrix.target }}
+          MACOS_SIGNED: ${{ needs.desktop_manifest.outputs.macos_signed }}
+        run: |
+          suffix=""
+          if [[ "$INSTALLATION_TARGET" == windows-* ]]; then suffix=".exe"; fi
+          cli="dist/teamcode-${ORG_GRADLE_PROJECT_teamcodeVersion}-${INSTALLATION_TARGET}${suffix}"
+          chmod 755 "$cli"
+          flags=()
+          if [[ "$INSTALLATION_TARGET" == macos-* && "$MACOS_SIGNED" != true ]]; then flags+=(--expect-macos-refusal); fi
+          python scripts/smoke-desktop-install.py --binary "$cli" --bundle desktop-dist "${flags[@]}"
   release:
     timeout-minutes: 10
     if: >-
       (github.event_name == 'push' && github.ref_type == 'tag') ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.full_validation && github.ref == 'refs/heads/main')
-    needs: [image, signed_bundle, signed_installation]
+    needs: [image, signed_bundle, desktop_manifest, signed_installation]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-signed-release-bundle
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: teamcode-helm-chart
           path: dist
-      - name: Verify the exact accepted signature before publication
-        run: python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: teamcode-signed-desktop-bundle
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-extra-*
+          merge-multiple: true
+          path: dist
+      - name: Verify the exact accepted signatures before publication
+        run: |
+          python3 scripts/release-signature.py verify --manifest dist/manifest.json --signature dist/manifest.sig --public-key release/trust/teamcode-release-2026.pem
+          python3 scripts/release-signature.py verify --manifest dist/desktop-manifest.json --signature dist/desktop-manifest.sig --public-key release/trust/teamcode-release-2026.pem
       - name: Bind accepted files to this exact source and version
-        run: python3 scripts/release-request.py --manifest dist/manifest.json
+        run: |
+          python3 scripts/release-request.py --manifest dist/manifest.json
+          python3 scripts/release-request.py --manifest dist/desktop-manifest.json
+      - name: List every published file in SHA256SUMS
+        run: python3 scripts/release-desktop.py sums --directory dist
       - name: Create the exact tag after all acceptance and image publication
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -571,9 +928,13 @@ jobs:
           releaseVersion="$ORG_GRADLE_PROJECT_teamcodeVersion"
           flags=()
           if [[ "$releaseVersion" == *-* ]]; then flags+=(--prerelease); fi
-          notes=(--generate-notes)
+          notes="$RUNNER_TEMP/release-notes.md"
           if [[ -f "docs/releases/$releaseVersion.md" ]]; then
-            notes=(--notes-file "docs/releases/$releaseVersion.md")
+            cp "docs/releases/$releaseVersion.md" "$notes"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$releaseVersion" --jq .body > "$notes"
           fi
-          gh release create "$releaseVersion" dist/* --verify-tag "${notes[@]}" --title "$releaseVersion" "${flags[@]}" --draft
+          # The desktop downloads, read from the signed desktop manifest and the attached files.
+          python3 scripts/release-desktop.py notes --directory dist --notes "$notes"
+          gh release create "$releaseVersion" dist/* --verify-tag --notes-file "$notes" --title "$releaseVersion" "${flags[@]}" --draft
           gh release edit "$releaseVersion" --draft=false

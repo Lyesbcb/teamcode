@@ -6,11 +6,18 @@ import me.nathanfallet.teamcode.domain.team.TeamFailure
 
 /**
  * [permissionRelay]: the runner relays the agent's permission requests (Claude Code only; Codex's bypass mode produces
- * none). [permissionDeadlineMinutes]: the team's deadline for unanswered permission requests, 0 for none.
+ * none). [permissionDeadlineMinutes]: the team's deadline for unanswered permission requests, 0 for none. [liveText]: the
+ * runner streams the agent's text as `message.agent.delta` events (Claude Code only; Codex sends whole messages).
  * [permissionMode]: a remote session's mode on its host's files; null for a cloud session, whose pod is its sandbox.
+ * [backgroundTasks]: the runner reports the agent's background tasks as `tasks` events (Claude Code only).
+ * [owner]: the member the execution runs for (the current owner, so the recipient after a transfer), told to the agent.
  */
 data class RunnerAgentConfig(val kind: String, val version: String?, val model: String?, val effort: String?, val conversation: ConversationResume,
-    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0, val permissionMode: RemotePermissionMode? = null)
+    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0, val liveText: Boolean = false,
+    val permissionMode: RemotePermissionMode? = null, val backgroundTasks: Boolean = false, val owner: RunnerOwner? = null)
+
+/** The member an execution runs for: their [username] and their linked GitHub account's [githubLogin], if any. */
+data class RunnerOwner(val username: String, val githubLogin: String?)
 
 /** Inputs delivered to the runner, and the session's desired state when they were read. */
 data class RunnerInputs(val inputs: List<CloudInput>, val desiredState: DesiredState)
@@ -23,14 +30,21 @@ data class RunnerInputs(val inputs: List<CloudInput>, val desiredState: DesiredS
 class RunnerConversationUseCase(
     private val sessions: CloudSessionStore,
     private val store: CloudConversationStore,
+    /** Whether a member has linked GitHub; see [CloudConversationService]. Required: the delivery guard must not fail open. */
+    private val githubLinked: suspend (teamId: String, memberId: String) -> Boolean,
     private val transition: TransitionCloudSessionUseCase = TransitionCloudSessionUseCase(sessions),
+    /** The login of the GitHub account a member linked, or null; only tells the agent who runs the session. */
+    private val githubLogin: suspend (teamId: String, memberId: String) -> String? = { _, _ -> null },
     private val sleep: suspend (Long) -> Unit = { delay(it) },
 ) {
     suspend fun agent(teamId: String, sessionId: String, epoch: Int): RunnerAgentConfig {
         val session = live(teamId, sessionId, epoch)
         return RunnerAgentConfig(session.agentKind, session.agentVersion, session.agentModel, session.agentEffort, session.resumeConversation,
             permissionRelay = session.agentKind == "claude", permissionDeadlineMinutes = sessions.settings(teamId).permissionDeadlineMinutes,
-            permissionMode = session.host?.permissionMode?.takeIf { session.kind == CloudSessionKind.REMOTE })
+            liveText = session.agentKind == "claude", backgroundTasks = session.agentKind == "claude",
+            permissionMode = session.host?.permissionMode?.takeIf { session.kind == CloudSessionKind.REMOTE },
+            // Read for the current owner at each execution start: after a transfer, the recipient.
+            owner = sessions.member(teamId, session.ownerId)?.let { RunnerOwner(it.username, githubLogin(teamId, session.ownerId)) })
     }
 
     /**
@@ -71,7 +85,13 @@ class RunnerConversationUseCase(
      * gets an answer as soon as the session's differs: a pause (or a resume that cancels it) reaches it within
      * [POLL_MILLIS] through this already open request, instead of at its next heartbeat.
      */
-    suspend fun poll(teamId: String, sessionId: String, epoch: Int, waitMillis: Long, known: String?): RunnerInputs {
+    /**
+     * [acceptsFiles]: the runner downloads the files a message carries (`cloud.files.v1`). A runner that does not would hand
+     * the agent the text alone, so such a message is rejected for it with `files_unsupported` instead of being delivered.
+     * [acceptsTaskStops]: the runner stops background tasks. An older runner would hand a stop's task id to the agent as
+     * a message, so a stop is rejected for it with `task_stop_unsupported` instead.
+     */
+    suspend fun poll(teamId: String, sessionId: String, epoch: Int, waitMillis: Long, known: String?, acceptsFiles: Boolean = false, acceptsTaskStops: Boolean = false): RunnerInputs {
         // Only the two states a runner acts on: a deleted session fences the call anyway.
         val knownState = known?.let { wire -> DesiredState.entries.firstOrNull { it.wire == wire && it != DesiredState.TERMINATED }
             ?: throw TeamFailure("invalid_state", 400, "Send the desired state as running or paused.") }
@@ -80,7 +100,18 @@ class RunnerConversationUseCase(
             val session = live(teamId, sessionId, epoch)
             if (knownState != null && session.desiredState != knownState) return RunnerInputs(emptyList(), session.desiredState)
             if (session.desiredState == DesiredState.RUNNING && (session.state == READY || session.state == ACTIVE)) {
-                val delivered = store.deliver(sessionId, epoch, DELIVERY_BATCH)
+                val delivered = store.deliver(sessionId, epoch, DELIVERY_BATCH).let { inputs ->
+                    val unsupported = inputs.filter { (!acceptsFiles && it.files.isNotEmpty()) || (!acceptsTaskStops && it.kind == CloudInputKind.STOP_TASK) }
+                    if (unsupported.isNotEmpty()) store.acknowledge(sessionId, epoch, unsupported.map {
+                        RunnerInputAck(it.id, false, if (it.kind == CloudInputKind.STOP_TASK) "task_stop_unsupported" else "files_unsupported")
+                    })
+                    // Checked again at delivery (audit M2): a non-owner's input accepted while the owner had no link, or
+                    // while the session was shared, never reaches an agent that now holds the owner's token.
+                    val held = (inputs - unsupported.toSet()).filter { CloudConversationRules.ownerOnly(session, it.authorId) && !CloudConversationRules.onlyStops(it) }
+                        .takeIf { it.isNotEmpty() && githubLinked(teamId, session.ownerId) }.orEmpty()
+                    if (held.isNotEmpty()) store.acknowledge(sessionId, epoch, held.map { RunnerInputAck(it.id, false, "github_owner_only") })
+                    inputs - unsupported.toSet() - held.toSet()
+                }
                 if (delivered.isNotEmpty()) return RunnerInputs(delivered, session.desiredState)
             }
             if (sessions.now() >= deadline) return RunnerInputs(emptyList(), session.desiredState)
@@ -95,17 +126,20 @@ class RunnerConversationUseCase(
         return store.acknowledge(sessionId, epoch, acks)
     }
 
-    private suspend fun live(teamId: String, sessionId: String, epoch: Int): CloudSession {
-        val session = sessions.find(teamId, sessionId) ?: throw fenced()
-        if (session.currentEpoch != epoch || session.state.terminal || session.desiredState == DesiredState.TERMINATED) throw fenced()
-        val execution = sessions.execution(sessionId, epoch) ?: throw fenced()
-        if (execution.state != ExecutionState.RUNNING) throw fenced()
-        return session
-    }
-    private fun fenced() = TeamFailure("execution_fenced", 409, "This execution is no longer current. Stop the agent and exit without checkpointing.")
+    private suspend fun live(teamId: String, sessionId: String, epoch: Int): CloudSession = liveExecution(sessions, teamId, sessionId, epoch)
 
     companion object {
         const val POLL_MILLIS = 500L
         const val DELIVERY_BATCH = 25
     }
 }
+
+/** The session of a runner call when [epoch] is its current, running execution; anything else is `409 execution_fenced`. */
+internal suspend fun liveExecution(sessions: CloudSessionStore, teamId: String, sessionId: String, epoch: Int): CloudSession {
+    val session = sessions.find(teamId, sessionId) ?: throw fenced()
+    if (session.currentEpoch != epoch || session.state.terminal || session.desiredState == DesiredState.TERMINATED) throw fenced()
+    val execution = sessions.execution(sessionId, epoch) ?: throw fenced()
+    if (execution.state != ExecutionState.RUNNING) throw fenced()
+    return session
+}
+private fun fenced() = TeamFailure("execution_fenced", 409, "This execution is no longer current. Stop the agent and exit without checkpointing.")

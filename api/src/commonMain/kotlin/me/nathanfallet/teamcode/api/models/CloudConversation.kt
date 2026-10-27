@@ -17,8 +17,20 @@ object CloudTranscriptLimits {
 
 /** Normalized transcript event types. Clients must tolerate unknown types and unknown `data` fields. */
 object CloudEventTypes {
+    /** A consumed message: `data.text`, `inputId`, `authorId`, and `files` (`[{id, name, size, contentType}]`) when it carried files. */
     const val USER_MESSAGE = "message.user"
+    /**
+     * The agent's text (`data.text`). With `messageId` (the agent's API message id) and `index` (the content block, when
+     * known), it replaces the [AGENT_MESSAGE_DELTA] text received for that block, or for every block of the message
+     * when `index` is absent.
+     */
     const val AGENT_MESSAGE = "message.agent"
+    /**
+     * Live text of an agent message while it is written (`data.messageId`, `index`, `text`, `parentToolUseId`): `text`
+     * is what the block gained since its previous delta. Replaced by the [AGENT_MESSAGE] of the same block; a client
+     * that does not show live text ignores it. Claude Code sessions only.
+     */
+    const val AGENT_MESSAGE_DELTA = "message.agent.delta"
     const val TOOL_CALL = "tool.call"
     const val TOOL_RESULT = "tool.result"
     const val TURN = "turn"
@@ -36,7 +48,13 @@ object CloudEventTypes {
      * `deadlineMinutes`, `message`, the text the agent read).
      */
     const val PERMISSION_EXPIRED = "permission.expired"
-    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT, PERMISSION_REQUEST, PERMISSION_EXPIRED)
+    /**
+     * Runner-written ([CloudTasks.FEATURE]): the agent's live background tasks, the full set each time it changes
+     * (`data.tasks`: `[{id, type, description, subagentType, toolUseId, startedAt}]`, at most [CloudTasks.MAX_TASKS] of
+     * `data.count`; `data.scheduled`: how many scheduled wake-ups the agent holds; `data.stoppable`: whether the runner can stop a task). An empty set when the last one ended or the agent's process stopped. Claude Code sessions only.
+     */
+    const val TASKS = "tasks"
+    val all = listOf(USER_MESSAGE, AGENT_MESSAGE, AGENT_MESSAGE_DELTA, TOOL_CALL, TOOL_RESULT, TURN, STATUS, ERROR, INPUT, PERMISSION_REQUEST, PERMISSION_EXPIRED, TASKS)
 }
 
 /**
@@ -63,7 +81,8 @@ data class CloudEventPageView(
 /**
  * `POST /cloud/sessions/{id}/messages`. [clientMessageId] is an alias of the `Idempotency-Key` header (send one or
  * the other). [wake] `false` leaves a paused session paused; the message waits for the next resume.
- * [expectedLastEventSeq] refuses the message (`409 stale_view`) when newer events exist.
+ * [expectedLastEventSeq] refuses the message (`409 stale_view`) when newer events exist. [fileIds] (`cloud.files.v1`, at
+ * most 5) names files uploaded to this session by the caller and not sent yet; with files, [text] may be empty.
  */
 @Serializable
 data class SendCloudMessageRequest(
@@ -71,6 +90,38 @@ data class SendCloudMessageRequest(
     val wake: Boolean = true,
     val clientMessageId: String? = null,
     val expectedLastEventSeq: Long? = null,
+    val fileIds: List<String> = emptyList(),
+)
+
+/**
+ * A file uploaded to a session (`POST /cloud/sessions/{id}/files`, `cloud.files.v1`). [name] is the cleaned name the host
+ * writes it under; [contentType] the type the server recognized from its bytes. Send its [id] in a message's `fileIds`
+ * before [expiresAt]; it is removed once the session's host received it.
+ */
+@Serializable
+data class CloudFileView(
+    val id: String,
+    val sessionId: String,
+    val name: String,
+    val size: Long,
+    val contentType: String,
+    val sha256: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+)
+
+/**
+ * `GET /cloud/files/policy`: whether the caller's team can send files now ([available]; [reason] `file_storage_not_configured`
+ * when it has no tested bucket), and its limits.
+ */
+@Serializable
+data class CloudFilePolicyView(
+    val available: Boolean,
+    val reason: String? = null,
+    val maxFileBytes: Long,
+    val maxMessageBytes: Long,
+    val maxFilesPerMessage: Int,
+    val types: List<String>,
 )
 
 /**
@@ -93,6 +144,29 @@ data class AnswerCloudPermissionRequest(
  */
 @Serializable
 data class CloudQuestionAnswer(val question: Int, val options: List<Int> = emptyList(), val text: String? = null)
+
+/** `POST /cloud/sessions/{id}/tasks/stop` ([CloudTasks.FEATURE]): stops the background task [taskId] of the session's running agent. */
+@Serializable
+data class StopCloudTaskRequest(val taskId: String)
+
+/**
+ * `cloud.sessions.background-tasks.v1`: the runner reports the agent's background tasks (subagents, background commands,
+ * monitors) as [CloudEventTypes.TASKS] events, and a member who may message a session stops one of them.
+ */
+object CloudTasks {
+    const val FEATURE = "cloud.sessions.background-tasks.v1"
+    /** The input kind of a stop; its text is the task id. */
+    const val KIND = "stop_task"
+    /** Tasks one event lists at most, and characters of a description; the rest is left out. */
+    const val MAX_TASKS = 50
+    const val MAX_DESCRIPTION_CHARS = 200
+    /** The task ids the server takes: Claude Code's are short letters and digits. */
+    val TASK_ID = Regex("[A-Za-z0-9_-]{1,64}")
+    /** Rejected by a runner (or for a runner) that cannot stop a task: an older one, or Codex. */
+    const val UNSUPPORTED = "task_stop_unsupported"
+    /** Rejected by the runner: no live task has this id (it ended meanwhile). */
+    const val UNKNOWN = "unknown_task"
+}
 
 /** Input acknowledgement levels, in order. `cancelled` and `rejected` are final like `consumed`. */
 object CloudInputStatuses {
@@ -151,6 +225,25 @@ object CloudPermissions {
     val all = listOf(CREATE, ATTACH, MESSAGE, TRANSCRIPT)
 }
 
+/** `cloud.files.v1` limits and refusals, as the server applies them. */
+object CloudFiles {
+    /** The capability a server advertises when it takes files. */
+    const val FEATURE = "cloud.files.v1"
+    const val MAX_FILES_PER_MESSAGE = 5
+    const val FILE_TOO_LARGE = "file_too_large"
+    const val FILE_TYPE_NOT_ALLOWED = "file_type_not_allowed"
+    const val UPLOAD_QUOTA = "upload_quota"
+    const val STORAGE_NOT_CONFIGURED = "file_storage_not_configured"
+    /** `503`: the team's bucket did not answer; sending the file again may work. */
+    const val STORAGE_UNAVAILABLE = "file_storage_unavailable"
+    /** `409` on a message: a named file expired, was sent already or belongs to someone else. */
+    const val FILE_UNAVAILABLE = "file_unavailable"
+    /** `413` on a message: its files together exceed the team's per-message limit. */
+    const val FILES_TOO_LARGE = "files_too_large"
+    /** The reason a message with files is rejected for a runner that does not download them. */
+    const val UNSUPPORTED = "files_unsupported"
+}
+
 /**
  * One rule: [subject] is `everyone`, `member:<id>` or `group:<id>`; [scope] `own` applies to the member's own
  * sessions (and to creation), `team` to every team session. Administrators always hold every permission.
@@ -167,13 +260,26 @@ data class RunnerAgentRequest(val teamId: String, val sessionId: String, val epo
 /**
  * [permissionRelay]: the server takes `permission.request` events and their answers, so the runner may relay them.
  * [permissionDeadlineMinutes]: how long a request waits for an answer before the runner denies it; 0 waits without a deadline.
+ * [liveText]: the server takes `message.agent.delta` events, so the runner may stream the agent's text as it is written.
  * [permissionMode]: a remote session's mode on its host (`ask` or `bypass`); null for a cloud session, whose pod is its sandbox.
+ * [backgroundTasks]: the server takes `tasks` events, so the runner may report the agent's background tasks.
+ * [owner]: the member the execution runs for, read at each execution start (a transfer starts a new one); null from an
+ * older server, and then the agent is not told who runs the session.
  */
 @Serializable
 data class RunnerAgentView(
     val kind: String, val version: String? = null, val model: String? = null, val effort: String? = null, val conversation: String,
-    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0, val permissionMode: String? = null,
+    val permissionRelay: Boolean = false, val permissionDeadlineMinutes: Int = 0, val liveText: Boolean = false, val permissionMode: String? = null,
+    /** The server takes [CloudEventTypes.TASKS] events ([CloudTasks.FEATURE]); an older one refuses the batch that holds one. */
+    val backgroundTasks: Boolean = false,
+    val owner: RunnerOwnerView? = null,
 )
+/**
+ * Who the execution runs for, as the agent is told: the member's [username] and, when they linked GitHub, the linked
+ * account's [githubLogin]. Never an email or a credential.
+ */
+@Serializable
+data class RunnerOwnerView(val username: String, val githubLogin: String? = null)
 /** [sequence] is the runner's own counter for this epoch, starting at 1; a retried batch is deduplicated on it. */
 @Serializable
 data class RunnerEventView(val sequence: Long, val type: String, val data: JsonObject)
@@ -186,9 +292,22 @@ data class RunnerEventsAckView(val acceptedThrough: Long, val lastSeq: Long)
  * the one the runner last knew (`running` or `paused`), the wait also ends as soon as the session's differs.
  */
 @Serializable
-data class RunnerInputsRequest(val teamId: String, val sessionId: String, val epoch: Int, val waitMillis: Long = 20_000, val desiredState: String? = null)
+data class RunnerInputsRequest(
+    val teamId: String, val sessionId: String, val epoch: Int, val waitMillis: Long = 20_000, val desiredState: String? = null,
+    /** The runner downloads the [RunnerInputView.files] of a message; without it, a message with files is rejected (`files_unsupported`). */
+    val acceptsFiles: Boolean = false,
+    /**
+     * The runner stops a background task ([CloudTasks.KIND] inputs); without it, such an input is rejected
+     * (`task_stop_unsupported`) instead of being delivered, so an older runner never reads it as a message.
+     */
+    val acceptsTaskStops: Boolean = false,
+)
+/** [files]: what a message carries; download each from `GET /cloud/runner/files/{id}` and check its [RunnerFileView.sha256]. */
 @Serializable
-data class RunnerInputView(val id: String, val kind: String, val text: String? = null, val attempt: Int = 1)
+data class RunnerInputView(val id: String, val kind: String, val text: String? = null, val attempt: Int = 1, val files: List<RunnerFileView> = emptyList())
+/** A file of a message, as its host writes it: [name] is already cleaned, [contentType] recognized from the bytes. */
+@Serializable
+data class RunnerFileView(val id: String, val name: String, val size: Long, val contentType: String, val sha256: String)
 /** [desiredState]: the session's desired state when the wait ended, so a pause reaches the runner without a heartbeat. */
 @Serializable
 data class RunnerInputsView(val inputs: List<RunnerInputView>, val desiredState: String? = null)

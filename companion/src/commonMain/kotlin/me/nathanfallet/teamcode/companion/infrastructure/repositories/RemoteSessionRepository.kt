@@ -1,19 +1,25 @@
 package me.nathanfallet.teamcode.companion.infrastructure.repositories
 
 import kotlinx.coroutines.flow.Flow
+import me.nathanfallet.teamcode.api.models.AnswerCloudPermissionRequest
 import me.nathanfallet.teamcode.api.models.CloudAgentRequest
+import me.nathanfallet.teamcode.api.models.CloudQuestionAnswer
 import me.nathanfallet.teamcode.api.models.CloudInputView
 import me.nathanfallet.teamcode.api.models.CreateCloudSessionRequest
 import me.nathanfallet.teamcode.api.models.SendCloudMessageRequest
 import me.nathanfallet.teamcode.companion.domain.models.InputReceipt
+import me.nathanfallet.teamcode.api.models.CloudSessionKinds
+import me.nathanfallet.teamcode.companion.domain.models.NewDeviceSession
 import me.nathanfallet.teamcode.companion.domain.models.NewSession
+import me.nathanfallet.teamcode.companion.domain.models.PermissionAnswer
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import me.nathanfallet.teamcode.companion.domain.models.CloudSession
 import me.nathanfallet.teamcode.companion.domain.models.LiveUpdate
 import me.nathanfallet.teamcode.companion.domain.models.Profile
 import me.nathanfallet.teamcode.companion.domain.models.SessionChange
-import me.nathanfallet.teamcode.companion.domain.models.SessionGroup
+import me.nathanfallet.teamcode.companion.domain.models.SessionFilter
+import me.nathanfallet.teamcode.companion.domain.models.SessionKind
 import me.nathanfallet.teamcode.companion.domain.models.SessionPage
 import me.nathanfallet.teamcode.companion.domain.models.SessionScope
 import me.nathanfallet.teamcode.companion.domain.repositories.SessionRepository
@@ -21,8 +27,9 @@ import me.nathanfallet.teamcode.companion.infrastructure.stream.ReconnectPolicy
 import me.nathanfallet.teamcode.companion.infrastructure.stream.reconnecting
 
 class RemoteSessionRepository(private val calls: AccountCalls, private val policy: ReconnectPolicy) : SessionRepository {
-    override suspend fun sessions(accountId: String, scope: SessionScope, group: SessionGroup, before: String?): SessionPage = calls.withAccount(accountId) { client ->
-        val page = client.cloudSessions(owner = if (scope == SessionScope.TEAM) "all" else null, states = group.states.map { it.wire }, before = before, limit = 50)
+    override suspend fun sessions(accountId: String, scope: SessionScope, filter: SessionFilter, before: String?, kinds: Set<SessionKind>): SessionPage = calls.withAccount(accountId) { client ->
+        val page = client.cloudSessions(owner = if (scope == SessionScope.TEAM) "all" else null, states = filter.states.map { it.wire }, before = before, limit = 50,
+            kinds = kinds.map { it.wire }.sorted())
         SessionPage(page.sessions.map { it.domain() }, page.nextBefore)
     }
 
@@ -36,11 +43,34 @@ class RemoteSessionRepository(private val calls: AccountCalls, private val polic
         client.createCloudSession(CreateCloudSessionRequest(name = session.name, profileId = session.profileId, agent = agent, initialMessage = session.initialMessage), idempotencyKey).domain()
     }
 
-    override suspend fun send(accountId: String, sessionId: String, text: String, clientMessageId: String): InputReceipt =
-        calls.withAccount(accountId, resource = true) { it.sendCloudMessage(sessionId, SendCloudMessageRequest(text, wake = true), idempotencyKey = clientMessageId).receipt() }
+    override suspend fun createOnDevice(accountId: String, session: NewDeviceSession, idempotencyKey: String): CloudSession = calls.withAccount(accountId) { client ->
+        // No directoryName: the session's directory is the folder's name, which the server takes from the device.
+        val request = CreateCloudSessionRequest(
+            name = session.name, agent = CloudAgentRequest(session.model, session.effort, kind = session.agent), initialMessage = session.initialMessage,
+            kind = CloudSessionKinds.REMOTE, permissionMode = session.permissionMode.wire, deviceId = session.deviceId, folderId = session.folderId,
+            resumeSessionId = session.resumeSessionId,
+        )
+        client.createCloudSession(request, idempotencyKey).domain()
+    }
+
+    override suspend fun send(accountId: String, sessionId: String, text: String, clientMessageId: String, fileIds: List<String>): InputReceipt =
+        calls.withAccount(accountId, resource = true) { it.sendCloudMessage(sessionId, SendCloudMessageRequest(text, wake = true, fileIds = fileIds), idempotencyKey = clientMessageId).receipt() }
+
+    override suspend fun answer(accountId: String, sessionId: String, answer: PermissionAnswer, idempotencyKey: String): InputReceipt =
+        calls.withAccount(accountId, resource = true) { client ->
+            val request = AnswerCloudPermissionRequest(
+                requestId = answer.requestId,
+                behavior = if (answer.allow) "allow" else "deny",
+                message = answer.message,
+                answers = answer.answers.takeIf { it.isNotEmpty() }?.map { CloudQuestionAnswer(it.question, it.options, it.text) },
+            )
+            client.answerCloudPermission(sessionId, request, idempotencyKey).receipt()
+        }
 
     override suspend fun interrupt(accountId: String, sessionId: String, idempotencyKey: String): InputReceipt =
         calls.withAccount(accountId, resource = true) { it.interruptCloudSession(sessionId, idempotencyKey).receipt() }
+    override suspend fun stopTask(accountId: String, sessionId: String, taskId: String, idempotencyKey: String): InputReceipt =
+        calls.withAccount(accountId, resource = true) { it.stopCloudTask(sessionId, taskId, idempotencyKey).receipt() }
 
     override suspend fun pause(accountId: String, sessionId: String): CloudSession =
         calls.withAccount(accountId, resource = true) { it.pauseCloudSession(sessionId).domain() }
@@ -48,7 +78,11 @@ class RemoteSessionRepository(private val calls: AccountCalls, private val polic
     override suspend fun resume(accountId: String, sessionId: String): CloudSession =
         calls.withAccount(accountId, resource = true) { it.resumeCloudSession(sessionId).domain() }
 
-    override fun sessionChanges(accountId: String): Flow<LiveUpdate<SessionChange>> = flow {
+    override suspend fun end(accountId: String, sessionId: String) {
+        calls.withAccount(accountId, resource = true) { it.deleteCloudSession(sessionId) }
+    }
+
+    override fun sessionChanges(accountId: String, kinds: Set<SessionKind>): Flow<LiveUpdate<SessionChange>> = flow {
         // One cursor per collection, shared by its attempts: a reconnection resumes after the last event seen, any subject.
         var cursor: Long? = null
         emitAll(reconnecting(policy, resource = false) { send, progress ->
@@ -57,6 +91,7 @@ class RemoteSessionRepository(private val calls: AccountCalls, private val polic
             client.followTeamEvents(
                 after = cursor,
                 types = SESSION_EVENT_TYPES,
+                kinds = kinds.map { it.wire }.toSet(),
                 onGap = { send(LiveUpdate.Gap) },
                 onOpen = { progress.opened(); send(LiveUpdate.Opened(resumed)) },
             ) { event ->

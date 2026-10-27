@@ -61,8 +61,11 @@ class ApiDocsTest {
             cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(sessionStore), AuthenticateRunnerUseCase(sessionStore, cluster),
                 RunnerInferenceUseCase(sessionStore, stub()), RunnerGitHubUseCase(sessionStore, stub())),
             github = GitHubLinkService(stub(), stub(), stub()),
-            cloudConversation = CloudConversation(CloudConversationService(conversationStore, sessionStore, access), access,
-                RunnerConversationUseCase(sessionStore, conversationStore), me.nathanfallet.teamcode.domain.team.TeamEventService(stub<me.nathanfallet.teamcode.domain.team.TeamEventStore>())),
+            cloudConversation = CloudConversationService(conversationStore, sessionStore, access, { _, _ -> false }).let { conversation ->
+                CloudConversation(conversation, access, RunnerConversationUseCase(sessionStore, conversationStore, { _, _ -> false }),
+                    me.nathanfallet.teamcode.domain.team.TeamEventService(stub<me.nathanfallet.teamcode.domain.team.TeamEventStore>()),
+                    files = CloudFileService(stub(), sessionStore, conversation, stub(), stub()))
+            },
             cloudTransfers = CloudTransferService(sessionStore, stub(), sessions, CloudRecipientPolicy(sessionStore)),
             webhooks = me.nathanfallet.teamcode.domain.webhooks.WebhookService(stub(), stub()),
             apiPrices = stub(), poolSizing = stub(),
@@ -70,6 +73,7 @@ class ApiDocsTest {
             artifacts = me.nathanfallet.teamcode.domain.artifacts.ArtifactService(stub(), stub(), stub()),
             artifactViewing = me.nathanfallet.teamcode.domain.artifacts.ArtifactViewing(me.nathanfallet.teamcode.domain.artifacts.ArtifactService(stub(), stub(), stub()),
                 stub(), stub(), stub(), me.nathanfallet.teamcode.domain.artifacts.ArtifactTickets(ByteArray(32))),
+            deviceDaemons = me.nathanfallet.teamcode.presentation.DeviceDaemonChannel(DeviceDaemonUseCase(stub()), CloudSessionService(sessionStore, access = access, daemons = stub())),
         )
     }
 

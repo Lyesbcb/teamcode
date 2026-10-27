@@ -3,11 +3,15 @@ package me.nathanfallet.teamcode.domain.cloud
 /** Normalized transcript event types; nothing else is stored. Thinking blocks have no type and never reach the server. */
 enum class CloudEventType(val wire: String) {
     USER_MESSAGE("message.user"), AGENT_MESSAGE("message.agent"), TOOL_CALL("tool.call"), TOOL_RESULT("tool.result"),
+    /** Live text of an agent message while it is written, replaced by its `message.agent`: `{messageId, index, text, parentToolUseId?}`. */
+    AGENT_MESSAGE_DELTA("message.agent.delta"),
     TURN("turn"), STATUS("status"), ERROR("error"),
     /** The agent waits for a person before using a tool; answered by a [CloudInputKind.PERMISSION] input. */
     PERMISSION_REQUEST("permission.request"),
     /** The runner denied a request nobody answered within the team's deadline: `{requestId, deadlineMinutes, message}`. */
     PERMISSION_EXPIRED("permission.expired"),
+    /** The agent's live background tasks, the full set each time it changes: `{tasks: [{id, type, description, ...}], stoppable}`. */
+    TASKS("tasks"),
     /** Written by the server when an input is consumed, cancelled or rejected. */
     INPUT("input"),
     /** Written by the server when the session changed owner: `{transferId, fromMemberId, toMemberId, atEpoch}`. */
@@ -31,12 +35,17 @@ data class CloudEventPage(val events: List<CloudEvent>, val firstSeq: Long?, val
 enum class CloudInputKind(val wire: String) {
     MESSAGE("message"), INTERRUPT("interrupt"),
     /** The answer to a `permission.request`; its text is the encoded answer, read by the runner. */
-    PERMISSION("permission");
+    PERMISSION("permission"),
+    /** Stops one background task of the running agent; its text is the task id. Delivered only to a runner that takes it. */
+    STOP_TASK("stop_task");
     companion object { fun parse(value: String) = entries.singleOrNull { it.wire == value } }
 }
 
 /** A member's answer to the `permission.request` [requestId]: [answers] (a question's answers) need [allow]. */
-data class PermissionAnswer(val requestId: String, val allow: Boolean, val message: String?, val answers: List<QuestionAnswer>)
+data class PermissionAnswer(val requestId: String, val allow: Boolean, val message: String?, val answers: List<QuestionAnswer>) {
+    /** A denial without a message or answers: it only stops a tool use and carries no instruction for the agent. */
+    val isBareDenial: Boolean get() = !allow && message == null && answers.isEmpty()
+}
 /** The answer to the question at index [question]: the chosen [options] by index, or free [text]. */
 data class QuestionAnswer(val question: Int, val options: List<Int> = emptyList(), val text: String? = null)
 
@@ -87,6 +96,8 @@ data class CloudInput(
     val finishedAt: Long? = null,
     val reason: String? = null,
     val eventSeq: Long? = null,
+    /** Files the message carries to the agent (`cloud.files.v1`); read by the store when it delivers or acknowledges. */
+    val files: List<CloudFileRef> = emptyList(),
 )
 data class CloudInputPage(val inputs: List<CloudInput>, val nextBefore: String?)
 
@@ -101,6 +112,12 @@ data class NewInput(
     val permissionRequestId: String? = null,
     /** For a permission answer: the rules it must pass, given the session and its request as they are under the lock. */
     val permissionCheck: ((AnswerContext) -> Unit)? = null,
+    /**
+     * Files the message carries: each must be complete, the author's, in this session, not expired and not named by
+     * another message (`409 file_unavailable`), and together at most [fileBytes] (`413 files_too_large`).
+     */
+    val fileIds: List<String> = emptyList(),
+    val fileBytes: Long = 0,
 )
 
 /** What a permission answer is checked against, read under the session row lock: [request] is null when none was found. */

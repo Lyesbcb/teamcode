@@ -13,6 +13,14 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/file.h>
+
+/* A whole-file BSD lock without waiting: 0 when taken, otherwise -1 with errno (EWOULDBLOCK when another holder has it). */
+static inline int teamcode_try_flock(int fd) {
+    int result;
+    do { result = flock(fd, LOCK_EX | LOCK_NB); } while (result != 0 && errno == EINTR);
+    return result;
+}
 
 /* Hook commands receive a pipe, never interactive input. Bound both input and wait. */
 static inline int teamcode_hook_input(unsigned char *buffer, int capacity) {
@@ -140,6 +148,56 @@ static inline int teamcode_spawn_piped(const char *command, char *const argv[], 
     return 0;
 fail_pipes:
     close(in_pipe[0]); close(in_pipe[1]); close(out_pipe[0]); close(out_pipe[1]);
+    return result;
+}
+
+/*
+ * Spawns a child that outlives this process and the terminal: a new session (a new process group where the C library
+ * predates POSIX_SPAWN_SETSID), default signal dispositions and an empty mask, stdin on /dev/null, stdout and stderr
+ * appended to [log], which the caller created privately beforehand (never created here, never followed if a link).
+ */
+#ifndef POSIX_SPAWN_SETSID
+#ifdef __APPLE__
+#define POSIX_SPAWN_SETSID 0x0400
+#else
+#define POSIX_SPAWN_SETSID 0x80
+#endif
+#endif
+static inline int teamcode_spawn_detached(const char *command, char *const argv[], char *const envp[], const char *log, int *child) {
+    int attempt;
+    int result = 0;
+    for (attempt = 0; attempt < 2; attempt++) {
+        posix_spawnattr_t attributes;
+        result = posix_spawnattr_init(&attributes);
+        if (result != 0) return result;
+        sigset_t defaults, empty;
+        sigemptyset(&defaults);
+        sigaddset(&defaults, SIGINT); sigaddset(&defaults, SIGTERM); sigaddset(&defaults, SIGHUP); sigaddset(&defaults, SIGQUIT); sigaddset(&defaults, SIGPIPE);
+        sigemptyset(&empty);
+        posix_spawnattr_setsigdefault(&attributes, &defaults);
+        posix_spawnattr_setsigmask(&attributes, &empty);
+        short flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+        /* Only the three standard streams reach the host, never this process's sockets or files. */
+        flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+        /* An older C library refuses the new-session flag (EINVAL): the second attempt takes a new process group. */
+        if (attempt == 0) flags |= POSIX_SPAWN_SETSID;
+        else { flags |= POSIX_SPAWN_SETPGROUP; posix_spawnattr_setpgroup(&attributes, 0); }
+        posix_spawnattr_setflags(&attributes, flags);
+        posix_spawn_file_actions_t actions;
+        result = posix_spawn_file_actions_init(&actions);
+        if (result != 0) { posix_spawnattr_destroy(&attributes); return result; }
+        result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+        if (result == 0) result = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, log, O_WRONLY | O_APPEND | O_NOFOLLOW, 0);
+        if (result == 0) result = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+        pid_t pid = 0;
+        if (result == 0) result = posix_spawnp(&pid, command, &actions, &attributes, argv, envp);
+        posix_spawn_file_actions_destroy(&actions);
+        posix_spawnattr_destroy(&attributes);
+        if (result == 0) { *child = (int)pid; return 0; }
+        if (result != EINVAL) return result;
+    }
     return result;
 }
 

@@ -14,7 +14,12 @@ class CloudSessionService(
     private val access: CloudAccessService? = null,
     /** Queues `initialMessage`; null where the server has no conversations (creation then refuses one). */
     private val initialMessages: CloudInitialMessages? = null,
+    /** The daemons of members' devices; null where remote sessions cannot be started on another device. */
+    private val daemons: DeviceDaemonStore? = null,
 ) {
+    /** Whether a remote session can be started on one of the caller's devices by its daemon (`cloud.sessions.remote.daemon.v1`). */
+    val startsOnDevices: Boolean get() = daemons != null
+
     /** Whether creation accepts `initialMessage`; the server advertises `cloud.sessions.initial-message.v1` from it. */
     val acceptsInitialMessage: Boolean get() = initialMessages != null
 
@@ -42,6 +47,7 @@ class CloudSessionService(
         val profile = store.profile(principal.teamId, draft.profileId) ?: throw missingProfile()
         val owner = store.member(principal.teamId, actor.effectiveMemberId)
             ?: throw TeamFailure("invalid_effective_member", 422, "The effective member must be an enabled team member who completed password setup.")
+        val onBehalf = actor.effectiveMemberId != principal.member.id
         if (!owner.role.isAdministrator && owner.id !in profile.assignedMemberIds) throw unassignedProfile(owner.id == principal.member.id)
         // The owner must hold `create` under the access policy, also when an administrator creates on their behalf.
         access?.require(principal.teamId, owner, owner.id, CloudPermission.CREATE)
@@ -74,7 +80,11 @@ class CloudSessionService(
             workspace = CloudWorkspace(claimName(id), spec.storageClass ?: cluster.defaultStorageClass, spec.workspaceSizeGibibytes),
             createdAt = now, updatedAt = now,
             environment = CloudEnvironmentRules.merge(spec.environment, draft.environment).also(CloudEnvironmentRules::validate),
+            // Created on someone's behalf, the session runs the creator's instructions: no GitHub token until its owner allows it (audit M2).
+            githubAccess = if (onBehalf) CloudGitHubAccess.NONE else CloudGitHubAccess.OWNER,
         )
+        if (onBehalf && session.environment.requireGitHub) throw TeamFailure("github_owner_consent", 422,
+            "This profile requires GitHub, and a session created on someone's behalf has no GitHub access until its owner allows it. Ask the owner to create the session.")
         val outcome = store.insert(session, actor, idempotency, settings.maxRetainedSessionsPerMember)
         // Queued after the session commits, idempotently: if this step fails, the client's retry with the same
         // Idempotency-Key replays the creation and queues the message then.
@@ -91,13 +101,15 @@ class CloudSessionService(
      * (`422 remote_requires_device`), and nobody creates one on behalf of another member. No profile, cluster or
      * workspace is involved; the session waits for its host (`teamcode remote`), which starts its first execution.
      * Remote sessions count toward neither the retained nor the running cap of cloud sessions, and a device has no cap.
+     *
+     * With [RemoteSessionDraft.deviceId], the session runs on that device instead, started by its daemon: see [targetFolder].
      */
     suspend fun createRemote(principal: Principal, onBehalfOf: String?, draft: RemoteSessionDraft, idempotency: IdempotencyRequest?): CloudCreateOutcome {
         val actor = actor(principal, onBehalfOf)
         if (actor.effectiveMemberId != principal.member.id)
             throw TeamFailure("on_behalf_forbidden", 403, "A remote session runs on the caller's own device; it cannot be created on behalf of another member.")
         validateRemote(draft)
-        val device = deviceOf(principal)
+        val (device, folder) = if (draft.deviceId == null) deviceOf(principal) to null else targetFolder(principal, draft)
         val owner = store.member(principal.teamId, principal.member.id)
             ?: throw TeamFailure("invalid_effective_member", 422, "The effective member must be an enabled team member who completed password setup.")
         access?.require(principal.teamId, owner, owner.id, CloudPermission.CREATE)
@@ -116,7 +128,8 @@ class CloudSessionService(
             idleTimeoutMinutes = settings.remoteIdleTimeoutMinutes, lastActivityAt = now, resumeWorkspace = WorkspaceResume.CONSISTENT, resumeConversation = ConversationResume.NONE,
             failure = null, resumeBlocked = null, pauseRequestedAt = null, pauseForce = false, pausedAt = null, expiresAt = null,
             terminatedReason = null, waitingSince = null, workspace = CloudWorkspace("", null, 0), createdAt = now, updatedAt = now,
-            kind = CloudSessionKind.REMOTE, host = CloudSessionHost(device, draft.directoryName, permissionMode = draft.permissionMode),
+            kind = CloudSessionKind.REMOTE, host = CloudSessionHost(device, folder?.name ?: draft.directoryName, permissionMode = draft.permissionMode, folderId = folder?.id,
+                resumeSessionId = draft.resumeSessionId),
         )
         val outcome = store.insert(session, actor, idempotency, settings.maxRetainedSessionsPerMember)
         draft.initialMessage?.let { text ->
@@ -159,6 +172,55 @@ class CloudSessionService(
             transition.startHost(current, next, execution, ended, actor)?.let { return it }
         }
         throw TeamFailure("session_busy", 409, "The cloud session changed concurrently. Retry the request.")
+    }
+
+    /**
+     * The device and folder of a session started by a device's daemon. Only the device's owner, with an interactive
+     * login, starts one: the device row's member decides, never the caller's role, so an administrator cannot start an
+     * agent on another member's computer (`404 device_not_found`, as for an unknown device). The daemon must be online
+     * (`409 device_offline`: nothing is queued for later) and the folder one it published (`422 folder_not_published`);
+     * the daemon checks the folder again against its own configuration before it hosts the session.
+     */
+    private suspend fun targetFolder(principal: Principal, draft: RemoteSessionDraft): Pair<String, DeviceFolder> {
+        val daemons = daemons ?: throw TeamFailure("device_target_unsupported", 400, "This server does not start remote sessions on another device.")
+        DeviceDaemonUseCase.requireNotCloudSession(daemons, principal)
+        if (principal.serviceScopes != null)
+            throw TeamFailure("remote_requires_login", 422, "Only the device's owner, signed in interactively, starts a session on it; service keys cannot.")
+        val deviceId = draft.deviceId!!
+        val folderId = draft.folderId?.takeIf(DeviceDaemonRules::validFolderId)
+            ?: throw TeamFailure("invalid_folder", 400, "Send the folderId of one of the device's published folders.")
+        val device = daemons.owned(principal.teamId, principal.member.id, deviceId) ?: throw DeviceDaemonUseCase.deviceNotFound()
+        if (device.daemon?.online != true)
+            throw TeamFailure("device_offline", 409, "${device.name} is offline: its TeamCode daemon is not connected. Start it on the device, or choose another one.")
+        // Only a daemon that lists conversations checks and forks one; an older one would start a new conversation instead.
+        if (draft.resumeSessionId != null) DeviceDaemonUseCase.requireResume(device)
+        val folder = device.folders.find { it.id == folderId } ?: throw DeviceDaemonUseCase.folderNotPublished(device.name)
+        if (draft.directoryName != null && draft.directoryName != folder.name)
+            throw TeamFailure("invalid_directory_name", 400, "The directory of a session started on a device is its folder's name; omit directoryName.")
+        return device.id to folder
+    }
+
+    /**
+     * The daemon refuses an order its own check rejected (the folder left its configuration, the agent is missing…): the
+     * session ends with `failure.code = host_refused` and the daemon's [reason]. Only from the session's device, for a
+     * session started through its daemon that still waits for a host; anything else is `404` or `409 not_waiting_host`.
+     */
+    suspend fun refuseHost(principal: Principal, id: String, reason: String): CloudSession {
+        DeviceDaemonRules.validateReason(reason)
+        val actor = actor(principal, null)
+        val found = store.find(principal.teamId, id)
+        if (found == null || found.ownerId != principal.member.id || found.kind != CloudSessionKind.REMOTE || found.host?.folderId == null) throw missing()
+        requireHost(principal, found)
+        return transition(principal.teamId, id) { current ->
+            if (current.phase != WAITING_HOST || current.desiredState != DesiredState.RUNNING || current.state.terminal)
+                throw TeamFailure("not_waiting_host", 409, "This session no longer waits for its host.")
+            val now = store.now()
+            CloudTransition(
+                current.copy(desiredState = DesiredState.TERMINATED, terminatedReason = HOST_REFUSED,
+                    failure = CloudProblem(HOST_REFUSED, "The device refused to start this session ($reason).", false), updatedAt = now),
+                CloudWrite(actor = actor, auditAction = "cloud.session.host_refused", reconcileAt = now),
+            )
+        } ?: throw missing()
     }
 
     /** The caller's device, required for anything that runs a remote session. */
@@ -212,6 +274,35 @@ class CloudSessionService(
                     current.copy(desiredState = DesiredState.PAUSED, pauseRequestedAt = current.pauseRequestedAt ?: now, pauseForce = force || current.pauseForce, updatedAt = now),
                     CloudWrite(actor = actor, auditAction = "cloud.session.paused", reconcileAt = now),
                 )
+            }
+        } ?: throw missing()
+    }
+
+    /**
+     * The owner chooses whose instructions an agent holding their GitHub token follows ([CloudGitHubAccess]). Only the
+     * owner, signed in or through their own key, never on their behalf: the choice consents to the use of their token.
+     * Turning the token off waits for a pause, because a running agent keeps a token it already received until it
+     * expires; turning it on or sharing applies to the next renewal and the next message.
+     */
+    suspend fun setGitHubAccess(principal: Principal, onBehalfOf: String?, id: String, access: CloudGitHubAccess): CloudSession {
+        if (onBehalfOf != null && onBehalfOf != principal.member.id) throw TeamFailure("github_owner_only", 403, "Only the session owner chooses who uses their GitHub access.")
+        val actor = actor(principal, null)
+        val found = store.find(principal.teamId, id)
+        if (found == null || found.ownerId != principal.member.id) throw missing()
+        if (found.kind == CloudSessionKind.REMOTE) throw TeamFailure("github_access_unsupported", 409, "A remote session uses the GitHub access of the device it runs on.")
+        return transition(principal.teamId, id) { current ->
+            val now = store.now()
+            when {
+                current.ownerId != principal.member.id -> throw missing()
+                current.state.terminal || current.desiredState == DesiredState.TERMINATED -> throw notRunning()
+                current.state == CloudSessionState.TRANSFERRING || current.transferId != null -> throw TeamFailure("session_transferring", 409, "The session is being transferred.")
+                current.githubAccess == access -> null
+                access == CloudGitHubAccess.NONE && current.environment.requireGitHub -> throw TeamFailure("github_required", 422,
+                    "This session's profile requires GitHub: it cannot run without GitHub access.")
+                access == CloudGitHubAccess.NONE && current.state != CloudSessionState.PAUSED -> throw TeamFailure("session_not_paused", 409,
+                    "A running agent keeps the GitHub token it already received. Pause the session, then turn GitHub access off.")
+                else -> CloudTransition(current.copy(githubAccess = access, updatedAt = now),
+                    CloudWrite(actor = actor, auditAction = "cloud.session.github_access_changed", reconcileAt = null))
             }
         } ?: throw missing()
     }
@@ -276,6 +367,8 @@ class CloudSessionService(
     companion object {
         /** The phase of a remote session waiting for its host to start an execution. */
         const val WAITING_HOST = "waiting_host"
+        /** Why a session the device's daemon refused ended. */
+        const val HOST_REFUSED = "host_refused"
         val REMOTE_AGENTS = setOf("claude", "codex")
         /** The execution name of a remote session's host, in place of a pod name. */
         fun hostExecutionName(epoch: Int) = "host-e$epoch"
@@ -283,7 +376,13 @@ class CloudSessionService(
             validate(CloudSessionDraft(draft.name, "", null, draft.agentModel, draft.agentEffort, draft.labels, null))
             if (draft.agentKind !in REMOTE_AGENTS) throw TeamFailure("invalid_agent", 400, "Use the agent claude or codex.")
             val directory = draft.directoryName
-            if (directory.isBlank() || directory.length > 255 || directory == "." || directory == ".." || directory.any { it == '/' || it == '\\' || it.isISOControl() })
+            if (draft.deviceId == null && draft.folderId != null) throw TeamFailure("invalid_folder", 400, "A folderId needs the deviceId whose daemon published it.")
+            draft.resumeSessionId?.let { resume ->
+                if (draft.deviceId == null) throw TeamFailure("invalid_resume", 400, "A resumeSessionId needs the deviceId and folderId of the conversation it continues.")
+                if (!DeviceDaemonRules.validConversationId(resume)) throw TeamFailure("invalid_resume", 400, "Send the id of a conversation the device listed (a lowercase UUID).")
+                if (draft.agentKind != "claude") throw TeamFailure("resume_unsupported", 400, "Only a Claude Code session continues a conversation of the device.")
+            }
+            if ((draft.deviceId == null || directory != null) && (directory == null || !DeviceDaemonRules.validDirectoryName(directory)))
                 throw TeamFailure("invalid_directory_name", 400, "Send the directory's name (its last segment, 1–255 characters), never its path.")
         }
         private fun remoteRequiresDevice() = TeamFailure("remote_requires_device", 422,

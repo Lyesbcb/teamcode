@@ -25,9 +25,15 @@ ARG BASE_IMAGE=ubuntu:24.04
 FROM ${BASE_IMAGE}
 
 # The TeamCode release whose binary goes into the image. Use your server's version.
-ARG TEAMCODE_VERSION=0.3.2
+ARG TEAMCODE_VERSION=1.0.1
 # Node.js runtime for the agent CLIs (an LTS line). Empty with both agent versions empty skips Node.js.
 ARG NODE_VERSION=24.21.0
+# The Node.js release keyring (gpg/pubring.kbx of github.com/nodejs/release-keys, at this commit) and its SHA-256:
+# SHASUMS256.txt must be signed by one of its keys, so nodejs.org alone cannot change Node.js. A Node.js bump needs no
+# change here; a release signed by a key the keyring lacks fails the build, and moving to a newer keyring commit
+# changes both values (the keys are the releasers listed in the README of nodejs/node).
+ARG NODE_RELEASE_KEYS_COMMIT=481637f813e912c4aa3622d7964ab426c97b8e8d
+ARG NODE_RELEASE_KEYS_SHA256=610b8d249da3d5733f5a128def2dd0294dbbf5b5713e6ca2529db8db419dee00
 # Agent CLIs. Empty skips one; pin exact versions so a rebuild gives the same agent.
 ARG CLAUDE_CODE_VERSION=2.1.306
 ARG CODEX_VERSION=0.163.0
@@ -46,21 +52,53 @@ SHELL ["/bin/sh", "-eu", "-c"]
 # Runtime libraries of the teamcode binary, git, and what the steps below download with.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl git libcrypt1 openssl xz-utils zlib1g \
+       ca-certificates curl git gpgv libcrypt1 openssl xz-utils zlib1g \
        "$(apt-cache show libcurl4t64 >/dev/null 2>&1 && echo libcurl4t64 || echo libcurl4)" \
        "$(apt-cache show libssl3t64 >/dev/null 2>&1 && echo libssl3t64 || echo libssl3)" \
     && rm -rf /var/lib/apt/lists/*
 
-# The teamcode binary, checked against the release's SHA256SUMS.
+# The TeamCode publisher's public key (release/trust/teamcode-release-2026.pem in the TeamCode repository). The
+# release's manifest.sig is checked against it, so replacing the binary and SHA256SUMS of a release is not enough to
+# put another binary in this image. A fork that signs its own releases puts its own key here.
+COPY <<'EOF' /usr/local/share/teamcode/release-2026.pem
+-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAvt26hBXU8nyHnq0pVU3C
+iMjMPUDKTVahWc4zCNGnxfbALmp2viekOOAMQXbhMLqR0//OQ/EpRoiwsLLqHNq5
+Lt03Btv6ie30W2JXYCNwS6dG6bbusVVsJvf1WDTnmap2Pq19jSvTqnlmi+Cuk/Lg
+GTHYVakpf98fCTzlI1cNulYgZfxckSTG3p9FQIOzHENdcfsCysfYylvLhOMjCccB
+TC7A3Fof4NPS2HJkA47FdCKGwU8hvhe9YcR7mKIqki6QcCHwwpe8jtXX2X5e+Wte
+7Rhj1pTqDKBJtNqOoh/cD97w9w7u0c2U+d1jTxHBItnKRwuiXzM0c0lZdhog/JSZ
+G5poqSSil4R0kMuosQe1A887TIMoBvf5vB0SMyduxFdZuvAji11Emfgnz0E2qZFC
+UfWQVUQEtVuJDzGLSqT2Z1rMc0vu6AQ8FHYM7lgvLyTbEU8LM/+PgAKI6K/K0EOf
+shLnIvBbcl+AvatfS3UpbBbkU4CJsi4FV7/Z78FDmoUpAgMBAAE=
+-----END PUBLIC KEY-----
+EOF
+
+# The teamcode binary: manifest.sig must name the publisher key above by its keyId (SHA-256 of the key's DER
+# SubjectPublicKeyInfo), manifest.json must carry a valid RSA-PSS signature of that key, name this version, and list
+# the binary's SHA-256. Another keyId stops the build with both ids: after a key rotation of the publisher, take the
+# new public key from release/trust/ of the TeamCode repository (it ships there in a release signed by the old key,
+# docs/distribution.md) and put it above in place of the old one.
 RUN case "${TARGETARCH:-amd64}" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) echo "Unsupported architecture ${TARGETARCH:-amd64}" >&2; exit 1 ;; esac \
     && asset="teamcode-${TEAMCODE_VERSION}-linux-${arch}" \
     && base="https://github.com/nathanfallet/teamcode/releases/download/${TEAMCODE_VERSION}" \
     && cd /tmp \
     && curl -fsSLO --retry 3 "${base}/${asset}" \
-    && curl -fsSLO --retry 3 "${base}/SHA256SUMS" \
-    && grep " ${asset}\$" SHA256SUMS | sha256sum -c - \
+    && curl -fsSLO --retry 3 "${base}/manifest.json" \
+    && curl -fsSLO --retry 3 "${base}/manifest.sig" \
+    && trusted="$(openssl pkey -pubin -in /usr/local/share/teamcode/release-2026.pem -outform DER | sha256sum | cut -d ' ' -f 1)" \
+    && signer="$(sed -n 's/.*"keyId": "\([0-9a-f]*\)".*/\1/p' manifest.sig)" \
+    && if [ "${signer}" != "${trusted}" ]; then \
+         echo "manifest.sig of TeamCode ${TEAMCODE_VERSION} is signed by the key ${signer:-(none)}, this image trusts ${trusted} (release-2026.pem): a rotated publisher key goes in place of release-2026.pem, see the comment above" >&2; \
+         exit 1; \
+       fi \
+    && sed -n 's/.*"signature": "\([A-Za-z0-9+\/=]*\)".*/\1/p' manifest.sig | base64 -d > manifest.sig.bin \
+    && openssl dgst -sha256 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:32 -sigopt rsa_mgf1_md:sha256 \
+       -verify /usr/local/share/teamcode/release-2026.pem -signature manifest.sig.bin manifest.json \
+    && grep -q "^  \"tag\": \"${TEAMCODE_VERSION}\",\$" manifest.json \
+    && grep -q "\"sha256\": \"$(sha256sum "${asset}" | cut -d ' ' -f 1)\"" manifest.json \
     && install -m 0755 "${asset}" /usr/local/bin/teamcode \
-    && rm -f "${asset}" SHA256SUMS
+    && rm -f "${asset}" manifest.json manifest.sig manifest.sig.bin
 
 # Node.js and the agent CLIs, system-wide under /usr/local.
 RUN if [ -z "${CLAUDE_CODE_VERSION}${CODEX_VERSION}" ]; then exit 0; fi \
@@ -69,9 +107,17 @@ RUN if [ -z "${CLAUDE_CODE_VERSION}${CODEX_VERSION}" ]; then exit 0; fi \
     && cd /tmp \
     && curl -fsSLO --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/${archive}" \
     && curl -fsSLO --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+    && curl -fsSLO --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt.sig" \
+    && curl -fsSL --retry 3 -o node-release-keys.kbx "https://raw.githubusercontent.com/nodejs/release-keys/${NODE_RELEASE_KEYS_COMMIT}/gpg/pubring.kbx" \
+    && if ! printf '%s  node-release-keys.kbx\n' "${NODE_RELEASE_KEYS_SHA256}" | sha256sum -c - >/dev/null 2>&1; then \
+         echo "The Node.js release keyring at ${NODE_RELEASE_KEYS_COMMIT} does not match NODE_RELEASE_KEYS_SHA256" >&2; exit 1; \
+       fi \
+    && if ! gpgv --keyring /tmp/node-release-keys.kbx SHASUMS256.txt.sig SHASUMS256.txt; then \
+         echo "SHASUMS256.txt of Node.js ${NODE_VERSION} is not signed by a key of the Node.js release keyring at ${NODE_RELEASE_KEYS_COMMIT}" >&2; exit 1; \
+       fi \
     && grep " ${archive}\$" SHASUMS256.txt | sha256sum -c - \
     && tar -xJf "${archive}" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm -f "${archive}" SHASUMS256.txt \
+    && rm -f "${archive}" SHASUMS256.txt SHASUMS256.txt.sig node-release-keys.kbx \
     && packages="" \
     && if [ -n "${CLAUDE_CODE_VERSION}" ]; then packages="${packages} @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; fi \
     && if [ -n "${CODEX_VERSION}" ]; then packages="${packages} @openai/codex@${CODEX_VERSION}"; fi \

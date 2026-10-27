@@ -8,6 +8,7 @@ import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.options.*
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -15,32 +16,49 @@ import me.nathanfallet.teamcode.api.Serialization
 import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.cli.cloud.agent.CloudAgentSupervisor
 import me.nathanfallet.teamcode.cli.cloud.agent.CloudCredential
+import me.nathanfallet.teamcode.cli.cloud.agent.CloudPreparationLog
 import me.nathanfallet.teamcode.cli.cloud.agent.CloudEnvironment
+import me.nathanfallet.teamcode.cli.cloud.agent.CloudAgentState
 import me.nathanfallet.teamcode.cli.cloud.agent.CloudInstallSkills
 import me.nathanfallet.teamcode.cli.loadConfig
+import me.nathanfallet.teamcode.cli.remote.REMOTE_CAPABILITY
 import me.nathanfallet.teamcode.cli.sdk
 import me.nathanfallet.teamcode.client.TeamCodeException
 
 /** `teamcode cloud`: sessions that run on the team's Kubernetes cluster. */
 class Cloud : SuspendingNoOpCliktCommand(name = "cloud") {
     override fun help(context: Context) = "Create and manage cloud sessions on your team's cluster. Requires an interactive login."
-    init { subcommands(CloudCreate(), CloudProfiles(), CloudList(), CloudShow(), CloudPause(), CloudResume(), CloudDelete(), CloudLogs(), CloudSend(), CloudInterrupt(), CloudAnswer(), CloudAttach(), CloudTransfer(), CloudTransfers(), CloudRunner(), CloudAgentSupervisor(), CloudCredential(), CloudEnvironment(), CloudInstallSkills(), CloudInstallSkills(hooks = true)) }
+    init { subcommands(CloudCreate(), CloudProfiles(), CloudList(), CloudShow(), CloudPause(), CloudResume(), CloudGitHub(), CloudDelete(), CloudLogs(), CloudSend(), CloudInterrupt(), CloudAnswer(), CloudAttach(), CloudTransfer(), CloudTransfers(), CloudRunner(), CloudAgentSupervisor(), CloudPreparationLog(), CloudCredential(), CloudEnvironment(), CloudAgentState(), CloudInstallSkills(), CloudInstallSkills(hooks = true)) }
 }
 
-private fun CloudSessionView.line() = listOf(id, state + (phase?.let { " ($it)" } ?: ""), name, "epoch $currentEpoch", "updated ${Instant.fromEpochMilliseconds(updatedAt)}").joinToString("\t")
+/** One row: id, state, name, epoch, last update, kind, and where it runs (the profile of a cloud session, the device of a remote one). */
+internal fun CloudSessionView.line() = listOf(id, state + (phase?.let { " ($it)" } ?: ""), name, "epoch $currentEpoch", "updated ${Instant.fromEpochMilliseconds(updatedAt)}",
+    kind, where()).joinToString("\t")
+private fun CloudSessionView.where() = if (kind == CloudSessionKinds.REMOTE) host.let { host ->
+    "on " + (host?.deviceName ?: "a removed device") + (host?.platform?.let { " ($it)" } ?: "") + if (host?.online == true) ", online" else ", offline"
+} else "profile ${profile.id}"
 private fun CloudSessionView.details() = buildString {
     appendLine("Session:      $id")
     appendLine("Name:         $name")
     appendLine("State:        $state" + (phase?.let { " ($it)" } ?: "") + ", desired $desiredState")
     appendLine("Owner:        $ownerId" + if (createdBy.initiatorId != ownerId) " (created by ${createdBy.initiatorId})" else "")
-    appendLine("Profile:      ${profile.id} v${profile.version}")
-    appendLine("Image:        ${image.reference}" + (image.digest?.let { " @ $it" } ?: ""))
+    if (kind == CloudSessionKinds.REMOTE) {
+        appendLine("Kind:         remote")
+        val system = listOfNotNull(host?.platform, host?.osVersion).joinToString(" ")
+        appendLine("Host:         ${host?.deviceName ?: "removed device"}" + (if (system.isEmpty()) "" else " ($system)") + if (host?.online == true) ", online" else ", offline")
+        host?.directoryName?.let { appendLine("Directory:    $it") }
+        host?.permissionMode?.let { appendLine("Permissions:  $it") }
+    } else {
+        appendLine("Profile:      ${profile.id} v${profile.version}")
+        appendLine("Image:        ${image.reference}" + (image.digest?.let { " @ $it" } ?: ""))
+    }
     appendLine("Agent:        ${agent.kind}" + listOfNotNull(agent.model, agent.effort).joinToString(" ", prefix = " ").trimEnd())
     appendLine("Epoch:        $currentEpoch")
     appendLine("Resume:       workspace ${resume.workspace}, conversation ${resume.conversation}")
+    githubAccess?.let { appendLine("GitHub:       " + GITHUB_ACCESS_HELP.getValue(it)) }
     failure?.let { appendLine("Failure:      ${it.code}: ${it.message}") }
     resumeBlocked?.let { appendLine("Resume block: ${it.code}: ${it.message}") }
-    if (workspaceDeletion.state != "none") appendLine("Workspace:    deletion ${workspaceDeletion.state}" + (workspaceDeletion.problem?.let { " (${it.code})" } ?: ""))
+    if (workspaceDeletion.state != "none" && workspaceDeletion.state != "not_applicable") appendLine("Workspace:    deletion ${workspaceDeletion.state}" + (workspaceDeletion.problem?.let { " (${it.code})" } ?: ""))
     environment.repositories.forEach { appendLine("Repository:   ${it.path} <- ${it.url}" + (it.ref?.let { ref -> " @ $ref" } ?: "") + (it.branch?.let { branch -> " (branch $branch)" } ?: "")) }
     environment.workingDirectory?.let { appendLine("Working dir:  $it") }
     labels.entries.sortedBy { it.key }.forEach { (key, value) -> appendLine("Label:        $key=$value") }
@@ -155,15 +173,20 @@ private class CloudList : SuspendingCliktCommand(name = "list") {
     private val member by option("--member", help = "Another member's sessions; administrators only.")
     private val states by option("--state", help = "Repeatable: ${CloudSessionStates.all.joinToString(", ")}.").multiple()
     private val labels by option("--label", help = "key=value; repeatable.").multiple()
+    private val kinds by option("--kind", help = "cloud or remote; repeatable. Both by default where the server has remote sessions.").choice(CloudSessionKinds.CLOUD, CloudSessionKinds.REMOTE).multiple()
     private val json by option("--json").flag()
     override suspend fun run() {
         if (all && member != null) throw UsageError("Use --all or --member, not both.")
         val parsed = parseLabels(labels)
         sdk(loadConfig()).use { client ->
+            val remote = REMOTE_CAPABILITY in client.capabilities().features
+            if (CloudSessionKinds.REMOTE in kinds && !remote) throw CliktError("This server has no remote sessions (cloud.sessions.remote.v1).")
+            // An older server lists cloud sessions only and would ignore the parameter.
+            val listed = if (!remote) emptyList() else kinds.ifEmpty { listOf(CloudSessionKinds.CLOUD, CloudSessionKinds.REMOTE) }.distinct()
             var before: String? = null
             val sessions = mutableListOf<CloudSessionView>()
             do {
-                val page = client.cloudSessions(if (all) "*" else member, states, parsed, before, 50)
+                val page = client.cloudSessions(if (all) "*" else member, states, parsed, before, 50, listed)
                 sessions += page.sessions
                 before = page.nextBefore
             } while (before != null && sessions.size < MAX_LISTED)
@@ -190,15 +213,45 @@ private class CloudShow : SuspendingCliktCommand(name = "show") {
 
 private class CloudPause : SuspendingCliktCommand(name = "pause") {
     private val id by argument()
-    private val force by option("--force", help = "Do not wait for the agent to drain; the workspace becomes crash-consistent.").flag()
+    private val force by option("--force", help = "Do not wait for the agent to drain; its background work is stopped and the workspace becomes crash-consistent.").flag()
     private val onBehalfOf by option("--member", help = "Act for this member (TeamCode-On-Behalf-Of); administrators only.")
-    override suspend fun run() { echo(sdk(loadConfig()).use { it.pauseCloudSession(id, force, onBehalfOf) }.line()) }
+    override fun help(context: Context) = "Pause a session: the agent finishes its turn and the background work it still runs (subagents, background " +
+        "commands), for up to 10 minutes; work still running then is stopped, and the transcript says so. Scheduled wake-ups come back on resume."
+    override suspend fun run() {
+        echo(sdk(loadConfig()).use { it.pauseCloudSession(id, force, onBehalfOf) }.line())
+        echo(if (force) "Forced: the agent and any background work it runs stop now." else
+            "The agent finishes its turn and its background work (up to 10 minutes) before the session checkpoints; use --force to stop now.")
+    }
 }
 
 private class CloudResume : SuspendingCliktCommand(name = "resume") {
     private val id by argument()
     private val onBehalfOf by option("--member", help = "Act for this member (TeamCode-On-Behalf-Of); administrators only.")
     override suspend fun run() { echo(sdk(loadConfig()).use { it.resumeCloudSession(id, onBehalfOf) }.line()) }
+}
+
+private val GITHUB_ACCESS_HELP = mapOf(
+    "owner" to "owner's token, instructed by the owner only",
+    "shared" to "owner's token, shared with everyone who may message the session",
+    "none" to "no token (created on the owner's behalf; the owner turns it on with teamcode cloud github)",
+).withDefault { it }
+
+private class CloudGitHub : SuspendingCliktCommand(name = "github") {
+    override fun help(context: Context) = "Choose whose instructions your session's agent follows with your GitHub token. " +
+        "owner: you only (the default); shared: everyone who may message the session, who can then make the agent use or print your token; " +
+        "none: no GitHub token (pause the session first)."
+    private val id by argument()
+    private val access by option("--access", help = "owner, shared or none.").choice("owner", "shared", "none").required()
+    override suspend fun run() {
+        sdk(loadConfig()).use { client ->
+            if ("cloud.sessions.github-access.v1" !in client.capabilities().features) throw CliktError("This TeamCode server does not support choosing a session's GitHub access.")
+            val session = client.setCloudGitHubAccess(id, access)
+            echo("GitHub: " + GITHUB_ACCESS_HELP.getValue(session.githubAccess ?: access))
+            if (access != "none" && session.createdBy.initiatorId != session.ownerId) echo("This session was created by ${session.createdBy.initiatorId}: " +
+                "its workspace holds what they set up, and the agent acts with your GitHub access. Read the transcript (teamcode cloud logs $id). " +
+                (if (access == "owner") "While you have GitHub linked, their messages not yet read by the agent are not delivered; --access shared lets the agent act on them." else "Everyone who may message it now instructs an agent holding your token."), err = true)
+        }
+    }
 }
 
 private class CloudDelete : SuspendingCliktCommand(name = "delete") {

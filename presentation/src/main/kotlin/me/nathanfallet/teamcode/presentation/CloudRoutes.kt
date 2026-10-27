@@ -29,7 +29,9 @@ internal fun CloudSession.view() = CloudSessionView(
         else CloudWorkspaceDeletionView(workspace.deletion.wire, workspace.claimDeletedAt, workspace.volumeDeletedAt, workspace.volumeHandle, workspace.deletionProblem?.view()),
     createdAt = createdAt, updatedAt = updatedAt, pausedAt = pausedAt, expiresAt = expiresAt, terminatedReason = terminatedReason, transferId = transferId,
     environment = environment.view(), kind = kind.wire,
-    host = host?.let { CloudSessionHostView(it.deviceId, it.device?.name, it.device?.platform, it.device?.osVersion, it.directoryName, it.online, it.lastHeartbeatAt, it.permissionMode.wire) },
+    host = host?.let { CloudSessionHostView(it.deviceId, it.device?.name, it.device?.platform, it.device?.osVersion, it.directoryName, it.online, it.lastHeartbeatAt, it.permissionMode.wire, it.folderId) },
+    waiting = waitingForHuman?.let { CloudWaitingView(it.reason.wire, it.requestId, it.since, it.eventSeq) },
+    githubAccess = githubAccess.wire.takeIf { kind != CloudSessionKind.REMOTE },
 )
 /** The profile id and image reference of a remote session, which has neither. */
 internal const val REMOTE_PLACEHOLDER = "remote"
@@ -47,13 +49,16 @@ private fun CloudProfileSpecView.domain() = CloudProfileSpec(clusterId, namespac
     workspaceSizeGibibytes, storageClass, agentKind, agentVersion, idleTimeoutMinutes, minIdleTimeoutMinutes, maxIdleTimeoutMinutes, environment.domain())
 private fun CloudProfile.view(clusterName: String? = null) = CloudProfileView(id, name, version, spec.view(), assignedMemberIds.sorted(), createdAt, updatedAt, clusterName)
 private fun CloudSettings.view() = CloudSettingsView(pausedRetentionDays, failedWorkspaceRetentionDays, maxRunningSessionsPerMember, maxRetainedSessionsPerMember, transcriptRetentionDays,
-    memberTransfers.wire, transferOfferDays, transferPendingInputs.wire, permissionDeadlineMinutes, remoteIdleTimeoutMinutes)
+    memberTransfers.wire, transferOfferDays, transferPendingInputs.wire, permissionDeadlineMinutes, remoteIdleTimeoutMinutes, fileMaxMebibytes, messageFileMebibytes,
+    backgroundWorkMaxMinutes)
 /** An absent transfer or permission deadline field keeps [current]'s value. */
 private fun CloudSettingsView.domain(current: CloudSettings) = CloudSettings(pausedRetentionDays, failedWorkspaceRetentionDays, maxRunningSessionsPerMember, maxRetainedSessionsPerMember, transcriptRetentionDays,
     memberTransfers?.let { MemberTransfers.parse(it) ?: throw TeamFailure("invalid_cloud_settings", 400, "Use memberTransfers offer or disabled.") } ?: current.memberTransfers,
     transferOfferDays ?: current.transferOfferDays,
     transferPendingInputs?.let { TransferPendingInputs.parse(it) ?: throw TeamFailure("invalid_cloud_settings", 400, "Use transferPendingInputs cancel or keep.") } ?: current.transferPendingInputs,
-    permissionDeadlineMinutes ?: current.permissionDeadlineMinutes, remoteIdleTimeoutMinutes ?: current.remoteIdleTimeoutMinutes)
+    permissionDeadlineMinutes ?: current.permissionDeadlineMinutes, remoteIdleTimeoutMinutes ?: current.remoteIdleTimeoutMinutes,
+    fileMaxMebibytes ?: current.fileMaxMebibytes, messageFileMebibytes ?: current.messageFileMebibytes,
+    backgroundWorkMaxMinutes ?: current.backgroundWorkMaxMinutes)
 
 /** `TeamCode-On-Behalf-Of`: at most one value; the domain decides whether the caller may use it. */
 internal fun ApplicationCall.onBehalfOf(): String? {
@@ -99,6 +104,7 @@ private val WORK_ROUTES = listOf(
     arrayOf("api", "v1", "cloud", "sessions", "*", "resume"),
     arrayOf("api", "v1", "cloud", "sessions", "*", "host"),
     arrayOf("api", "v1", "cloud", "sessions", "*", "messages"),
+    arrayOf("api", "v1", "cloud", "sessions", "*", "files"),
     arrayOf("api", "v1", "cloud", "sessions", "*", "attachments"),
     arrayOf("api", "v1", "cloud", "sessions", "*", "transfer"),
     arrayOf("api", "v1", "cloud", "transfers", "*", "accept"),
@@ -166,7 +172,7 @@ internal fun Route.cloudRoutes(sessions: CloudSessionService, admin: CloudAdmini
             val idempotency = IdempotencyRequest("POST /cloud/sessions", key, sha256(canonical))
             val outcome = when (input.kind ?: CloudSessionKind.CLOUD.wire) {
                 CloudSessionKind.CLOUD.wire -> {
-                    if (input.directoryName != null || input.permissionMode != null || input.agent?.kind != null)
+                    if (input.directoryName != null || input.permissionMode != null || input.agent?.kind != null || input.deviceId != null || input.folderId != null || input.resumeSessionId != null)
                         throw TeamFailure("invalid_session", 400, "A cloud session takes its agent from its profile and has no directory or permission mode.")
                     val draft = CloudSessionDraft(input.name, input.profileId ?: throw TeamFailure("invalid_session", 400, "Send the profileId of a cloud session."),
                         input.image, input.agent?.model, input.agent?.effort, input.labels, input.idleTimeoutMinutes,
@@ -178,9 +184,9 @@ internal fun Route.cloudRoutes(sessions: CloudSessionService, admin: CloudAdmini
                         throw TeamFailure("invalid_session", 400, "A remote session has no profile, image, idle timeout or environment: it runs in a directory of the caller's device.")
                     val mode = input.permissionMode?.let { RemotePermissionMode.parse(it) ?: throw TeamFailure("invalid_permission_mode", 400, "Use the permission mode ask or bypass.") }
                         ?: RemotePermissionMode.ASK
+                    if (input.deviceId == null && input.directoryName == null) throw TeamFailure("invalid_directory_name", 400, "Send the name of the session's directory.")
                     val draft = RemoteSessionDraft(input.name, input.agent?.kind ?: throw TeamFailure("invalid_agent", 400, "Send the agent of a remote session: claude or codex."),
-                        input.agent?.model, input.agent?.effort, input.labels,
-                        input.directoryName ?: throw TeamFailure("invalid_directory_name", 400, "Send the name of the session's directory."), mode, input.initialMessage)
+                        input.agent?.model, input.agent?.effort, input.labels, input.directoryName, mode, input.initialMessage, input.deviceId, input.folderId, input.resumeSessionId)
                     sessions.createRemote(call.principal, onBehalfOf, draft, idempotency)
                 }
                 else -> throw TeamFailure("invalid_kind", 400, "Use kind cloud or remote.")
@@ -212,6 +218,11 @@ internal fun Route.cloudRoutes(sessions: CloudSessionService, admin: CloudAdmini
             val input = if (call.request.contentType().withoutParameters() == ContentType.Application.Json) call.jsonBody<PauseCloudSessionRequest>() else PauseCloudSessionRequest()
             call.respond(HttpStatusCode.Accepted, sessions.pause(call.principal, call.onBehalfOf(), call.id(), input.force).view())
         }
+        put("/sessions/{id}/github") {
+            val input = call.jsonBody<CloudGitHubAccessRequest>()
+            val access = CloudGitHubAccess.parse(input.access) ?: throw TeamFailure("invalid_github_access", 400, "Use access owner, shared or none.")
+            call.respond(sessions.setGitHubAccess(call.principal, call.onBehalfOf(), call.id(), access).view())
+        }
         // A remote session's host (teamcode remote) starts its next execution here, from the session's device.
         post("/sessions/{id}/host") {
             val session = sessions.host(call.principal, call.id())
@@ -231,7 +242,7 @@ internal fun Route.cloudRoutes(sessions: CloudSessionService, admin: CloudAdmini
             clustersSection(actor, clusters, admin.kubeconfigImports != null) + profilesSection(admin.profiles(actor), clusters,
                 call.request.queryParameters["published"]?.toIntOrNull()) +
             """<h2>GitHub</h2><p>The team's GitHub App, which gives each member's cloud sessions their own Git access, is configured on <a href="/dashboard/github">GitHub</a>.</p><h2>Retention, limits and transfers</h2>"""
-        call.respondText(call.page("Cloud sessions", sections + """<details class='help'><summary>How this works</summary><p>Paused sessions keep their workspace volume until the retention below expires; then the workspace claim and its provider volume are deleted and the session is terminated. Inactivity only pauses a session; it never deletes it. A change applies to sessions paused afterwards.</p></details><form method="post">${csrf(actor)}<label>Paused retention in days (empty keeps paused workspaces indefinitely) <input type="number" name="pausedRetentionDays" min="1" max="3650" value="${settings.pausedRetentionDays ?: ""}"></label><label>Failed workspace retention in days <input type="number" name="failedWorkspaceRetentionDays" min="0" max="365" value="${settings.failedWorkspaceRetentionDays}" required></label><label>Running sessions per member <input type="number" name="maxRunning" min="1" max="100" value="${settings.maxRunningSessionsPerMember}" required></label><label>Retained sessions per member <input type="number" name="maxRetained" min="1" max="1000" value="${settings.maxRetainedSessionsPerMember}" required></label><label>Transcript retention in days (empty keeps transcripts indefinitely; counted from each event, independently of pods and workspaces) <input type="number" name="transcriptRetentionDays" min="1" max="3650" value="${settings.transcriptRetentionDays ?: ""}"></label><fieldset><legend>Transfers</legend><p>Administrators can transfer any session. A session changes owner only once it is paused: a running session drains and checkpoints first, its pod is deleted, and the next pod runs with the recipient's credentials.</p><label>Members may offer their own sessions <select name="memberTransfers">${option("offer", "Yes, the recipient accepts", settings.memberTransfers.wire)}${option("disabled", "No, administrators only", settings.memberTransfers.wire)}</select></label><label>Days to accept an offer <input type="number" name="transferOfferDays" min="1" max="30" value="${settings.transferOfferDays}" required></label><label>Unconsumed messages at the change of owner <select name="transferPendingInputs">${option("cancel", "Cancel them", settings.transferPendingInputs.wire)}${option("keep", "Keep them for the recipient's agent", settings.transferPendingInputs.wire)}</select></label></fieldset><fieldset><legend>Permission requests</legend><p>A cloud agent waits for a person when a tool use matches an <code>ask</code> permission rule or when it asks the user a question. Without a deadline it waits until someone answers, interrupts the turn or pauses the session. With one, the runner denies a request nobody answered in time and the agent reads why. A change applies to sessions started or resumed afterwards.</p><label>Deny unanswered requests after, in minutes (empty or 0: no deadline) <input type="number" name="permissionDeadlineMinutes" min="0" max="${CloudConversationRules.MAX_PERMISSION_DEADLINE_MINUTES}" value="${settings.permissionDeadlineMinutes.takeIf { it > 0 } ?: ""}"></label></fieldset><fieldset><legend>Remote sessions</legend><p>A remote session runs on a member's own device, in a directory they chose. With no turn, message or attached client for this long, it pauses: its host drains the turn, checkpoints and exits, and the next message wakes it on that device. Pausing never deletes anything.</p><label>Pause idle remote sessions after, in minutes (0: never) <input type="number" name="remoteIdleTimeoutMinutes" min="0" max="${CloudIdleRules.MAX_TIMEOUT_MINUTES}" value="${settings.remoteIdleTimeoutMinutes}" required></label></fieldset><button>Save settings</button></form>"""), ContentType.Text.Html)
+        call.respondText(call.page("Cloud sessions", sections + """<details class='help'><summary>How this works</summary><p>Paused sessions keep their workspace volume until the retention below expires; then the workspace claim and its provider volume are deleted and the session is terminated. Inactivity only pauses a session; it never deletes it. A change applies to sessions paused afterwards.</p></details><form method="post">${csrf(actor)}<label>Paused retention in days (empty keeps paused workspaces indefinitely) <input type="number" name="pausedRetentionDays" min="1" max="3650" value="${settings.pausedRetentionDays ?: ""}"></label><label>Failed workspace retention in days <input type="number" name="failedWorkspaceRetentionDays" min="0" max="365" value="${settings.failedWorkspaceRetentionDays}" required></label><label>Running sessions per member <input type="number" name="maxRunning" min="1" max="100" value="${settings.maxRunningSessionsPerMember}" required></label><label>Retained sessions per member <input type="number" name="maxRetained" min="1" max="1000" value="${settings.maxRetainedSessionsPerMember}" required></label><label>Transcript retention in days (empty keeps transcripts indefinitely; counted from each event, independently of pods and workspaces) <input type="number" name="transcriptRetentionDays" min="1" max="3650" value="${settings.transcriptRetentionDays ?: ""}"></label><fieldset><legend>Transfers</legend><p>Administrators can transfer any session. A session changes owner only once it is paused: a running session drains and checkpoints first, its pod is deleted, and the next pod runs with the recipient's credentials.</p><label>Members may offer their own sessions <select name="memberTransfers">${option("offer", "Yes, the recipient accepts", settings.memberTransfers.wire)}${option("disabled", "No, administrators only", settings.memberTransfers.wire)}</select></label><label>Days to accept an offer <input type="number" name="transferOfferDays" min="1" max="30" value="${settings.transferOfferDays}" required></label><label>Unconsumed messages at the change of owner <select name="transferPendingInputs">${option("cancel", "Cancel them", settings.transferPendingInputs.wire)}${option("keep", "Keep them for the recipient's agent", settings.transferPendingInputs.wire)}</select></label></fieldset><fieldset><legend>Permission requests</legend><p>A cloud agent waits for a person when a tool use matches an <code>ask</code> permission rule or when it asks the user a question. Without a deadline it waits until someone answers, interrupts the turn or pauses the session. With one, the runner denies a request nobody answered in time and the agent reads why. A change applies to sessions started or resumed afterwards.</p><label>Deny unanswered requests after, in minutes (empty or 0: no deadline) <input type="number" name="permissionDeadlineMinutes" min="0" max="${CloudConversationRules.MAX_PERMISSION_DEADLINE_MINUTES}" value="${settings.permissionDeadlineMinutes.takeIf { it > 0 } ?: ""}"></label></fieldset><fieldset><legend>Remote sessions</legend><p>A remote session runs on a member's own device, in a directory they chose. With no turn, message or attached client for this long, it pauses: its host drains the turn, checkpoints and exits, and the next message wakes it on that device. Pausing never deletes anything.</p><label>Pause idle remote sessions after, in minutes (0: never) <input type="number" name="remoteIdleTimeoutMinutes" min="0" max="${CloudIdleRules.MAX_TIMEOUT_MINUTES}" value="${settings.remoteIdleTimeoutMinutes}" required></label></fieldset><fieldset><legend>Background work</legend><p>A session that is idle is paused after its idle timeout, which stops its pod. Background work of its agent (subagents, background commands, monitors and scheduled wake-ups) keeps it running, but only for this long after that work started, so work that never ends cannot keep a session running forever; the idle timeout then runs as usual.</p><label>Background work keeps a session running for at most, in minutes (0: never) <input type="number" name="backgroundWorkMaxMinutes" min="0" max="${CloudIdleRules.MAX_TIMEOUT_MINUTES}" value="${settings.backgroundWorkMaxMinutes}" required></label></fieldset><fieldset><legend>Files</legend><p>Members can send images, PDFs and text files to their running sessions. Files wait in the team's artifact bucket until the session's host receives them, a day at most, and need that bucket set up and tested on the Artifacts page.</p><label>Largest file, in MiB <input type="number" name="fileMaxMebibytes" min="1" max="${CloudFileRules.MAX_MEBIBYTES}" value="${settings.fileMaxMebibytes}" required></label><label>Largest total per message, in MiB <input type="number" name="messageFileMebibytes" min="1" max="${CloudFileRules.MAX_MEBIBYTES}" value="${settings.messageFileMebibytes}" required></label></fieldset><button>Save settings</button></form>"""), ContentType.Text.Html)
     }
     get("/dashboard/assets/profile-editor.js") {
         call.principal.requireAdmin()
@@ -325,7 +336,10 @@ internal fun Route.cloudRoutes(sessions: CloudSessionService, admin: CloudAdmini
             input["transferPendingInputs"]?.let { TransferPendingInputs.parse(it) ?: throw TeamFailure("invalid_cloud_settings", 400, "Choose what happens to unconsumed messages.") } ?: current.transferPendingInputs,
             // Empty means no deadline; a form from before the deadline existed keeps the stored one.
             input["permissionDeadlineMinutes"]?.let { if (it.isBlank()) 0 else it.toIntOrNull() ?: -1 } ?: current.permissionDeadlineMinutes,
-            input["remoteIdleTimeoutMinutes"]?.let { it.toIntOrNull() ?: -1 } ?: current.remoteIdleTimeoutMinutes))
+            input["remoteIdleTimeoutMinutes"]?.let { it.toIntOrNull() ?: -1 } ?: current.remoteIdleTimeoutMinutes,
+            input["fileMaxMebibytes"]?.let { it.toIntOrNull() ?: -1 } ?: current.fileMaxMebibytes,
+            input["messageFileMebibytes"]?.let { it.toIntOrNull() ?: -1 } ?: current.messageFileMebibytes,
+            input["backgroundWorkMaxMinutes"]?.let { it.toIntOrNull() ?: -1 } ?: current.backgroundWorkMaxMinutes))
         call.respondRedirect("/dashboard/cloud")
     }
 }

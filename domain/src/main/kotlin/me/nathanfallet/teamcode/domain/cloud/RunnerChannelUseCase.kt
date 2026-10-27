@@ -31,11 +31,15 @@ class RunnerChannelUseCase(
         return instruction(session)
     }
 
-    /** Liveness plus readiness. `ready = true` ends preparation or restoration: the session becomes `ready`. */
-    suspend fun heartbeat(teamId: String, sessionId: String, epoch: Int, ready: Boolean): RunnerInstruction {
+    /**
+     * Liveness plus readiness. `ready = true` ends preparation or restoration: the session becomes `ready`.
+     * [background]: the agent has background work (subagents, background commands, monitors, scheduled wake-ups), which
+     * keeps the session from the idle pause for a bounded time ([CloudIdleRules.backgroundActivity]).
+     */
+    suspend fun heartbeat(teamId: String, sessionId: String, epoch: Int, ready: Boolean, background: Boolean = false): RunnerInstruction {
         val current = store.find(teamId, sessionId) ?: throw fenced()
         val execution = live(current, epoch)
-        if (execution.state != ExecutionState.RUNNING || !store.heartbeat(sessionId, epoch, ready)) throw fenced()
+        if (execution.state != ExecutionState.RUNNING || !store.heartbeat(sessionId, epoch, ready, background)) throw fenced()
         val session = if (ready && current.desiredState == DesiredState.RUNNING && (current.state == PREPARING || current.state == RESUMING) && !current.preparationFailed) {
             transition(teamId, sessionId) { fresh ->
                 live(fresh, epoch)
@@ -86,10 +90,17 @@ class RunnerChannelUseCase(
         val unreadable = missing.filter { it in resolved.unavailable }
         if (unreadable.isNotEmpty()) fail(teamId, sessionId, epoch, "Required environment variables of the owner are unavailable right now: ${unreadable.joinToString(", ")}.", retryable = true)
         if (missing.isNotEmpty()) fail(teamId, sessionId, epoch, "Required environment variables are not assigned to the owner: ${missing.joinToString(", ")}.")
-        val access = github.userAccess(teamId, owner.id)
+        if (session.githubAccess == CloudGitHubAccess.NONE && spec.requireGitHub)
+            fail(teamId, sessionId, epoch, "GitHub access is off for this session; its owner turns it on with " +
+                "teamcode cloud github ${session.id} --access owner.", retryable = true)
+        val access = if (session.githubAccess == CloudGitHubAccess.NONE) GitHubAccess.NotLinked else github.userAccess(teamId, owner.id)
         if (spec.requireGitHub && access !is GitHubAccess.Linked)
             fail(teamId, sessionId, epoch, if (access is GitHubAccess.NotLinked) "The owner has not linked GitHub, which this profile requires." else "The owner's GitHub access is unavailable right now.", retryable = true)
-        return PreparedEnvironment(spec, CloudEnvironmentRules.gitIdentity(owner.username, access, spec), resolved, access)
+        // Content another member left on the workspace (a transfer) must not run with this owner's credentials unchecked.
+        val executions = store.executions(teamId, sessionId)
+        val untrusted = CloudEnvironmentRules.untrustedWorkspace(owner.id, session.createdBy.effectiveMemberId, epoch, executions,
+            truncated = executions.size >= EXECUTION_HISTORY_LIMIT)
+        return PreparedEnvironment(spec, CloudEnvironmentRules.gitIdentity(owner.username, access, spec), resolved, access, untrusted)
     }
 
     /**
@@ -104,7 +115,7 @@ class RunnerChannelUseCase(
             if (failure != null) {
                 val spec = current.environment
                 val count = when (failure.step) {
-                    PreparationStep.CLONE, PreparationStep.CHECKOUT, PreparationStep.FETCH -> spec.repositories.size
+                    PreparationStep.CLONE, PreparationStep.CHECKOUT, PreparationStep.FETCH, PreparationStep.WORKSPACE -> spec.repositories.size
                     PreparationStep.SETUP_CREATE -> spec.setup.create.size
                     PreparationStep.SETUP_START -> spec.setup.start.size
                     else -> 0
@@ -150,5 +161,7 @@ class RunnerChannelUseCase(
         const val DRAIN_MILLIS = 10 * 60_000L
         /** Steps that may succeed on another attempt (network, GitHub). Setup commands and paths fail the same way again. */
         private val RETRYABLE_STEPS = setOf(PreparationStep.CLONE, PreparationStep.FETCH, PreparationStep.RUNNER)
+        /** [CloudSessionStore.executions] returns at most this many executions, newest first. */
+        const val EXECUTION_HISTORY_LIMIT = 100
     }
 }

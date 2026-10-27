@@ -7,6 +7,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.testing.testApplication
+import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.serialization.json.*
@@ -53,7 +54,7 @@ class CloudConversationRoutesTest {
         override suspend fun claimDue(owner: String, leaseMillis: Long, limit: Int) = emptyList<CloudSession>()
         override suspend fun release(sessionId: String, owner: String, reconcileAt: Long?) = Unit
         override suspend fun startExecution(expected: CloudSession, next: CloudSession, execution: CloudExecution, leaseOwner: String, memberRunningLimit: Int) = StartOutcome.Conflict
-        override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean) = true
+        override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean, background: Boolean) = true
         override suspend fun liveObjects(clusterId: String) = LiveObjects(emptySet(), emptySet())
         override suspend fun namespaces(clusterId: String) = emptySet<String>()
         override suspend fun recordGarbageCollection(clusterId: String, orphanedVolumes: Int) = Unit
@@ -89,6 +90,8 @@ class CloudConversationRoutesTest {
         val requests = mutableMapOf<String, PermissionRequestRecord>()
         /** The session as the store's lock would read it (the sessions fake of the test). */
         var sessionOf: (String) -> CloudSession? = { null }
+        /** The files a message carries, as the store's lock would find them (the MySQL checks are covered in infrastructure). */
+        var bind: (NewInput) -> List<CloudFileRef> = { emptyList() }
         override suspend fun insertInput(new: NewInput, pendingLimit: Int): InputOutcome {
             val input = new.input
             inputs.values.find { it.sessionId == input.sessionId && it.authorId == input.authorId && it.clientKey != null && it.clientKey == input.clientKey }?.let {
@@ -103,8 +106,9 @@ class CloudConversationRoutesTest {
                 if (inputs.values.any { it.sessionId == input.sessionId && it.kind == CloudInputKind.PERMISSION && !it.status.final && "\"requestId\":\"$requestId\"" in it.text.orEmpty() })
                     throw TeamFailure("permission_request_answered", 409, "pending")
             }
-            inputs[input.id] = input
-            return InputOutcome.Accepted(input)
+            val stored = input.copy(files = bind(new))
+            inputs[input.id] = stored
+            return InputOutcome.Accepted(stored)
         }
         override suspend fun input(sessionId: String, id: String) = inputs[id]?.takeIf { it.sessionId == sessionId }
         override suspend fun inputs(sessionId: String, beforeId: String?, limit: Int) = CloudInputPage(inputs.values.filter { it.sessionId == sessionId }.reversed().take(limit), null)
@@ -116,7 +120,7 @@ class CloudConversationRoutesTest {
         override suspend fun acknowledge(sessionId: String, epoch: Int, acks: List<RunnerInputAck>) = acks.mapNotNull { ack ->
             val input = inputs[ack.id]?.takeIf { it.status == CloudInputStatus.DELIVERED && it.deliveredEpoch == epoch } ?: return@mapNotNull null
             val seq = append(sessionId, 0, CloudEventType.USER_MESSAGE, buildJsonObject { put("text", CloudConversationRules.bound(input.text.orEmpty())) }.toString())
-            input.copy(status = if (ack.consumed) CloudInputStatus.CONSUMED else CloudInputStatus.REJECTED, eventSeq = seq).also { inputs[it.id] = it }
+            input.copy(status = if (ack.consumed) CloudInputStatus.CONSUMED else CloudInputStatus.REJECTED, reason = ack.reason, eventSeq = seq).also { inputs[it.id] = it }
         }
         override suspend fun cancelEnded(limit: Int) = 0
         override suspend fun attach(attachment: CloudAttachment, expectedOwnerId: String) = attachment.also { attachments[it.id] = it }
@@ -160,7 +164,11 @@ class CloudConversationRoutesTest {
         override suspend fun deletePod(clusterId: String, namespace: String, name: String, force: Boolean) = Unit
         override suspend fun managed(clusterId: String, namespace: String) = ManagedObjects(emptyList(), emptyList())
         override suspend fun reviewToken(clusterId: String, token: String, audience: String) =
-            if (token == "projected-pod-token-1") TokenIdentity("teamcode", "default", "tc-s1-e1", "uid-1") else null
+            when (token) {
+                "projected-pod-token-1" -> TokenIdentity("teamcode", "default", "tc-s1-e1", "uid-1")
+                "projected-pod-token-2" -> TokenIdentity("teamcode", "default", "tc-s2-e1", "uid-2")
+                else -> null
+            }
     }
 
     /** A real server: the test engine buffers a streamed response until it completes, which an endless stream never does. */
@@ -168,10 +176,10 @@ class CloudConversationRoutesTest {
         val store = Sessions(listOf(admin, colleague, other))
         val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
         val access = CloudAccessService(conversations, store)
-        val service = CloudConversationService(conversations, store, access, sleep = { delay(20) })
+        val service = CloudConversationService(conversations, store, access, { _, _ -> false }, sleep = { delay(20) })
         val sessions = CloudSessionService(store, access = access, initialMessages = service)
         val conversation = CloudConversation(service, access,
-            RunnerConversationUseCase(store, conversations, sleep = { delay(20) }))
+            RunnerConversationUseCase(store, conversations, { _, _ -> false }, sleep = { delay(20) }, githubLogin = { _, member -> "other-gh".takeIf { member == other.id } }))
         val server = embeddedServer(io.ktor.server.cio.CIO, port = 0, host = "127.0.0.1") {
             configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(object : CloudAdminStore {
                 override suspend fun clusters(actor: Principal) = emptyList<CloudCluster>()
@@ -194,7 +202,7 @@ class CloudConversationRoutesTest {
             store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
 
             val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
-            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1", "cloud.permissions.v1").all { it in features })
+            assertTrue(listOf("cloud.transcript.v1", "cloud.messages.v1", "cloud.attach.v1", "cloud.access.v1", "cloud.sessions.initial-message.v1", "cloud.permissions.v1", "cloud.transcript.live.v1", "cloud.sessions.waiting.v1").all { it in features })
 
             // An initial message of the full 32,000 characters fits the creation body and is queued (replay: CloudIdlePersistenceTest).
             val longest = "é".repeat(CloudConversationRules.MAX_MESSAGE_CHARS)
@@ -235,8 +243,13 @@ class CloudConversationRoutesTest {
             val runner = sdk("projected-pod-token-1")
             val member = sdk("colleague")
             try {
-                assertEquals(RunnerAgentView("claude", null, "opus", null, "none", permissionRelay = true), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)),
-                    "This server takes permission requests, so the runner relays them, without a deadline by default")
+                assertEquals(RunnerAgentView("claude", null, "opus", null, "none", permissionRelay = true, liveText = true, backgroundTasks = true, owner = RunnerOwnerView("colleague")), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)),
+                    "This server takes permission requests and live text deltas, so the runner relays them, without a deadline by default; the agent is told who it runs for")
+                // After a transfer the next execution runs for the recipient, with their linked GitHub login (never an email).
+                val owned = store.sessions.getValue("s1")
+                store.sessions["s1"] = owned.copy(ownerId = other.id)
+                assertEquals(RunnerOwnerView("other", "other-gh"), runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)).owner)
+                store.sessions["s1"] = owned
                 store.settings = CloudSettings(permissionDeadlineMinutes = 15)
                 assertEquals(15, runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)).permissionDeadlineMinutes, "The team's deadline reaches the runner")
                 store.settings = CloudSettings()
@@ -298,6 +311,14 @@ class CloudConversationRoutesTest {
                 assertEquals(3, runner.runnerEvents(RunnerEventsRequest("default", "s1", 1, events)).acceptedThrough)
                 assertEquals(3, runner.runnerEvents(RunnerEventsRequest("default", "s1", 1, events)).acceptedThrough, "A retried batch is idempotent")
                 assertEquals(CloudSessionState.ACTIVE, store.sessions.getValue("s1").state, "A started turn makes the session active")
+                // A session waiting for a person says so in its view, in the list as in a read; a wait of an older execution does not show.
+                assertNull(member.cloudSession("s1").waiting)
+                store.sessions["s1"] = store.sessions.getValue("s1").copy(humanWait = CloudHumanWait(CloudHumanWait.Reason.QUESTION, "req-1", since = 7, eventSeq = 9, epoch = 1))
+                assertEquals(CloudWaitingView("question", "req-1", since = 7, eventSeq = 9), member.cloudSession("s1").waiting)
+                assertEquals(CloudWaitingView("question", "req-1", since = 7, eventSeq = 9), member.cloudSessions().sessions.single { it.id == "s1" }.waiting)
+                store.sessions["s1"] = store.sessions.getValue("s1").copy(humanWait = CloudHumanWait(CloudHumanWait.Reason.PERMISSION, null, since = 7, eventSeq = 9, epoch = 0))
+                assertNull(member.cloudSession("s1").waiting)
+                store.sessions["s1"] = store.sessions.getValue("s1").copy(humanWait = null)
                 assertEquals(409, assertFailsWith<TeamCodeException> { runner.runnerEvents(RunnerEventsRequest("default", "s1", 2, events)) }.statusCode)
                 assertEquals(400, assertFailsWith<TeamCodeException> { runner.runnerEvents(RunnerEventsRequest("default", "s1", 1, listOf(RunnerEventView(4, "input", JsonObject(emptyMap()))))) }.statusCode)
 
@@ -362,7 +383,7 @@ class CloudConversationRoutesTest {
                 override suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) = error("unused")
                 override suspend fun settings(actor: Principal) = CloudSettings()
                 override suspend fun saveSettings(actor: Principal, settings: CloudSettings) = settings
-            }, cluster), cloudConversation = CloudConversation(CloudConversationService(conversations, store, access), access, RunnerConversationUseCase(store, conversations)),
+            }, cluster), cloudConversation = CloudConversation(CloudConversationService(conversations, store, access, { _, _ -> false }), access, RunnerConversationUseCase(store, conversations, { _, _ -> false })),
                 publicOrigin = "http://localhost")
         }
         val created = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Run", "profile-id", null, null, null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
@@ -386,5 +407,362 @@ class CloudConversationRoutesTest {
             assertEquals("attachment_expired", assertFailsWith<TeamCodeException> { reviewer.renewCloudAttachment(created.id, lease.id) }.code)
             assertEquals(404, assertFailsWith<TeamCodeException> { reviewer.pauseCloudSession(created.id) }.statusCode, "Policy rules never widen lifecycle routes")
         } finally { reviewer.close() }
+    }
+
+    /** The team's bucket in memory. */
+    private class Bucket : me.nathanfallet.teamcode.domain.artifacts.ArtifactObjectStore {
+        val objects = linkedMapOf<String, ByteArray>()
+        override suspend fun put(connection: me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection, key: String, bytes: ByteArray, contentType: String) { objects[key] = bytes }
+        override suspend fun get(connection: me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection, key: String, range: LongRange?, maxBytes: Int) =
+            objects[key]?.let { me.nathanfallet.teamcode.domain.artifacts.StoredObject(it, it.size.toLong(), null, null) }
+        override suspend fun head(connection: me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection, key: String) =
+            objects[key]?.let { me.nathanfallet.teamcode.domain.artifacts.ObjectHead(it.size.toLong(), null) }
+        override suspend fun list(connection: me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection, prefix: String, continuationToken: String?, maxKeys: Int) =
+            me.nathanfallet.teamcode.domain.artifacts.ObjectListing(objects.filterKeys { it.startsWith(prefix) }.map { me.nathanfallet.teamcode.domain.artifacts.ListedObject(it.key, it.value.size.toLong()) }, null)
+        override suspend fun delete(connection: me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection, keys: List<String>): List<String> { keys.forEach(objects::remove); return emptyList() }
+    }
+
+    /** The file rows in memory, with the store's key replay and unsent bound (quotas and binding against MySQL: CloudFilePersistenceTest). */
+    private class Files(val conversations: Conversations) : CloudFileStore {
+        val files = linkedMapOf<String, CloudFile>()
+        override suspend fun now() = conversations.clock
+        override suspend fun begin(file: CloudFile, expectedOwnerId: String, announcedBytes: Long): CloudFileBegin {
+            files.values.find { it.sessionId == file.sessionId && it.authorId == file.authorId && file.clientKey != null && it.clientKey == file.clientKey }?.let { return CloudFileBegin.Existing(it) }
+            if (files.values.count { it.sessionId == file.sessionId && it.inputId == null && it.deletingSince == null } >= CloudFileRules.MAX_UNSENT_FILES_PER_SESSION) throw CloudFileRules.quota("full")
+            files[file.id] = file
+            return CloudFileBegin.Started
+        }
+        override suspend fun complete(id: String, name: String, contentType: String, size: Long, sha256: String, requestDigest: String?) =
+            files.getValue(id).copy(name = name, contentType = contentType, size = size, sha256 = sha256, requestDigest = requestDigest, completedAt = now()).also { files[id] = it }
+        override suspend fun abandon(id: String) { files[id]?.let { files[id] = it.copy(deletingSince = now()) } }
+        override suspend fun deliverable(sessionId: String, epoch: Int, id: String) = files[id]?.takeIf { file ->
+            val input = file.inputId?.let { conversations.inputs[it] }
+            file.sessionId == sessionId && file.completedAt != null && file.deletingSince == null && input?.status == CloudInputStatus.DELIVERED && input.deliveredEpoch == epoch
+        }
+        override suspend fun expire(limit: Int) = 0
+        override suspend fun deleting(limit: Int) = files.values.filter { it.deletingSince != null }
+        override suspend fun forget(ids: List<String>) { ids.forEach(files::remove) }
+        override suspend fun purgeUsage(day: Long) = 0
+    }
+
+    private val connection = me.nathanfallet.teamcode.domain.artifacts.ArtifactStorageConnection("https://s3.example.test", "auto", "bucket", "prefix", true, "key", "secret",
+        me.nathanfallet.teamcode.domain.artifacts.ServerSideEncryption.NONE)
+    private val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(2_000) { it.toByte() }
+    private fun sha(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    @Test fun filesFollowMessageRightsAndReachOnlyTheirExecution() = testApplication {
+        val store = Sessions(listOf(admin, colleague, other))
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
+        val files = Files(conversations)
+        // The fake binds like the MySQL store: the author's own unsent files of the session.
+        conversations.bind = { new -> new.fileIds.map { id ->
+            val file = files.files[id]?.takeIf { it.sessionId == new.input.sessionId && it.authorId == new.input.authorId && it.inputId == null && it.completedAt != null }
+                ?: throw TeamFailure("file_unavailable", 409, "unavailable")
+            files.files[id] = file.copy(inputId = new.input.id)
+            CloudFileRef(file.id, file.name, file.size, file.contentType!!, file.sha256!!)
+        } }
+        val bucket = Bucket()
+        var configured = false
+        val storage = object : CloudFileStorage {
+            override suspend fun active(teamId: String) = connection.takeIf { configured }
+            override suspend fun any(teamId: String) = connection
+        }
+        val access = CloudAccessService(conversations, store)
+        val service = CloudConversationService(conversations, store, access, { _, _ -> false })
+        val sessions = CloudSessionService(store, access = access)
+        val fileService = CloudFileService(files, store, service, storage, bucket)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(object : CloudAdminStore {
+                override suspend fun clusters(actor: Principal) = emptyList<CloudCluster>()
+                override suspend fun saveCluster(actor: Principal, id: String?, expectedVersion: Int?, input: CloudClusterInput) = error("unused")
+                override suspend fun profiles(actor: Principal) = emptyList<CloudProfile>()
+                override suspend fun member(actor: Principal, memberId: String): Member? = null
+                override suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) = error("unused")
+                override suspend fun settings(actor: Principal) = CloudSettings()
+                override suspend fun saveSettings(actor: Principal, settings: CloudSettings) = settings
+            }, cluster), cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, cluster)),
+                cloudConversation = CloudConversation(service, access, RunnerConversationUseCase(store, conversations, { _, _ -> false }, sleep = { }), files = fileService), publicOrigin = "http://localhost")
+        }
+        val created = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Run", "profile-id", null, "opus", null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        store.sessions.clear()
+        for (id in listOf("s1", "s2")) {
+            store.sessions[id] = created.copy(id = id, currentEpoch = 1, generation = 1, state = CloudSessionState.READY)
+            store.runs[id to 1] = CloudExecution(id, 1, "tc-$id-e1", ExecutionState.RUNNING, 1)
+        }
+        val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
+        assertTrue("cloud.files.v1" in features)
+
+        suspend fun upload(token: String, bytes: ByteArray, name: String? = "photo.png", key: String? = null, session: String = "s1", onBehalf: String? = null, chunked: Boolean = false) =
+            client.post("/api/v1/cloud/sessions/$session/files") {
+                bearerAuth(token)
+                name?.let { parameter("name", it) }
+                key?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) }; onBehalf?.let { header(CloudHeaders.ON_BEHALF_OF, it) }
+                // Without a length the body is streamed, so the limit is enforced while reading.
+                if (chunked) setBody(object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
+                    override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) { channel.writeFully(bytes) }
+                }) else setBody(bytes)
+            }
+        suspend fun HttpResponse.code() = Serialization.json.parseToJsonElement(bodyAsText()).jsonObject["error"]?.jsonObject?.get("type")?.jsonPrimitive?.content
+        suspend fun HttpResponse.file() = Serialization.json.decodeFromString<CloudFileView>(bodyAsText())
+
+        // Without a tested bucket the team cannot send files, and says so.
+        val off = Serialization.json.decodeFromString<CloudFilePolicyView>(client.get("/api/v1/cloud/files/policy") { bearerAuth("colleague") }.bodyAsText())
+        assertEquals(false, off.available); assertEquals("file_storage_not_configured", off.reason)
+        val unconfigured = upload("colleague", png)
+        assertEquals(HttpStatusCode.Conflict, unconfigured.status); assertEquals("file_storage_not_configured", unconfigured.code())
+        configured = true
+        val policy = Serialization.json.decodeFromString<CloudFilePolicyView>(client.get("/api/v1/cloud/files/policy") { bearerAuth("colleague-read") }.bodyAsText())
+        assertEquals(CloudFilePolicyView(true, null, 20 * 1024 * 1024L, 25 * 1024 * 1024L, 5, CloudFileRules.ALLOWED_TYPES), policy)
+
+        // The same rights as a message: the owner, a cloud:write credential, never on behalf of someone.
+        assertEquals(HttpStatusCode.NotFound, upload("other", png).status, "Another member's session is invisible")
+        assertEquals(HttpStatusCode.Forbidden, upload("colleague-read", png).status, "cloud:read cannot upload")
+        assertEquals(HttpStatusCode.Forbidden, upload("service-colleague", png).status)
+        assertEquals("on_behalf_unsupported", upload("admin", png, onBehalf = "colleague-id").code())
+        assertEquals(HttpStatusCode.NotFound, upload("admin-write", png).status, "An administrator's key acts as its owner only")
+        assertTrue(files.files.isEmpty() && bucket.objects.isEmpty(), "A refused upload stores nothing")
+
+        // The type comes from the bytes, the name is cleaned and given the type's extension.
+        val stored = upload("colleague", png, name = "../../etc/shadow.exe")
+        assertEquals(HttpStatusCode.Created, stored.status, stored.bodyAsText())
+        val photo = stored.file()
+        assertEquals("shadow.exe.png", photo.name); assertEquals("image/png", photo.contentType); assertEquals(png.size.toLong(), photo.size); assertEquals(sha(png), photo.sha256)
+        assertEquals(listOf("prefix/session-files/default/s1/${photo.id}/0"), bucket.objects.keys.toList())
+        val text = upload("colleague", "# Notes\n\nÉté ✓\n".encodeToByteArray(), name = "C:\\Users\\me\\notes.md").file()
+        assertEquals("notes.md", text.name); assertEquals("text/markdown", text.contentType)
+        val exe = upload("colleague", byteArrayOf(0x4D, 0x5A, 0x00, 0x01, 0x02), name = "tool.png")
+        assertEquals(HttpStatusCode.UnsupportedMediaType, exe.status); assertEquals("file_type_not_allowed", exe.code())
+        assertEquals("file_type_not_allowed", upload("colleague", byteArrayOf(0x61, 0xC3.toByte(), 0x28), name = "bad.txt").code(), "Not UTF-8")
+        assertEquals("empty_file", upload("colleague", ByteArray(0), name = "empty.txt").code())
+
+        // Larger than the team allows: refused from the announced length, and while streaming without one.
+        store.settings = CloudSettings(fileMaxMebibytes = 1)
+        val big = ByteArray(1024 * 1024 + 1) { 'a'.code.toByte() }
+        val announced = upload("colleague", big, name = "big.txt")
+        assertEquals(HttpStatusCode.PayloadTooLarge, announced.status); assertEquals("file_too_large", announced.code())
+        val streamed = upload("colleague", big, name = "big.txt", chunked = true)
+        assertEquals(HttpStatusCode.PayloadTooLarge, streamed.status); assertEquals("file_too_large", streamed.code())
+        assertTrue(files.files.values.filter { it.name == "big.txt" }.all { it.deletingSince != null }, "The parts of a refused upload are left to the sweep")
+        store.settings = CloudSettings()
+        fileService.sweep()
+        assertTrue(bucket.objects.keys.none { key -> files.files.values.none { key.contains(it.id) } }, "The sweep removed the refused parts")
+
+        // An idempotent retry returns the first file; other bytes under the same key are a conflict.
+        val first = upload("colleague", png, name = "retry.png", key = "file-1")
+        val again = upload("colleague", png, name = "retry.png", key = "file-1")
+        assertEquals(HttpStatusCode.OK, again.status); assertEquals("true", again.headers[CloudHeaders.IDEMPOTENCY_REPLAYED]); assertEquals(first.file().id, again.file().id)
+        assertEquals(HttpStatusCode.UnprocessableEntity, upload("colleague", png + byteArrayOf(1), name = "retry.png", key = "file-1").status)
+        files.files.remove(first.file().id)
+
+        // The upload quota answers 429 like a full message queue.
+        repeat(CloudFileRules.MAX_UNSENT_FILES_PER_SESSION) { upload("colleague", png, name = "fill-$it.png", session = "s2") }
+        val full = upload("colleague", png, session = "s2")
+        assertEquals(HttpStatusCode.TooManyRequests, full.status); assertEquals("upload_quota", full.code())
+
+        suspend fun send(body: String) = client.post("/api/v1/cloud/sessions/s1/messages") { bearerAuth("colleague"); contentType(ContentType.Application.Json); setBody(body) }
+        assertEquals("invalid_files", send("""{"text":"six","fileIds":["a","b","c","d","e","f"]}""").code())
+        assertEquals("invalid_files", send("""{"text":"twice","fileIds":["${photo.id}","${photo.id}"]}""").code())
+        assertEquals("file_unavailable", send("""{"text":"","fileIds":["${files.files.values.first { it.sessionId == "s2" }.id}"]}""").code(), "Another session's file")
+        val withPhoto = Serialization.json.decodeFromString<CloudInputView>(send("""{"text":"","fileIds":["${photo.id}"]}""").bodyAsText())
+        assertEquals("queued", withPhoto.status, "A message with files may have no text")
+
+        // A runner that does not download files never hands the agent the text alone: the message is rejected for it.
+        val runner = TeamCodeClient("http://localhost", { "projected-pod-token-1" }) { config -> createClient { config(this) } }
+        val member = TeamCodeClient("http://localhost", { "colleague" }) { config -> createClient { config(this) } }
+        try {
+            assertEquals(emptyList(), runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs)
+            val rejected = member.cloudInput("s1", withPhoto.id)
+            assertEquals("rejected", rejected.status); assertEquals(CloudFiles.UNSUPPORTED, rejected.reason)
+
+            val withText = Serialization.json.decodeFromString<CloudInputView>(send("""{"text":"Read it","fileIds":["${text.id}"]}""").bodyAsText())
+            assertEquals("file_unavailable", send("""{"text":"again","fileIds":["${text.id}"]}""").code(), "A file is carried by one message")
+            suspend fun download(id: String, token: String = "projected-pod-token-1", session: String = "s1", epoch: Int = 1) =
+                client.get("/api/v1/cloud/runner/files/$id") { bearerAuth(token); parameter("teamId", "default"); parameter("sessionId", session); parameter("epoch", epoch) }
+            assertEquals(HttpStatusCode.NotFound, download(text.id).status, "Nothing to download before the message is delivered")
+            val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0, acceptsFiles = true)).inputs.single()
+            assertEquals(withText.id, delivered.id)
+            assertEquals(listOf(RunnerFileView(text.id, "notes.md", text.size, "text/markdown", text.sha256)), delivered.files)
+            val bytes = download(text.id)
+            assertEquals(HttpStatusCode.OK, bytes.status)
+            assertEquals("# Notes\n\nÉté ✓\n", bytes.bodyAsText()); assertEquals(text.sha256, bytes.headers["X-TeamCode-Sha256"]); assertEquals("attachment", bytes.headers[HttpHeaders.ContentDisposition])
+            assertEquals(HttpStatusCode.Unauthorized, download(text.id, token = "nope").status)
+            assertEquals(HttpStatusCode.NotFound, download(text.id, token = "projected-pod-token-2", session = "s2").status, "Another session's runner cannot download it")
+            assertEquals(HttpStatusCode.NotFound, download(photo.id).status, "A file of a rejected message is gone")
+            // An execution that is no longer current is fenced, whatever file it asks for.
+            store.sessions["s1"] = store.sessions.getValue("s1").copy(currentEpoch = 2)
+            store.runs["s1" to 2] = CloudExecution("s1", 2, "tc-s1-e2", ExecutionState.RUNNING, 1)
+            val fenced = download(text.id)
+            assertEquals(HttpStatusCode.Conflict, fenced.status); assertEquals("execution_fenced", fenced.code())
+            store.sessions["s1"] = store.sessions.getValue("s1").copy(currentEpoch = 1)
+            // Once the host acknowledges the message, its files are released (here by the fake store's acknowledgement: CloudFilePersistenceTest).
+        } finally { runner.close(); member.close() }
+    }
+
+    /**
+     * An agent that holds its owner's GitHub token follows the owner's instructions only (audit M2): a cloud
+     * administrator or a team-scope `message` grant cannot send it a message or answer its permission requests
+     * while the owner has linked GitHub, unless the owner shares the session. Interrupts stay open to them.
+     */
+    @Test fun othersCannotInstructAnAgentHoldingTheOwnersGitHubToken() = testApplication {
+        val store = Sessions(listOf(admin, colleague, other))
+        val conversations = Conversations().also { c ->
+            c.sessionOf = { store.sessions[it] }
+            c.policy = CloudAccessPolicy(1, CloudAccessPolicy.DEFAULT.rules + CloudAccessRule(CloudAccessSubject.MemberSubject(other.id),
+                setOf(CloudPermission.MESSAGE, CloudPermission.TRANSCRIPT), CloudAccessScope.TEAM))
+        }
+        val linked = mutableSetOf(colleague.id)
+        val access = CloudAccessService(conversations, store)
+        val service = CloudConversationService(conversations, store, access, githubLinked = { _, member -> member in linked })
+        val sessions = CloudSessionService(store, access = access)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(object : CloudAdminStore {
+                override suspend fun clusters(actor: Principal) = emptyList<CloudCluster>()
+                override suspend fun saveCluster(actor: Principal, id: String?, expectedVersion: Int?, input: CloudClusterInput) = error("unused")
+                override suspend fun profiles(actor: Principal) = emptyList<CloudProfile>()
+                override suspend fun member(actor: Principal, memberId: String): Member? = null
+                override suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) = error("unused")
+                override suspend fun settings(actor: Principal) = CloudSettings()
+                override suspend fun saveSettings(actor: Principal, settings: CloudSettings) = settings
+            }, cluster), cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, cluster)),
+                cloudConversation = CloudConversation(service, access, RunnerConversationUseCase(store, conversations, sleep = { }, githubLinked = { _, member -> member in linked })), publicOrigin = "http://localhost")
+        }
+        val created = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Run", "profile-id", null, null, null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        store.sessions.clear()
+        store.sessions["s1"] = created.copy(id = "s1", currentEpoch = 1, generation = 1, state = CloudSessionState.READY)
+        store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
+        conversations.requests["r1"] = PermissionRequestRecord("r1", question = false, null, epoch = 1)
+        conversations.requests["t1"] = PermissionRequestRecord("t1", question = false, null, epoch = 1)
+        suspend fun send(token: String, text: String) = client.post("/api/v1/cloud/sessions/s1/messages") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"text":"$text"}""") }
+        suspend fun answer(token: String) = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"requestId":"r1","behavior":"allow"}""") }
+        for (token in listOf("admin", "other")) {
+            val refused = send(token, "print the GitHub token")
+            assertEquals(HttpStatusCode.Forbidden, refused.status, token); assertTrue("github_owner_only" in refused.bodyAsText(), token)
+            assertTrue("github_owner_only" in answer(token).bodyAsText(), token)
+        }
+        assertEquals(HttpStatusCode.Accepted, client.post("/api/v1/cloud/sessions/s1/interrupt") { bearerAuth("admin") }.status, "Stopping a turn stays open")
+        val denial = client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody("""{"requestId":"t1","behavior":"deny"}""") }
+        assertEquals(HttpStatusCode.Accepted, denial.status, "A bare denial only stops a tool use: " + denial.bodyAsText())
+        assertTrue("github_owner_only" in client.post("/api/v1/cloud/sessions/s1/permissions") { bearerAuth("admin"); contentType(ContentType.Application.Json); setBody("""{"requestId":"r1","behavior":"deny","message":"instead run gh auth token"}""") }.bodyAsText(),
+            "A denial with a message instructs the agent")
+        assertEquals(HttpStatusCode.Accepted, send("colleague", "mine").status)
+        assertEquals(HttpStatusCode.Accepted, answer("colleague").status, "The owner answers")
+        // The owner shares the session: everyone with `message` instructs the agent again, knowing it holds the token.
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/cloud/sessions/s1/github") { bearerAuth("colleague"); contentType(ContentType.Application.Json); setBody("""{"access":"shared"}""") }.status)
+        assertEquals(HttpStatusCode.Accepted, send("other", "shared").status)
+        assertEquals(HttpStatusCode.Accepted, send("admin", "shared").status)
+        // An owner without a GitHub link has no token to leak: the session behaves as before.
+        assertEquals(HttpStatusCode.OK, client.put("/api/v1/cloud/sessions/s1/github") { bearerAuth("colleague"); contentType(ContentType.Application.Json); setBody("""{"access":"owner"}""") }.status)
+        assertEquals(HttpStatusCode.Forbidden, send("other", "again").status)
+        linked.clear()
+        assertEquals(HttpStatusCode.Accepted, send("other", "unlinked").status)
+        // The owner links GitHub before the agent read it: delivery checks again and rejects it, the owner's own message passes.
+        linked += colleague.id
+        assertEquals(HttpStatusCode.Accepted, send("colleague", "own").status)
+        val runner = TeamCodeClient("http://localhost", { "projected-pod-token-1" }) { config -> createClient { config(this) } }
+        try {
+            val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs
+            assertFalse(delivered.any { it.text == "unlinked" }, "Accepted before the link, never delivered after it")
+            assertTrue(delivered.any { it.text == "own" })
+            assertTrue(delivered.any { it.text == CloudConversationRules.bareDenialText("t1") }, "A non-owner's bare denial reaches the agent")
+            assertEquals("github_owner_only", conversations.inputs.values.single { it.text == "unlinked" }.reason)
+        } finally { runner.close() }
+    }
+
+    @Test fun aServerWithoutFilesBehavesAsBefore() = testApplication {
+        val store = Sessions(listOf(admin, colleague, other))
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
+        val access = CloudAccessService(conversations, store)
+        val service = CloudConversationService(conversations, store, access, { _, _ -> false })
+        val sessions = CloudSessionService(store, access = access)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(object : CloudAdminStore {
+                override suspend fun clusters(actor: Principal) = emptyList<CloudCluster>()
+                override suspend fun saveCluster(actor: Principal, id: String?, expectedVersion: Int?, input: CloudClusterInput) = error("unused")
+                override suspend fun profiles(actor: Principal) = emptyList<CloudProfile>()
+                override suspend fun member(actor: Principal, memberId: String): Member? = null
+                override suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) = error("unused")
+                override suspend fun settings(actor: Principal) = CloudSettings()
+                override suspend fun saveSettings(actor: Principal, settings: CloudSettings) = settings
+            }, cluster), cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, cluster)),
+                cloudConversation = CloudConversation(service, access, RunnerConversationUseCase(store, conversations, { _, _ -> false }, sleep = { })), publicOrigin = "http://localhost")
+        }
+        val created = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Run", "profile-id", null, "opus", null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        store.sessions.clear()
+        store.sessions["s1"] = created.copy(id = "s1", currentEpoch = 1, generation = 1, state = CloudSessionState.READY)
+        store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
+        val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
+        assertFalse("cloud.files.v1" in features); assertTrue("cloud.messages.v1" in features)
+        assertEquals(HttpStatusCode.NotFound, client.post("/api/v1/cloud/sessions/s1/files") { bearerAuth("colleague"); setBody(png) }.status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/api/v1/cloud/files/policy") { bearerAuth("colleague") }.status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/api/v1/cloud/runner/files/f1") { bearerAuth("projected-pod-token-1"); parameter("teamId", "default"); parameter("sessionId", "s1"); parameter("epoch", 1) }.status)
+        suspend fun send(body: String) = client.post("/api/v1/cloud/sessions/s1/messages") { bearerAuth("colleague"); contentType(ContentType.Application.Json); setBody(body) }
+        val named = send("""{"text":"hi","fileIds":["f1"]}""")
+        assertEquals(HttpStatusCode.BadRequest, named.status); assertTrue("files_unsupported" in named.bodyAsText(), "Files are never dropped silently")
+        assertEquals(HttpStatusCode.BadRequest, send("""{"text":""}""").status, "An empty text still needs files")
+        assertEquals(HttpStatusCode.Accepted, send("""{"text":"hi"}""").status)
+        // A runner that announces file support on this server still gets plain messages, exactly as before.
+        val runner = TeamCodeClient("http://localhost", { "projected-pod-token-1" }) { config -> createClient { config(this) } }
+        try {
+            val delivered = runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0, acceptsFiles = true)).inputs.single()
+            assertEquals(RunnerInputView(delivered.id, "message", "hi", 1), delivered)
+        } finally { runner.close() }
+    }
+    /**
+     * `cloud.sessions.background-tasks.v1`: the runner's `tasks` events are stored, and a member who may message a running
+     * session stops one of its tasks. The stop is an input like an interrupt (author kept, never wakes a session), delivered
+     * only to a runner that announces it can stop a task: an older one gets it rejected, never read as a message.
+     */
+    @Test fun aMemberStopsABackgroundTaskThroughARunnerThatTakesIt() = testApplication {
+        val store = Sessions(listOf(admin, colleague, other))
+        val conversations = Conversations().also { c -> c.sessionOf = { store.sessions[it] } }
+        val access = CloudAccessService(conversations, store)
+        val service = CloudConversationService(conversations, store, access, { _, _ -> false })
+        val sessions = CloudSessionService(store, access = access)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(object : CloudAdminStore {
+                override suspend fun clusters(actor: Principal) = emptyList<CloudCluster>()
+                override suspend fun saveCluster(actor: Principal, id: String?, expectedVersion: Int?, input: CloudClusterInput) = error("unused")
+                override suspend fun profiles(actor: Principal) = emptyList<CloudProfile>()
+                override suspend fun member(actor: Principal, memberId: String): Member? = null
+                override suspend fun saveProfile(actor: Principal, id: String?, expectedVersion: Int, name: String, spec: CloudProfileSpec, assignedMemberIds: Set<String>) = error("unused")
+                override suspend fun settings(actor: Principal) = CloudSettings()
+                override suspend fun saveSettings(actor: Principal, settings: CloudSettings) = settings
+            }, cluster), cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, cluster)),
+                cloudConversation = CloudConversation(service, access, RunnerConversationUseCase(store, conversations, { _, _ -> false }, sleep = { })), publicOrigin = "http://localhost")
+        }
+        val created = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Run", "profile-id", null, "opus", null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        store.sessions.clear()
+        store.sessions["s1"] = created.copy(id = "s1", currentEpoch = 1, generation = 1, state = CloudSessionState.READY)
+        store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1)
+        val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features
+        assertTrue(CloudTasks.FEATURE in features)
+        suspend fun stop(token: String, body: String, key: String? = null) = client.post("/api/v1/cloud/sessions/s1/tasks/stop") {
+            bearerAuth(token); contentType(ContentType.Application.Json); setBody(body); key?.let { header(CloudHeaders.IDEMPOTENCY_KEY, it) }
+        }
+        assertEquals(HttpStatusCode.NotFound, stop("other", """{"taskId":"b1"}""").status, "Only who reaches the session stops its tasks")
+        assertEquals(HttpStatusCode.Forbidden, stop("colleague-read", """{"taskId":"b1"}""").status, "A read-only key stops nothing")
+        assertEquals(HttpStatusCode.BadRequest, stop("colleague", """{"taskId":"not a task id"}""").status)
+        assertEquals(HttpStatusCode.BadRequest, stop("colleague", """{"taskId":""}""").status)
+        val accepted = stop("colleague", """{"taskId":"b1"}""", key = "stop-1")
+        assertEquals(HttpStatusCode.Accepted, accepted.status, accepted.bodyAsText())
+        val input = Serialization.json.decodeFromString<CloudInputView>(accepted.bodyAsText())
+        assertEquals(CloudTasks.KIND, input.kind); assertEquals("colleague-id", input.authorId); assertFalse(input.wake)
+        assertEquals("true", stop("colleague", """{"taskId":"b1"}""", key = "stop-1").headers[CloudHeaders.IDEMPOTENCY_REPLAYED])
+        val runner = TeamCodeClient("http://localhost", { "projected-pod-token-1" }) { config -> createClient { config(this) } }
+        try {
+            assertTrue(runner.runnerAgent(RunnerAgentRequest("default", "s1", 1)).backgroundTasks, "This server takes tasks events")
+            // An older runner would read the task id as a message: the stop is rejected for it instead.
+            assertTrue(runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0)).inputs.isEmpty())
+            assertEquals(CloudTasks.UNSUPPORTED, conversations.inputs.getValue(input.id).reason)
+            val again = Serialization.json.decodeFromString<CloudInputView>(stop("colleague", """{"taskId":"b2"}""").bodyAsText())
+            assertEquals(listOf(RunnerInputView(again.id, CloudTasks.KIND, "b2", 1)), runner.runnerInputs(RunnerInputsRequest("default", "s1", 1, 0, acceptsTaskStops = true)).inputs)
+            val ack = runner.runnerEvents(RunnerEventsRequest("default", "s1", 1, listOf(RunnerEventView(1, CloudEventTypes.TASKS,
+                buildJsonObject { putJsonArray("tasks") { addJsonObject { put("id", "b2"); put("type", "local_bash"); put("description", "npm test") } }; put("stoppable", true) }))))
+            assertEquals(1, ack.acceptedThrough)
+            assertEquals(CloudEventType.TASKS, conversations.events.last().type)
+        } finally { runner.close() }
+        store.sessions["s1"] = store.sessions.getValue("s1").copy(state = CloudSessionState.PAUSED, generation = 2)
+        val paused = stop("colleague", """{"taskId":"b3"}""")
+        assertEquals(HttpStatusCode.Conflict, paused.status); assertTrue("nothing_to_stop" in paused.bodyAsText())
     }
 }

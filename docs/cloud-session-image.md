@@ -15,7 +15,7 @@ The server builds the pod spec itself (see [the runner and the pod](cloud-sessio
 
 - **Command.** The spec sets the command of every container: `cp <runner binary> /opt/teamcode/teamcode` in the init container, `/opt/teamcode/teamcode cloud runner` in `session` and `/opt/teamcode/teamcode cloud agent-supervisor` in `agent`. An `ENTRYPOINT` or `CMD` in the image is never used.
 - **Authentication.** The pod authenticates to the server with a projected Kubernetes service-account token (audience `teamcode`, 600 seconds, rotated by the kubelet), mounted in the `session` container only. The server checks it with a `TokenReview` and, from it, hands the runner the inference credential, the owner's variables and the owner's GitHub token at run time. The agent reaches models through the runner's loopback proxy. No TeamCode token, provider key, GitHub token or kubeconfig belongs in the image.
-- **Users.** The spec runs the runner as UID 1000 and the agent as UID 1001, both with group 1000 (`fsGroup` 1000), non-root, without privilege escalation. `HOME` is `/workspace/.home` for the runner and `/workspace/.agent-home` for the agent, on the workspace volume mounted at `/workspace`.
+- **Users.** The spec runs the runner as UID 1000 and the agent as UID 1001, both with group 1000 (`fsGroup` 1000), non-root, without privilege escalation. `HOME` is `/workspace/.agent-home` for the agent, on the workspace volume mounted at `/workspace`, and `/var/teamcode/runner-home` for the runner, a volume of its own (the image's home directory for UID 1000 is not used; the runner keeps its state in `/workspace/.home`).
 - **The binary.** The pod runs the copy of `teamcode` made by the init container, from the runner image. The session image needs none unless it is also the runner image.
 
 ## What the image must provide
@@ -50,15 +50,16 @@ RUN apt-get update \
 
 ```sh
 docker build \
-  --build-arg TEAMCODE_VERSION=0.3.2 \
+  --build-arg TEAMCODE_VERSION=1.0.1 \
   -t registry.example.org/teamcode-session:2026-10-21 \
   docs/cloud-session-image
 ```
 
 | Build argument | Default | Purpose |
 | --- | --- | --- |
-| `TEAMCODE_VERSION` | the release the template was last updated for | The release whose `teamcode` binary goes into the image, checked against that release's `SHA256SUMS`. Use your server's version. |
-| `NODE_VERSION` | an LTS release | Node.js for the agent CLIs. |
+| `TEAMCODE_VERSION` | the release the template was last updated for | The release whose `teamcode` binary goes into the image. The build checks the release's `manifest.sig` against the publisher's public key written in the Dockerfile (the one the CLI pins for self-update), then that the signed `manifest.json` names this version and lists the binary's SHA-256: replacing a release's files, checksums included, is not enough to change the binary (audit L6). The signature's `keyId` must also be the SHA-256 of that key's DER, so a rotated publisher key stops the build with both ids until the new key replaces the old one in the Dockerfile. Releases signed before `manifest.sig` existed cannot be used. Use your server's version. |
+| `NODE_VERSION` | an LTS release | Node.js for the agent CLIs. The build checks the signature of the release's `SHASUMS256.txt` with `gpgv` against the Node.js release keyring, then the archive's SHA-256 against that file. |
+| `NODE_RELEASE_KEYS_COMMIT`, `NODE_RELEASE_KEYS_SHA256` | a commit of `nodejs/release-keys` and the SHA-256 of its `gpg/pubring.kbx` | The keyring `SHASUMS256.txt` must be signed by, pinned so that nodejs.org alone cannot change Node.js. A `NODE_VERSION` bump needs no change; a release signed by a key the keyring lacks fails the build, and moving to a newer keyring commit changes both values. |
 | `CLAUDE_CODE_VERSION` | a recent release | `@anthropic-ai/claude-code`. Empty leaves Claude Code out. |
 | `CODEX_VERSION` | a recent release | `@openai/codex`. Empty leaves Codex out. With both empty, Node.js is not installed. |
 | `BASE_IMAGE` | `ubuntu:24.04` | A Debian or Ubuntu base. Others need the package step adapted. |

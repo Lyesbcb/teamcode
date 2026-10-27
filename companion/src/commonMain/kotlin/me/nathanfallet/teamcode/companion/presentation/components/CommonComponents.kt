@@ -1,5 +1,7 @@
 package me.nathanfallet.teamcode.companion.presentation.components
 
+import me.nathanfallet.teamcode.companion.presentation.viewmodels.Failure
+import me.nathanfallet.teamcode.companion.presentation.viewmodels.words
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,6 +27,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import me.nathanfallet.teamcode.companion.domain.models.PickedFile
+import me.nathanfallet.teamcode.companion.presentation.files.pasteFiles
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -41,6 +45,23 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -59,6 +80,10 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentType
@@ -119,21 +144,24 @@ fun TcButton(
     val background = base.dimmed()
     val content = contentBase.dimmed()
     val border = borderBase.dimmed()
+    // A mouse needs no 44 dp target: the desktop's buttons are as dense as a native app's.
+    val dense = LocalDense.current
     Row(
         modifier
             .then(if (fill) Modifier.fillMaxWidth() else Modifier)
-            .heightIn(min = if (small) 44.dp else 48.dp)
+            .heightIn(min = when { dense && small -> 30.dp; dense -> 36.dp; small -> 44.dp; else -> 48.dp })
             .clip(Radii.control)
             .background(background)
+            .then(if (enabled && !busy) Modifier.hoverHighlight(Radii.control, if (kind == ButtonKind.PRIMARY) colors.onAccent.copy(alpha = 0.10f) else null).handCursor() else Modifier)
             .border(1.dp, border, Radii.control)
             .clickable(enabled = enabled && !busy, role = Role.Button, onClick = onClick)
-            .padding(horizontal = if (small) 12.dp else 16.dp),
+            .padding(horizontal = if (small || dense) 12.dp else 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = content, strokeWidth = 2.dp)
         else if (icon != null) Icon(icon, contentDescription = null, tint = content, modifier = Modifier.size(if (small) 15.dp else 18.dp))
-        Text(text, color = content, fontSize = if (small) 13.5.sp else 15.sp, fontWeight = if (kind == ButtonKind.GHOST && small) FontWeight.Medium else FontWeight.SemiBold, maxLines = 1)
+        Text(text, color = content, fontSize = when { dense && small -> 12.5.sp; small || dense -> 13.5.sp; else -> 15.sp }, fontWeight = if (kind == ButtonKind.GHOST && small) FontWeight.Medium else FontWeight.SemiBold, maxLines = 1)
     }
 }
 
@@ -151,19 +179,37 @@ fun TcIconButton(
     tint: Color? = null,
 ) {
     val colors = TeamCode.colors
-    val shape = if (kind == IconButtonKind.FILLED) CircleShape else RoundedCornerShape(12.dp)
+    val shape = if (kind == IconButtonKind.FILLED) CircleShape else RoundedCornerShape(if (LocalDense.current) 8.dp else 12.dp)
     fun Color.dimmed() = if (enabled) this else copy(alpha = alpha * 0.45f)
-    Box(
-        modifier
-            .size(44.dp)
-            .clip(shape)
-            .background(when (kind) { IconButtonKind.FILLED -> colors.accent; IconButtonKind.OUTLINED -> colors.panel; IconButtonKind.PLAIN -> Color.Transparent }.dimmed())
-            .border(1.dp, (if (kind == IconButtonKind.OUTLINED) colors.line else Color.Transparent).dimmed(), shape)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, contentDescription = contentDescription, tint = (tint ?: if (kind == IconButtonKind.FILLED) colors.onAccent else colors.text).dimmed(), modifier = Modifier.size(20.dp))
+    val dense = LocalDense.current
+    val button = @Composable {
+        Box(
+            modifier
+                .size(if (dense) 32.dp else 44.dp)
+                .clip(shape)
+                .background(when (kind) { IconButtonKind.FILLED -> colors.accent; IconButtonKind.OUTLINED -> colors.panel; IconButtonKind.PLAIN -> Color.Transparent }.dimmed())
+                .then(if (enabled) Modifier.hoverHighlight(shape, if (kind == IconButtonKind.FILLED) colors.onAccent.copy(alpha = 0.10f) else null).handCursor() else Modifier)
+                .border(1.dp, (if (kind == IconButtonKind.OUTLINED) colors.line else Color.Transparent).dimmed(), shape)
+                .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = contentDescription, tint = (tint ?: if (kind == IconButtonKind.FILLED) colors.onAccent else colors.text).dimmed(), modifier = Modifier.size(if (dense) 18.dp else 20.dp))
+        }
     }
+    // With a mouse, an icon says what it does when the pointer rests on it.
+    if (dense) Tooltip(contentDescription) { button() } else button()
+}
+
+/** Material's plain tooltip over [content], shown on hover (and on a long press on touch screens). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun Tooltip(text: String, content: @Composable () -> Unit) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Below),
+        tooltip = { PlainTooltip { Text(text) } },
+        state = rememberTooltipState(),
+        content = content,
+    )
 }
 
 /** A text link button (Retry, Discard...) in a status line. */
@@ -174,7 +220,7 @@ fun LinkButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier,
         color = color,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
-        modifier = modifier.clip(Radii.control).clickable(role = Role.Button, onClick = onClick).heightIn(min = 36.dp).padding(horizontal = 6.dp, vertical = 8.dp),
+        modifier = modifier.clip(Radii.control).handCursor().clickable(role = Role.Button, onClick = onClick).heightIn(min = 36.dp).padding(horizontal = 6.dp, vertical = 8.dp),
     )
 }
 
@@ -193,15 +239,16 @@ fun <T> Segmented(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> 
             Box(
                 Modifier
                     .weight(1f)
-                    .heightIn(min = 38.dp)
+                    .heightIn(min = if (LocalDense.current) 30.dp else 38.dp)
                     .clip(Radii.segmentItem)
                     .background(if (on) colors.panel else Color.Transparent)
                     .border(1.dp, if (on) colors.line else Color.Transparent, Radii.segmentItem)
+                    .then(if (on) Modifier else Modifier.hoverHighlight(Radii.segmentItem).handCursor())
                     .selectable(selected = on, role = Role.Tab, onClick = { onSelect(value) })
                     .then(tag(value)?.let { Modifier.testTag(it) } ?: Modifier),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(label, color = if (on) colors.text else colors.muted, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(label, color = if (on) colors.text else colors.muted, fontSize = if (LocalDense.current) 12.5.sp else 13.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
             }
         }
     }
@@ -225,8 +272,10 @@ fun TcCard(
             .fillMaxWidth()
             .clip(Radii.card)
             .background(colors.panel)
+            // The hover tint goes under the border, which stays visible.
+            .then(if (onClick != null) Modifier.hoverHighlight(Radii.card) else Modifier)
             .border(1.dp, borderColor, Radii.card)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.focusRing(Radii.card).handCursor().clickable(onClick = onClick) else Modifier)
             .padding(horizontal = padding, vertical = padding - 1.dp),
         verticalArrangement = Arrangement.spacedBy(spacing),
         content = content,
@@ -251,8 +300,8 @@ fun GroupRow(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, conte
     Row(
         modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .heightIn(min = if (LocalDense.current) 40.dp else 48.dp)
+            .then(if (onClick != null) Modifier.hoverHighlight(RoundedCornerShape(0.dp)).handCursor().clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -400,8 +449,8 @@ fun Skeleton(fraction: Float, height: Dp = 12.dp) {
 }
 
 @Composable
-fun ErrorText(message: String?, modifier: Modifier = Modifier) {
-    if (message != null) Text(message, color = TeamCode.colors.danger, fontSize = 13.sp, modifier = modifier.testTag("error"))
+fun ErrorText(message: Failure?, modifier: Modifier = Modifier) {
+    if (message != null) Text(message.words(), color = TeamCode.colors.danger, fontSize = 13.sp, modifier = modifier.testTag("error"))
 }
 
 @Composable
@@ -437,10 +486,31 @@ fun TcTextField(
     tag: String? = null,
     contentType: ContentType? = null,
     shape: RoundedCornerShape = Radii.control,
-    minHeight: Dp = 48.dp,
+    minHeight: Dp = if (LocalDense.current) 38.dp else 48.dp,
     leading: ImageVector? = null,
+    /**
+     * Enter from a physical keyboard does this (send, sign in, open) instead of breaking the line; Shift+Enter and
+     * Alt+Enter break it. An on-screen keyboard keeps its own Enter. Null: Enter behaves as by default.
+     */
+    onSubmit: (() -> Unit)? = null,
+    /** Inside the field, at its end (the composer's microphone). */
+    trailing: (@Composable () -> Unit)? = null,
+    /** A file or an image pasted into the field (the composer): attached instead of typed; pasted text still goes in. */
+    onPasteFiles: ((List<PickedFile>) -> Unit)? = null,
+    onPasteFailed: () -> Unit = {},
 ) {
     val colors = TeamCode.colors
+    // The field edits a TextFieldValue to insert a line break where the cursor is; the caller keeps a String.
+    var field by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    // Changed from outside (a draft cleared after sending, a value trimmed): the caret stays where it was, within the
+    // new text; a field filled from empty (a restored draft), or whose caret was at the end (dictated words streaming
+    // in), puts it at the end.
+    if (field.text != value) {
+        val atEnd = field.selection.collapsed && field.selection.end == field.text.length
+        val caret = if (field.text.isEmpty() || atEnd) TextRange(value.length) else TextRange(field.selection.start.coerceAtMost(value.length), field.selection.end.coerceAtMost(value.length))
+        field = TextFieldValue(value, caret)
+    }
+    val submit by rememberUpdatedState(onSubmit)
     val style = TextStyle(
         color = colors.text,
         fontSize = if (mono) 14.sp else 15.sp,
@@ -450,8 +520,11 @@ fun TcTextField(
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (label != null) Text(label, color = colors.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
+            value = field,
+            onValueChange = { next ->
+                field = next
+                if (next.text != value) onValueChange(next.text)
+            },
             enabled = enabled,
             singleLine = singleLine,
             minLines = minLines,
@@ -463,6 +536,22 @@ fun TcTextField(
             visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
             modifier = Modifier
                 .fillMaxWidth()
+                .then(if (onPasteFiles == null) Modifier else Modifier.pasteFiles(true, onPasteFiles, onPasteFailed))
+                .then(if (onSubmit == null) Modifier else Modifier.onPreviewKeyEvent { event ->
+                    when (enterAction(event, singleLine)) {
+                        EnterAction.PASS -> false
+                        // Every event of the key is consumed, its release and the line feed it types included.
+                        EnterAction.SUBMIT -> { if (event.type == KeyEventType.KeyDown) submit?.invoke(); true }
+                        EnterAction.NEWLINE -> {
+                            if (event.type == KeyEventType.KeyDown) {
+                                val text = field.text.replaceRange(field.selection.min, field.selection.max, "\n")
+                                field = TextFieldValue(text, TextRange(field.selection.min + 1))
+                                onValueChange(text)
+                            }
+                            true
+                        }
+                    }
+                })
                 .then(tag?.let { Modifier.testTag(it) } ?: Modifier)
                 .then(contentType?.let { type -> Modifier.semantics { this.contentType = type } } ?: Modifier),
             decorationBox = { inner ->
@@ -482,6 +571,7 @@ fun TcTextField(
                             if (value.isEmpty() && placeholder != null) Text(placeholder, style = style.copy(color = colors.muted), maxLines = if (singleLine) 1 else 3, overflow = TextOverflow.Ellipsis)
                             inner()
                         }
+                        trailing?.invoke()
                     }
                 }
             },
@@ -503,13 +593,14 @@ fun LargeTitle(title: String, modifier: Modifier = Modifier, actions: @Composabl
 
 /** A pushed screen's bar: the way back (named after where it leads), the title, the screen's actions. */
 @Composable
-fun NavBar(backLabel: String, onBack: () -> Unit, title: String, modifier: Modifier = Modifier, actions: @Composable RowScope.() -> Unit = {}) {
+fun NavBar(backLabel: String, onBack: (() -> Unit)?, title: String, modifier: Modifier = Modifier, actions: @Composable RowScope.() -> Unit = {}) {
     val colors = TeamCode.colors
     Row(
         modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BackLink(backLabel, onBack, Modifier.widthIn(max = 120.dp))
+        // A screen at the root of the desktop's content panel has nowhere to go back to: the sidebar is the way out.
+        if (onBack != null) BackLink(backLabel, onBack, Modifier.widthIn(max = 120.dp)) else Spacer(Modifier.width(44.dp))
         Text(title, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
             modifier = Modifier.weight(1f).padding(horizontal = 4.dp).semantics { heading() })
         Row(Modifier.widthIn(min = 44.dp), horizontalArrangement = Arrangement.End, content = actions)
@@ -521,7 +612,7 @@ fun NavBar(backLabel: String, onBack: () -> Unit, title: String, modifier: Modif
 fun BackLink(label: String, onBack: () -> Unit, modifier: Modifier = Modifier) {
     val colors = TeamCode.colors
     Row(
-        modifier.heightIn(min = 44.dp).clip(Radii.control).clickable(role = Role.Button, onClick = onBack).padding(start = 2.dp, end = 6.dp).testTag("back"),
+        modifier.heightIn(min = if (LocalDense.current) 32.dp else 44.dp).clip(Radii.control).hoverHighlight(Radii.control).handCursor().clickable(role = Role.Button, onClick = onBack).padding(start = 2.dp, end = 6.dp).testTag("back"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(PhosphorIcons.Regular.CaretLeft, contentDescription = null, tint = colors.accentText, modifier = Modifier.size(20.dp))
@@ -559,6 +650,19 @@ fun FormPage(
 @Composable
 fun TcSheet(onDismiss: () -> Unit, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     val colors = TeamCode.colors
+    // A bottom sheet across a desktop window or a tablet is a strip 1 000 dp wide: there, the same content is a dialog.
+    if (LocalWideLayout.current) {
+        val window = LocalWindowInfo.current.containerSize
+        val maxHeight = with(LocalDensity.current) { (window.height * 0.85f).toDp() }
+        Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Column(
+                modifier.padding(24.dp).widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maxHeight).clip(Radii.card).background(colors.background)
+                    .border(1.dp, colors.line, Radii.card).padding(top = 8.dp, bottom = 4.dp).testTag("dialog"),
+                content = content,
+            )
+        }
+        return
+    }
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -607,3 +711,19 @@ fun Centered(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> 
 /** A tap target that only consumes clicks (no ripple), for rows that are not buttons. */
 @Composable
 fun Modifier.quietClickable(onClick: () -> Unit): Modifier = clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+
+/**
+ * A tap that no child consumed (empty space, plain text) drops focus and closes the on-screen keyboard.
+ * Taps on buttons, links, cards and text fields are consumed by those, and scrolling is untouched.
+ */
+@Composable
+fun Modifier.dismissKeyboardOnTap(): Modifier {
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    return pointerInput(focus, keyboard) {
+        detectTapGestures {
+            focus.clearFocus()
+            keyboard?.hide()
+        }
+    }
+}

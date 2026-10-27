@@ -40,7 +40,7 @@ mavenPublishing {
 kotlin {
     jvmToolchain(21)
     jvm { testRuns["test"].executionTask.configure { useJUnitPlatform() } }
-    macosArm64(); macosX64(); linuxX64(); linuxArm64(); mingwX64()
+    macosArm64(); linuxX64(); linuxArm64(); mingwX64()
     // Mobile targets for the companion app; published with the others.
     iosArm64(); iosSimulatorArm64()
     androidLibrary {
@@ -59,8 +59,10 @@ kotlin {
             implementation(libs.ktor.client.resources)
             implementation(libs.ktor.client.json)
             implementation(libs.ktor.json)
+            // SHA-256 and base64url for PKCE (OAuthSignIn).
+            implementation(libs.okio)
         }
         commonTest.dependencies { implementation(kotlin("test")); implementation(libs.coroutines.test); implementation(libs.ktor.client.mock) }
-        jvmTest.dependencies { runtimeOnly(libs.junit) }
+        jvmTest.dependencies { runtimeOnly(libs.junit); implementation(libs.ktor.client.cio) }
     }
 }

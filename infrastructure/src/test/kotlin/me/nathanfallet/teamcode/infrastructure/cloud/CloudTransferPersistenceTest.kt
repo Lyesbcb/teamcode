@@ -27,8 +27,8 @@ class CloudTransferPersistenceTest {
         val transfers = CloudTransferService(store, transferStore, sessions, recipients)
         val reconciler = ReconcileCloudSessionsUseCase(store, cluster, transfers = CompleteCloudTransferUseCase(store, transferStore, cluster, recipients))
         val runner = RunnerChannelUseCase(store)
-        val conversation = CloudConversationService(conversations, store, access, sleep = { delay(1) })
-        val agent = RunnerConversationUseCase(store, conversations, sleep = { delay(1) })
+        val conversation = CloudConversationService(conversations, store, access, { _, _ -> false }, sleep = { delay(1) })
+        val agent = RunnerConversationUseCase(store, conversations, { _, _ -> false }, sleep = { delay(1) })
         val team = SqlTeamService(database)
         val inference = RunnerInferenceUseCase(store, SqlCloudInferenceCredentialStore(database))
     }
@@ -41,13 +41,14 @@ class CloudTransferPersistenceTest {
             Database(container.jdbcUrl, container.username, container.password).use { b ->
                 coroutineScope { listOf(a, b).map { async(Dispatchers.IO) { it.migrate() } }.awaitAll() }
                 a.query {
-                    val drift = MigrationUtils.statementsRequiredForDatabaseMigration(CloudSettingsTable, CloudSessions, CloudExecutions, CloudTransfers, AuditEvents, withLogs = false)
+                    val drift = MigrationUtils.statementsRequiredForDatabaseMigration(CloudSettingsTable, CloudSessions, CloudExecutions, CloudTransfers, AuditEvents, Members, withLogs = false)
                     assertEquals(emptyList(), drift, "The reviewed migration matches the Exposed tables")
                 }
                 val cluster = FakeClusterPort()
                 val cipher = CredentialCipher(ByteArray(32) { 43 })
                 val ra = Replica(a, cluster, cipher); val rb = Replica(b, cluster, cipher)
                 val team = members(a)
+                recipientList(ra, team)
                 val profile = administration(ra, team.admin, setOf(team.owner.member.id, team.recipient.member.id))
                 val session = ready(ra, rb, team.owner, profile, "Offered")
                 offers(ra, rb, team, session)
@@ -221,6 +222,7 @@ class CloudTransferPersistenceTest {
         repeat(10) { if (pod !in cluster(ra).podNames()) pass(ra) }
         cluster(ra).start(pod); pass(ra)
         ra.runner.register(teamId, s.id, 2, pod)
+        assertTrue(rb.runner.environment(teamId, s.id, 2).untrustedWorkspace, "The recipient's runner treats the former owner's workspace as untrusted")
         rb.runner.heartbeat(teamId, s.id, 2, ready = true)
         assertEquals(READY, ra.store.find(teamId, s.id)!!.state)
         assertEquals(listOf(2 to to, 1 to from), ra.sessions.executions(t.recipient, s.id).map { it.epoch to it.ownerId })
@@ -412,7 +414,7 @@ class CloudTransferPersistenceTest {
         assertEquals(CloudEventType.TRANSFER, ra.conversation.events(t.recipient, s.id, 0, null, 10).events.last().type)
         val readerKey = keys.create(t.recipient, recipient, "transcript reader", setOf(ServiceScope.CLOUD_READ), 1)
         val reader = rb.team.authenticate(readerKey.accessToken)!!
-        val stream = CloudConversationService(ra.conversations, ra.store, ra.access)
+        val stream = CloudConversationService(ra.conversations, ra.store, ra.access, { _, _ -> false })
         val opened = CompletableDeferred<Unit>()
         val following = async {
             try { stream.follow(reader, s.id, 0, emit = { opened.complete(Unit) }, idle = {}); "ended" }
@@ -444,6 +446,18 @@ class CloudTransferPersistenceTest {
         return Team(admin, "transfer-owner".member(), "transfer-recipient".member(), "transfer-outsider".member())
     }
 
+    /** The picker's list: enabled members with their password set, by username, nothing about the others. */
+    private suspend fun recipientList(ra: Replica, t: Team) {
+        ra.team.createMember(t.admin, "transfer-pending", Role.MEMBER)
+        val disabled = ra.team.createMember(t.admin, "transfer-disabled", Role.MEMBER).member
+        ra.team.updateMember(t.admin, disabled.id, Role.MEMBER, disabled = true)
+        val listed = ra.transfers.recipients(t.owner)
+        assertEquals(listOf("admin", "transfer-outsider", "transfer-owner", "transfer-recipient"), listed.map { it.username })
+        assertEquals(listOf(true, false, false, false), listed.map { it.administrator })
+        assertEquals(t.owner.member.id, listed.single { it.username == "transfer-owner" }.id)
+        assertEquals(2, ra.transferStore.recipients(t.admin.teamId, 2).size, "Bounded")
+    }
+
     private suspend fun administration(ra: Replica, admin: Principal, assigned: Set<String>): CloudProfile {
         val cluster = ra.admin.saveCluster(admin, null, null, CloudClusterInput("lab", "https://k8s.example.test:6443",
             "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n", "synthetic-service-account-token-0123456789", listOf("teamcode"), 10, "standard"))
@@ -456,6 +470,7 @@ class CloudTransferPersistenceTest {
         val pod = CloudSessionService.podName(created.id, 1)
         ra.cluster.start(pod); pass(ra)
         ra.runner.register(owner.teamId, created.id, 1, pod)
+        assertFalse(rb.runner.environment(owner.teamId, created.id, 1).untrustedWorkspace, "A new session's workspace is its owner's")
         rb.runner.heartbeat(owner.teamId, created.id, 1, ready = true)
         return ra.store.find(owner.teamId, created.id)!!.also { assertEquals(READY, it.state) }
     }

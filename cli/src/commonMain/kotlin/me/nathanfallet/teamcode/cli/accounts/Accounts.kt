@@ -14,34 +14,35 @@ import me.nathanfallet.teamcode.cli.loadConfig
 import me.nathanfallet.teamcode.cli.sdk
 import me.nathanfallet.teamcode.cli.platform.*
 import me.nathanfallet.teamcode.client.*
-import okio.ByteString.Companion.toByteString
 import okio.FileSystem
 import okio.Path.Companion.toPath
 
 class Accounts : SuspendingNoOpCliktCommand(name = "accounts") {
     init { subcommands(ListAccounts(), AddAccount(), ImportAccounts(), Handover()) }
 }
-private fun randomCode() = secureRandomBytes(32).toByteString().base64().replace('+', '-').replace('/', '_').trimEnd('=')
+private fun randomCode() = randomOAuthCode(::secureRandomBytes)
 private class ListAccounts : SuspendingCliktCommand(name = "list") {
     override suspend fun run() { sdk(loadConfig()).use { client ->
         client.accounts().forEach { echo("${it.id} | ${it.label} | ${it.state}${if (it.disabled) " | disabled" else ""}") }
     } }
 }
 private class AddAccount : SuspendingCliktCommand(name = "add") {
-    private val providerName by option("--provider").choice("claude", "claude-max", "codex", "openrouter").default("claude")
+    private val typeName by option("--type", help = "Account type, skipping the selector: ${AccountType.flags.joinToString(", ")}.").choice(*AccountType.flags.toTypedArray())
+    private val providerName by option("--provider", help = "Older spelling of --type: claude or claude-max (Anthropic subscription), codex.").choice("claude", "claude-max", "codex")
     private val noBrowser by option("--no-browser", help = "Print the sign-in link without opening a browser.").flag()
-    override fun help(context: Context) = "Sign in to Claude or Codex locally, or add an OpenRouter API key, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
+    override fun help(context: Context) = "Choose an account type (numbered selector, or --type), sign in locally, then send verified credentials to your TeamCode server. Existing accounts are updated without replacing their settings."
     override suspend fun run() {
         val config = loadConfig()
+        // Chosen first: a type the server cannot hold is refused before any network call or sign-in.
+        val terminal = Terminal()
+        val type = chooseAccountType(typeName, providerName, ::echo) { terminal.readLineOrNull(hideInput = false) }
         sdk(config).use { client ->
             // Check before opening the provider sign-in, with a call every member may make.
             requireEnrollmentAllowed(client.capabilities().features, client::accountEnrollmentPolicy) { client.me().role }
-            if (providerName == "openrouter") return addOpenRouterKey(client, ::echo)
-            val provider = if (providerName == "codex") CodexOAuthEnrollment else ClaudeOAuthEnrollment
-            val verifier = randomCode()
-            val state = randomCode()
-            val challenge = verifier.encodeToByteArray().toByteString().sha256().base64().replace('+', '-').replace('/', '_').trimEnd('=')
-            val url = provider.authorizationUrl(state, challenge)
+            if (type == AccountType.OPENROUTER_API) return addOpenRouterKey(client, ::echo)
+            val signIn = OAuthSignIn.start(type.enrollment!!, ::secureRandomBytes)
+            val provider = signIn.provider
+            val url = signIn.authorizationUrl
             echo("Sign in with the browser. ${provider.pasteInstructions}")
             echo(url)
             if (!noBrowser) {
@@ -50,8 +51,7 @@ private class AddAccount : SuspendingCliktCommand(name = "add") {
                 else if (!openBrowser(command)) echo("Could not open a browser: open the link above by hand.")
             }
             val paste = Terminal().readLineOrNull(hideInput = true)?.trim().orEmpty()
-            val code = provider.parseCode(paste, state)
-            val input = OAuthEnrollmentClient(provider) { configure -> HttpClient() { configure(this) } }.use { it.exchange(code, state, verifier, randomCode()) }
+            val input = signIn.exchange(paste) { configure -> HttpClient() { configure(this) } }
             val result = try { client.enrollAccount(input) } catch (error: TeamCodeException) { throw enrollmentRefusal(error) ?: error }
             echo("${if (result.created) "Added" else "Updated"} ${result.account.label}, id ${result.account.id}.")
             if (result.account.state == "PENDING_HANDOVER") echo("Stop any other refresher for this account, then run: teamcode accounts handover ${result.account.id} --confirm")
@@ -76,7 +76,7 @@ internal suspend fun addOpenRouterKey(client: TeamCodeClient, echo: (String) -> 
 internal const val OPENROUTER_REFRESH_MARKER = "api-key"
 /** 2100-01-01T00:00:00Z in epoch milliseconds. */
 internal const val OPENROUTER_NEVER_EXPIRES = 4_102_444_800_000L
-internal const val ENROLLMENT_POLICY_FEATURE = "accounts.enrollment-policy.v1"
+internal const val ENROLLMENT_POLICY_FEATURE = ACCOUNT_ENROLLMENT_POLICY_FEATURE
 /** TeamCode's own words for the refusals of `accounts add`, safe to print; keyed by the server's error code. */
 internal object EnrollmentMessages {
     const val ADMINISTRATORS_ONLY = "Only administrators can add accounts on this server. Ask an administrator, or ask them to allow every member to add accounts (setting \"Who can add accounts\" on the dashboard's Subscription accounts page, or PUT /api/v1/policy/account-enrollment)."
@@ -90,19 +90,13 @@ internal object EnrollmentMessages {
 }
 internal fun enrollmentRefusal(error: TeamCodeException): CliUserException? =
     EnrollmentMessages.forCode(error.code)?.takeIf { error.statusCode == 403 }?.let(::CliUserException)
-/**
- * Refuses before any provider sign-in when the server would. A server that announces [ENROLLMENT_POLICY_FEATURE] says
- * whether the caller may; an older one only accepts administrators, which the caller's own role tells.
- */
+/** Refuses before any provider sign-in when the server would ([accountEnrollmentAccess], shared with the companion app). */
 internal suspend fun requireEnrollmentAllowed(features: List<String>, policy: suspend () -> AccountEnrollmentPolicyView, role: suspend () -> String) {
-    if (ENROLLMENT_POLICY_FEATURE !in features) {
-        if (role() !in setOf("OWNER", "ADMIN")) throw CliUserException(EnrollmentMessages.ADMINISTRATORS_ONLY)
-        return
+    when (accountEnrollmentAccess(features, policy, role)) {
+        AccountEnrollmentAccess.ALLOWED -> return
+        AccountEnrollmentAccess.ADMINISTRATORS_ONLY -> throw CliUserException(EnrollmentMessages.ADMINISTRATORS_ONLY)
+        AccountEnrollmentAccess.SESSION_CANNOT_ENROLL -> throw CliUserException(EnrollmentMessages.SESSION_CANNOT_ENROLL)
     }
-    val answer = policy()
-    if (answer.allowed == true) return
-    // Every member may add accounts, so the refusal is about this session (a service key, a pending password change).
-    throw CliUserException(if (answer.policy == "members") EnrollmentMessages.SESSION_CANNOT_ENROLL else EnrollmentMessages.ADMINISTRATORS_ONLY)
 }
 private class ImportAccounts : SuspendingCliktCommand(name = "import") {
     private val from by option("--from").required()

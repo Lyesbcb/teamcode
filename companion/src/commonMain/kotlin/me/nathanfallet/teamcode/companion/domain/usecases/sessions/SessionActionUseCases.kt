@@ -1,8 +1,12 @@
 package me.nathanfallet.teamcode.companion.domain.usecases.sessions
 
+import me.nathanfallet.teamcode.companion.domain.models.InvalidInput
+import me.nathanfallet.teamcode.companion.domain.models.requireInput
 import me.nathanfallet.teamcode.companion.domain.models.Account
 import me.nathanfallet.teamcode.companion.domain.models.CloudSession
 import me.nathanfallet.teamcode.companion.domain.models.CompanionException
+import me.nathanfallet.teamcode.companion.domain.models.FilePolicy
+import me.nathanfallet.teamcode.companion.domain.models.UploadedFile
 import me.nathanfallet.teamcode.companion.domain.models.InputReceipt
 import me.nathanfallet.teamcode.companion.domain.models.NewSession
 import me.nathanfallet.teamcode.companion.domain.models.PendingMessage
@@ -22,6 +26,9 @@ object MessageRules {
 
     fun valid(text: String): Boolean =
         text.isNotBlank() && text.length <= MAX_CHARS && text.none { it.isISOControl() && it != '\n' && it != '\t' && it != '\r' }
+
+    /** A message carrying files may have no text at all. */
+    fun valid(text: String, withFiles: Boolean): Boolean = (withFiles && text.isEmpty()) || valid(text)
 }
 
 /**
@@ -34,16 +41,21 @@ class SendMessageUseCase(
     private val guard: AccountGuard,
     private val ids: IdGenerator,
 ) {
-    fun draft(text: String): PendingMessage {
-        require(MessageRules.valid(text)) { "Write a message of up to ${MessageRules.MAX_CHARS} characters." }
-        return PendingMessage(ids.newId(), text, PendingMessage.State.SENDING)
+    /** [files]: uploaded files the message carries; with files, [text] may be empty. */
+    fun draft(text: String, files: List<UploadedFile> = emptyList()): PendingMessage {
+        requireInput(files.size <= FilePolicy.MAX_FILES, InvalidInput.Problem.FILES_MAX, FilePolicy.MAX_FILES, "A message carries ${FilePolicy.MAX_FILES} files at most.")
+        val sent = if (files.isNotEmpty() && text.isBlank()) "" else text
+        requireInput(MessageRules.valid(sent, withFiles = files.isNotEmpty()), InvalidInput.Problem.MESSAGE_LENGTH, MessageRules.MAX_CHARS, "Write a message of up to ${MessageRules.MAX_CHARS} characters.")
+        return PendingMessage(ids.newId(), sent, PendingMessage.State.SENDING, files = files)
     }
 
     /** Sends [message] (a new draft or a failed one being retried); never throws except for cancellation. */
     suspend operator fun invoke(accountId: String, sessionId: String, message: PendingMessage): PendingMessage = try {
         val receipt = guard(accountId) {
-            if (Features.MESSAGES !in features.features(accountId)) throw CompanionException.Unsupported(Features.MESSAGES)
-            sessions.send(accountId, sessionId, message.text, message.clientMessageId)
+            val announced = features.features(accountId)
+            if (Features.MESSAGES !in announced) throw CompanionException.Unsupported(Features.MESSAGES)
+            if (message.files.isNotEmpty() && Features.FILES !in announced) throw CompanionException.Unsupported(Features.FILES)
+            sessions.send(accountId, sessionId, message.text, message.clientMessageId, message.files.map { it.id })
         }
         message.received(receipt)
     } catch (error: kotlinx.coroutines.CancellationException) {
@@ -90,7 +102,7 @@ fun List<PendingMessage>.reconciled(events: List<TranscriptEvent>): List<Pending
     }
 }
 
-/** Interrupt, pause and resume. An interrupt with nothing running is not a failure. */
+/** Interrupt, pause, resume and end. An interrupt with nothing running is not a failure. */
 class ControlSessionUseCase(private val sessions: SessionRepository, private val guard: AccountGuard, private val ids: IdGenerator) {
     /** A key for one interruption: the caller keeps it until the server answered, so a retry never interrupts a later turn. */
     fun interruptKey(): String = ids.newId()
@@ -105,24 +117,52 @@ class ControlSessionUseCase(private val sessions: SessionRepository, private val
         }
     }
 
+    /** A key for one stop: a retry of the same stop never stops anything twice. */
+    fun stopKey(): String = ids.newId()
+
+    /** Stops the background task [taskId]; false when the session no longer runs an agent (nothing to stop). */
+    suspend fun stopTask(accountId: String, sessionId: String, taskId: String, key: String): Boolean = guard(accountId) {
+        try {
+            sessions.stopTask(accountId, sessionId, taskId, key)
+            true
+        } catch (error: CompanionException.Server) {
+            if (error.statusCode == 409 && error.code == "nothing_to_stop") false else throw error
+        }
+    }
+
     suspend fun pause(accountId: String, sessionId: String): CloudSession = guard(accountId) { sessions.pause(accountId, sessionId) }
     suspend fun resume(accountId: String, sessionId: String): CloudSession = guard(accountId) { sessions.resume(accountId, sessionId) }
+    suspend fun end(accountId: String, sessionId: String) = guard(accountId) { sessions.end(accountId, sessionId) }
 
     companion object {
         /** Pause and resume are offered to the owner and to administrators. */
         fun canControl(account: Account, session: CloudSession): Boolean = account.isAdministrator || session.ownerId == account.memberId
         fun canPause(session: CloudSession): Boolean = session.state in setOf(SessionState.READY, SessionState.ACTIVE, SessionState.RESUMING)
-        fun canResume(session: CloudSession): Boolean = session.state == SessionState.PAUSED || session.state == SessionState.PAUSING
+        /**
+         * A remote session resumes only from its own device, which this app never is: a message asks the device to
+         * resume it instead (the server refuses an explicit resume from elsewhere).
+         */
+        fun canResume(session: CloudSession): Boolean = !session.remote && (session.state == SessionState.PAUSED || session.state == SessionState.PAUSING)
+        /** A session is ended once; the server deletes its workspace with it. A failed one can be ended too. */
+        fun canEnd(session: CloudSession): Boolean = session.state != SessionState.TERMINATED
+        /** A remote session is never transferred (`409 remote_not_transferable`): its files stay on its device. */
+        fun canTransfer(session: CloudSession): Boolean = !session.remote
         fun canMessage(session: CloudSession): Boolean = session.state.group != SessionGroup.ENDED && session.state != SessionState.TRANSFERRING
     }
 }
 
+/**
+ * What the new-session form offers: the cloud profiles, whether the server takes a first message with the session, and
+ * whether it starts sessions on the member's online devices (`cloud.sessions.remote.daemon.v1`).
+ */
+data class NewSessionOptions(val profiles: List<Profile>, val acceptsMessage: Boolean, val onDevices: Boolean = false, val resumes: Boolean = false)
+
 class LoadProfilesUseCase(private val sessions: SessionRepository, private val features: FeaturesRepository, private val guard: AccountGuard) {
-    /** The profiles, and whether the server takes a first message with the session. */
-    suspend operator fun invoke(accountId: String): Pair<List<Profile>, Boolean> = guard(accountId) {
+    suspend operator fun invoke(accountId: String): NewSessionOptions = guard(accountId) {
         val announced = features.features(accountId, refresh = true)
         if (Features.SESSIONS !in announced) throw CompanionException.Unsupported(Features.SESSIONS)
-        sessions.profiles(accountId) to (Features.INITIAL_MESSAGE in announced && Features.MESSAGES in announced)
+        NewSessionOptions(sessions.profiles(accountId), Features.INITIAL_MESSAGE in announced && Features.MESSAGES in announced, Features.DEVICE_SESSIONS in announced,
+            Features.DEVICE_SESSIONS in announced && Features.RESUME_SESSIONS in announced)
     }
 }
 
@@ -135,11 +175,11 @@ class CreateSessionUseCase(private val sessions: SessionRepository, private val 
     suspend operator fun invoke(accountId: String, form: NewSession, idempotencyKey: String): CloudSession = guard(accountId) {
         val sent = form.normalized()
         val name = sent.name
-        require(name.isNotEmpty() && name.length <= MAX_NAME && name.none(Char::isISOControl)) { "Name the session (up to $MAX_NAME characters)." }
-        require(form.profileId.isNotBlank()) { "Choose a profile." }
+        requireInput(name.isNotEmpty() && name.length <= MAX_NAME && name.none(Char::isISOControl), InvalidInput.Problem.SESSION_NAME, MAX_NAME, "Name the session (up to $MAX_NAME characters).")
+        requireInput(form.profileId.isNotBlank(), InvalidInput.Problem.CHOOSE_PROFILE, message = "Choose a profile.")
         val message = sent.initialMessage
         if (message != null) {
-            require(MessageRules.valid(message)) { "Write a first message of up to ${MessageRules.MAX_CHARS} characters." }
+            requireInput(MessageRules.valid(message), InvalidInput.Problem.FIRST_MESSAGE_LENGTH, MessageRules.MAX_CHARS, "Write a first message of up to ${MessageRules.MAX_CHARS} characters.")
             if (Features.INITIAL_MESSAGE !in features.features(accountId)) throw CompanionException.Unsupported(Features.INITIAL_MESSAGE)
         }
         sessions.create(accountId, sent, idempotencyKey)

@@ -33,15 +33,16 @@ internal fun ApiCatalog.skillOperations() {
             "without an explicit decision, members who join later included (`skill.allMembers` confirms it; servers " +
             "advertising `team.skills.all-members.v1` support it); `false` leaves the audience as it is. Republishing " +
             "the same content is safe (200, `created: false`), with or without these flags. A `skills:publish` key " +
-            "must be owned by an administrator; it can publish and pin, but cannot assign or read the catalog. " +
-            "`allMembers` also needs the `skills:assign` scope on the key (403 `credential_scope` otherwise)."
+            "must be owned by an administrator; it can publish, but cannot assign or read the catalog. `pin` also needs " +
+            "the `skills:pin` scope on the key and `allMembers` the `skills:assign` scope (403 `credential_scope` " +
+            "otherwise, nothing stored; servers advertising `team.skills.pin-scope.v1` require `skills:pin`)."
         parameters { skillName() }
         body<PublishSkillVersionRequest>("The version label and its files, base64-encoded (`mode` is `file` or `executable`).")
         responses {
             ok<PublishSkillVersionResponse>("The version already existed with the same content (`created: false`).")
             ok<PublishSkillVersionResponse>("Published.", HttpStatusCode.Created)
             badRequest("An invalid name, version, path, mode or base64 content (`invalid_skill_artifact`).")
-            error(HttpStatusCode.Forbidden, "`allMembers` from a key without `skills:assign` (`credential_scope`).")
+            error(HttpStatusCode.Forbidden, "`pin` from a key without `skills:pin`, or `allMembers` from a key without `skills:assign` (`credential_scope`).")
             conflict("The version exists with other content (`skill_version_conflict`) or is retired (`skill_version_retired`), " +
                 "the skill is retired (`skill_retired`), or a catalog limit is reached (`skill_limit`, `skill_version_limit`).")
             error(HttpStatusCode.PayloadTooLarge, "The body exceeds 8 MiB (`payload_too_large`).")
@@ -51,7 +52,7 @@ internal fun ApiCatalog.skillOperations() {
         operationId = "pinSkillVersion"; tag(ApiTags.SKILLS)
         summary = "Approve a skill version"
         description = "Pins the version every allowed member receives. Updating and rolling back are both a pin. An " +
-            "administrator, or a `skills:publish` key owned by one; the audit journal names the key."
+            "administrator, or a key owned by one that holds `skills:publish` and `skills:pin`; the audit journal names the key."
         parameters { skillName() }
         body<PinSkillRequest>("The version to pin.")
         responses {
@@ -231,19 +232,27 @@ internal fun ApiCatalog.variantOperations() {
         operationId = "createVariant"; tag(ApiTags.VARIANTS)
         summary = "Create a variant"
         description = "`binding` is `SHARED` (one secret for everyone) or `PER_MEMBER` (each member's own secret at " +
-            "assignment). An MCP variant needs its `endpoint`, which cannot change later. Administrators only."
+            "assignment). An MCP variant needs its `endpoint`, which cannot change later. A hosted MCP command " +
+            "(`transport` `stdio`) instead names a `launcher` (`npm` or `pypi`), a `package` at one exact version " +
+            "(`name@1.2.3`, `name==1.2.3`) and up to 32 `args`; `config` holds its visible environment variables and " +
+            "`secretVariables` its encrypted ones (up to 16, values of at least 8 characters), which an argument uses as " +
+            "`${'$'}{NAME}`. None of these but the secret variables can change later. It needs the server's MCP host " +
+            "(capability `mcp.gateway.stdio.v1`), which runs it for the gateway. Administrators only."
         body<CreateVariantRequest>("The variant.")
         responses {
             ok<VariantView>("Created.", HttpStatusCode.Created)
-            badRequest("An invalid kind, binding, target, endpoint or secret (`invalid_variant`).")
-            conflict("A variant of this name exists for the target (`variant_exists`), or the limit is reached (`variant_limit`).")
+            badRequest("An invalid kind, binding, target, endpoint, transport, launcher, package, argument, variable or secret (`invalid_variant`).")
+            conflict("A variant of this name exists for the target (`variant_exists`), the limit is reached (`variant_limit`), " +
+                "or a hosted command was declared on a server without an MCP host (`mcp_disabled`).")
+            error(HttpStatusCode.ServiceUnavailable, "The server's MCP host could not be reached to check the launcher (`mcp_host_unreachable`).")
         }
     }
     patch("/api/v1/variants/{id}") {
         operationId = "updateVariant"; tag(ApiTags.VARIANTS)
         summary = "Change a variant"
         description = "Replaces the name and configuration. A null `secret` keeps the stored one unless `clearSecret`. " +
-            "`expectedVersion` must be the current version. Administrators only."
+            "A hosted command keeps its command and visible variables (send `config` unchanged); `secretVariables` " +
+            "replaces its secret variables. `expectedVersion` must be the current version. Administrators only."
         parameters { pathId("id", "The variant's identifier.") }
         body<UpdateVariantRequest>("The new name, configuration and optional secret.")
         responses {
@@ -295,7 +304,8 @@ internal fun ApiCatalog.variantOperations() {
     put("/api/v1/members/{memberId}/variants") {
         operationId = "assignVariant"; tag(ApiTags.VARIANTS)
         summary = "Assign a variant to a member"
-        description = "Replaces the member's variant for the variant's target. A `PER_MEMBER` variant needs `memberSecret`. Administrators only."
+        description = "Replaces the member's variant for the variant's target. A `PER_MEMBER` variant needs `memberSecret`, " +
+            "or `memberSecretVariables` for a hosted command, holding every variable its arguments use. Administrators only."
         parameters { pathId("memberId", "The member's identifier.") }
         body<AssignVariantRequest>("The variant and, for a per-member variant, the member's secret.")
         responses {
@@ -370,7 +380,9 @@ internal fun ApiCatalog.variantOperations() {
         operationId = "listMcpServers"; tag(ApiTags.MCP)
         summary = "The caller's MCP servers"
         description = "The MCP servers assigned to the caller and the gateway path of each (`/mcp/<server>`). No " +
-            "upstream address or credential."
+            "upstream address or credential. `transport` is `http` or `stdio` (a hosted command); for a hosted command, " +
+            "`state` (`idle`, `starting`, `ready`, `failed`, `backoff`) and `failure` are those its process last had, " +
+            "recorded about once a minute. Reading the list warms up the caller's hosted processes."
         responses { ok<List<McpServerView>>("The servers.") }
     }
     post("/mcp/{server}") {

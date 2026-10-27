@@ -1,22 +1,28 @@
 package me.nathanfallet.teamcode.companion.presentation.screens
 
+import me.nathanfallet.teamcode.companion.presentation.viewmodels.words
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import me.nathanfallet.teamcode.companion.presentation.transcript.atMostBubbleWidth
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,12 +32,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -44,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.adamglin.PhosphorIcons
@@ -56,7 +66,9 @@ import com.adamglin.phosphoricons.regular.Files
 import com.adamglin.phosphoricons.regular.Pause
 import com.adamglin.phosphoricons.regular.Play
 import com.adamglin.phosphoricons.regular.Stop
+import kotlinx.coroutines.flow.drop
 import me.nathanfallet.teamcode.companion.domain.models.CloudSession
+import me.nathanfallet.teamcode.companion.domain.models.SessionHost
 import me.nathanfallet.teamcode.companion.domain.models.PendingMessage
 import me.nathanfallet.teamcode.companion.domain.models.SessionState
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.ControlSessionUseCase
@@ -64,25 +76,54 @@ import me.nathanfallet.teamcode.companion.presentation.components.Banner
 import me.nathanfallet.teamcode.companion.presentation.components.BusyRow
 import me.nathanfallet.teamcode.companion.presentation.components.ButtonKind
 import me.nathanfallet.teamcode.companion.presentation.components.ConfirmingLinks
-import me.nathanfallet.teamcode.companion.presentation.components.ContentWidth
 import me.nathanfallet.teamcode.companion.presentation.components.Dot
 import me.nathanfallet.teamcode.companion.presentation.components.IconButtonKind
+import me.nathanfallet.teamcode.companion.presentation.components.KindChips
+import me.nathanfallet.teamcode.companion.presentation.components.hostName
+import me.nathanfallet.teamcode.companion.presentation.components.systemOf
 import me.nathanfallet.teamcode.companion.presentation.components.LinkButton
 import me.nathanfallet.teamcode.companion.presentation.components.NavBar
 import me.nathanfallet.teamcode.companion.presentation.components.StateChip
 import me.nathanfallet.teamcode.companion.presentation.components.TcButton
+import me.nathanfallet.teamcode.companion.presentation.theme.Radii
 import me.nathanfallet.teamcode.companion.presentation.components.TcIconButton
 import me.nathanfallet.teamcode.companion.presentation.components.TcTextField
+import me.nathanfallet.teamcode.companion.presentation.components.dismissKeyboardOnTap
 import me.nathanfallet.teamcode.companion.presentation.components.Tone
 import me.nathanfallet.teamcode.companion.presentation.theme.MetaStyle
 import me.nathanfallet.teamcode.companion.presentation.theme.TeamCode
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import me.nathanfallet.teamcode.companion.presentation.dictation.DictationButton
+import me.nathanfallet.teamcode.companion.presentation.dictation.DictationNotice
+import me.nathanfallet.teamcode.companion.presentation.dictation.listening
+import me.nathanfallet.teamcode.companion.presentation.dictation.listeningHint
+import me.nathanfallet.teamcode.companion.presentation.dictation.rememberDictation
+import me.nathanfallet.teamcode.companion.presentation.transcript.TranscriptItem
 import me.nathanfallet.teamcode.companion.presentation.transcript.TranscriptItemView
 import me.nathanfallet.teamcode.companion.presentation.transcript.TranscriptSeparator
+import me.nathanfallet.teamcode.companion.presentation.transcript.indexOfEvent
 import me.nathanfallet.teamcode.companion.presentation.transcript.transcriptItems
+import me.nathanfallet.teamcode.companion.presentation.transcript.Subagent
+import me.nathanfallet.teamcode.companion.presentation.transcript.backgroundCommands
+import me.nathanfallet.teamcode.companion.presentation.transcript.liveTasks
+import me.nathanfallet.teamcode.companion.presentation.transcript.subagentsOf
+import me.nathanfallet.teamcode.companion.presentation.transcript.threadEvents
+import me.nathanfallet.teamcode.companion.resources.subagents_back_to_main
+import me.nathanfallet.teamcode.companion.resources.subagents_thread_empty
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.runtime.key
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.LiveState
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SessionNotice
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SessionUiState
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SessionViewModel
+import me.nathanfallet.teamcode.companion.resources.session_waiting_host
+import me.nathanfallet.teamcode.companion.presentation.components.refusalText
+import me.nathanfallet.teamcode.companion.presentation.components.phaseLabel
 import me.nathanfallet.teamcode.companion.resources.Res
 import me.nathanfallet.teamcode.companion.resources.action_interrupt
 import me.nathanfallet.teamcode.companion.resources.action_resume
@@ -92,6 +133,13 @@ import me.nathanfallet.teamcode.companion.resources.composer_ended
 import me.nathanfallet.teamcode.companion.resources.composer_hint
 import me.nathanfallet.teamcode.companion.resources.composer_send
 import me.nathanfallet.teamcode.companion.resources.notice_nothing_running
+import me.nathanfallet.teamcode.companion.resources.notice_permission_answered
+import me.nathanfallet.teamcode.companion.resources.notice_permission_denied
+import me.nathanfallet.teamcode.companion.resources.notice_permission_ended
+import me.nathanfallet.teamcode.companion.resources.notice_permission_expired
+import me.nathanfallet.teamcode.companion.resources.notice_permission_input_unseen
+import me.nathanfallet.teamcode.companion.resources.notice_permission_invalid
+import me.nathanfallet.teamcode.companion.resources.notice_permission_rejected
 import me.nathanfallet.teamcode.companion.resources.pending_discard
 import me.nathanfallet.teamcode.companion.resources.pending_failed
 import me.nathanfallet.teamcode.companion.resources.pending_refused
@@ -107,11 +155,24 @@ import me.nathanfallet.teamcode.companion.resources.session_detail_model
 import me.nathanfallet.teamcode.companion.resources.session_detail_phase
 import me.nathanfallet.teamcode.companion.resources.session_detail_repositories
 import me.nathanfallet.teamcode.companion.resources.session_details
+import me.nathanfallet.teamcode.companion.resources.session_detail_folder
+import me.nathanfallet.teamcode.companion.resources.session_detail_permissions
+import me.nathanfallet.teamcode.companion.resources.session_detail_runs_on
+import me.nathanfallet.teamcode.companion.resources.session_detail_system
+import me.nathanfallet.teamcode.companion.resources.session_host_offline
+import me.nathanfallet.teamcode.companion.resources.session_kind_cloud
+import me.nathanfallet.teamcode.companion.resources.session_paused_remote_dock
+import me.nathanfallet.teamcode.companion.resources.session_permissions_ask
+import me.nathanfallet.teamcode.companion.resources.session_permissions_bypass
 import me.nathanfallet.teamcode.companion.resources.session_empty
 import me.nathanfallet.teamcode.companion.resources.session_ended
 import me.nathanfallet.teamcode.companion.resources.session_live
 import me.nathanfallet.teamcode.companion.resources.session_load_older
 import me.nathanfallet.teamcode.companion.resources.session_menu_pause
+import me.nathanfallet.teamcode.companion.resources.action_cancel
+import me.nathanfallet.teamcode.companion.resources.session_menu_end
+import me.nathanfallet.teamcode.companion.resources.session_end_title
+import me.nathanfallet.teamcode.companion.resources.session_end_body
 import me.nathanfallet.teamcode.companion.resources.session_menu_resume
 import me.nathanfallet.teamcode.companion.resources.session_nothing_older
 import me.nathanfallet.teamcode.companion.resources.session_paused_dock
@@ -120,6 +181,19 @@ import me.nathanfallet.teamcode.companion.resources.session_problem
 import me.nathanfallet.teamcode.companion.resources.session_reconnecting
 import me.nathanfallet.teamcode.companion.resources.session_working
 import me.nathanfallet.teamcode.companion.resources.sessions_title
+import me.nathanfallet.teamcode.companion.presentation.components.AttachButton
+import me.nathanfallet.teamcode.companion.presentation.components.MessageFiles
+import me.nathanfallet.teamcode.companion.presentation.components.PendingFileChips
+import me.nathanfallet.teamcode.companion.presentation.components.fileProblemText
+import me.nathanfallet.teamcode.companion.presentation.files.FileDropArea
+import me.nathanfallet.teamcode.companion.presentation.files.rememberFilePicker
+import me.nathanfallet.teamcode.companion.resources.files_dismiss
+import me.nathanfallet.teamcode.companion.resources.files_drop
+import me.nathanfallet.teamcode.companion.resources.files_not_ready
+import me.nathanfallet.teamcode.companion.resources.message_files_invalid
+import me.nathanfallet.teamcode.companion.resources.message_files_too_large
+import me.nathanfallet.teamcode.companion.resources.message_files_unavailable
+import me.nathanfallet.teamcode.companion.resources.message_files_unsupported
 import org.jetbrains.compose.resources.stringResource
 
 /**
@@ -127,42 +201,126 @@ import org.jetbrains.compose.resources.stringResource
  * events downward while visible), and a dock with Interrupt or Resume and the message field.
  */
 @Composable
-fun SessionScreen(viewModel: SessionViewModel, memberId: String?, onBack: () -> Unit, onOpenArtifacts: () -> Unit = {}, backLabel: String = stringResource(Res.string.sessions_title)) {
+fun SessionScreen(
+    viewModel: SessionViewModel, memberId: String?, onBack: (() -> Unit)?, onOpenArtifacts: () -> Unit = {}, backLabel: String = stringResource(Res.string.sessions_title),
+    /** More items of the "…" menu for the loaded session (the transfer action); call `close` before acting. */
+    menuItems: @Composable (session: CloudSession, close: () -> Unit) -> Unit = { _, _ -> },
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     LifecycleStartEffect(viewModel) {
         viewModel.start()
         onStopOrDispose { viewModel.stop() }
     }
     val colors = TeamCode.colors
-    Column(Modifier.fillMaxSize().background(colors.background)) {
-        NavBar(backLabel, onBack, state.session?.name.orEmpty()) { SessionMenu(state, viewModel, onOpenArtifacts) }
-        Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Column(Modifier.widthIn(max = ContentWidth).fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                state.session?.let { Summary(it, state) }
-                state.session?.problemCode?.let { Banner(stringResource(Res.string.session_problem, it), Tone.DANGER, Modifier.testTag("problem")) }
-                state.error?.let { error ->
-                    Banner(error, Tone.DANGER, Modifier.testTag("error"), action = if (!state.gone) {
-                        { TcButton(stringResource(Res.string.action_retry), onClick = viewModel::retry, kind = ButtonKind.SECONDARY, small = true) }
-                    } else null)
-                }
-                state.notice?.let { notice ->
-                    val text = when (notice) {
-                        is SessionNotice.Text -> notice.text
-                        SessionNotice.NothingRunning -> stringResource(Res.string.notice_nothing_running)
+    val messaging = state.session?.let(ControlSessionUseCase::canMessage) == true
+    // The desktop takes files dropped anywhere on the session; the phones have the paperclip only.
+    // What runs in the session, from the transcript already loaded: no request of its own.
+    val events = state.transcript.events
+    val live = remember(events, state.agentRuns) { liveTasks(events, state.agentRuns) }
+    val activeHint = remember(events, live) { subagentsOf(events, state.agentRuns, live?.tasks, 0).any { it.active } || !live?.tasks.isNullOrEmpty() }
+    val now = rememberTicking(activeHint)
+    val work = remember(events, live, state.agentRuns, now) {
+        RunningWork(subagentsOf(events, state.agentRuns, live?.tasks, now), live, live?.tasks?.let { backgroundCommands(it, events) }.orEmpty())
+    }
+    val byId = remember(work) { work.subagents.associateBy { it.id } }
+    val mode = currentSubagentPanelMode()
+    val thread = state.thread?.takeIf { it in byId }
+    val layout = subagentLayout(mode, work.hasContent, state.panelOpen, state.panelHidden, thread != null)
+    val canStop = live?.stoppable == true && messaging && state.agentRuns
+    val openThread = { id: String -> viewModel.openThread(id); if (mode == SubagentPanelMode.SCREEN || mode == SubagentPanelMode.OVERLAY) viewModel.closePanel() }
+    val togglePanel = { if (mode == SubagentPanelMode.SCREEN || mode == SubagentPanelMode.OVERLAY) viewModel.togglePanel() else viewModel.togglePanelHidden() }
+    val panel = @Composable { modifier: Modifier, onClose: (() -> Unit)?, onHide: (() -> Unit)? ->
+        SubagentPanel(work, thread, state.stopping, canStop, now, onOpen = openThread,
+            onMain = { viewModel.backToMain(); if (mode == SubagentPanelMode.SCREEN || mode == SubagentPanelMode.OVERLAY) viewModel.closePanel() },
+            onStop = viewModel::askStop, modifier = modifier, onClose = onClose, onHide = onHide)
+    }
+    val backToMain = stringResource(Res.string.subagents_back_to_main)
+    FileDropArea(enabled = messaging && state.files.canAttach, onDropped = viewModel::attach, modifier = Modifier.fillMaxSize()) { dropping ->
+        Column(Modifier.fillMaxSize().background(colors.background).dismissKeyboardOnTap()) {
+            NavBar(backLabel, onBack, state.session?.name.orEmpty()) {
+                if (work.hasContent) RunningBadge(work, onClick = togglePanel)
+                SessionMenu(state, viewModel, onOpenArtifacts, menuItems)
+            }
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.session?.let { Summary(it, state) }
+                    state.session?.let { session ->
+                        when {
+                            // Not a failure of the session: its device went quiet, and it goes on once the device is back.
+                            session.hostOffline -> Banner(stringResource(Res.string.session_host_offline, hostName(session.host)), Tone.WARN, Modifier.testTag("host-offline"))
+                            // The order is the session: it waits until the device's daemon picks it up, and says so.
+                            session.waitingForHost -> Banner(stringResource(Res.string.session_waiting_host, hostName(session.host)), Tone.ACCENT, Modifier.testTag("waiting-host"))
+                            session.hostRefused -> Banner(refusalText(session), Tone.DANGER, Modifier.testTag("host-refused"))
+                            session.problemCode != null -> Banner(stringResource(Res.string.session_problem, session.problemCode), Tone.DANGER, Modifier.testTag("problem"))
+                        }
                     }
-                    Banner(text, Tone.WARN, Modifier.testTag("notice"))
+                    state.error?.let { error ->
+                        Banner(error.words(), Tone.DANGER, Modifier.testTag("error"), action = if (!state.gone) {
+                            { TcButton(stringResource(Res.string.action_retry), onClick = viewModel::retry, kind = ButtonKind.SECONDARY, small = true) }
+                        } else null)
+                    }
+                    state.notice?.let { notice ->
+                        val text = when (notice) {
+                            is SessionNotice.Text -> notice.text.words()
+                            SessionNotice.NothingRunning -> stringResource(Res.string.notice_nothing_running)
+                            is SessionNotice.PermissionClosed -> stringResource(when (notice.code) {
+                                "permission_request_answered" -> Res.string.notice_permission_answered
+                                "permission_request_expired" -> Res.string.notice_permission_expired
+                                else -> Res.string.notice_permission_ended
+                            })
+                            is SessionNotice.PermissionInvalid -> if (notice.code == "permission_input_unseen") stringResource(Res.string.notice_permission_input_unseen)
+                                else stringResource(Res.string.notice_permission_invalid, notice.code ?: "400")
+                            SessionNotice.PermissionDenied -> stringResource(Res.string.notice_permission_denied)
+                            is SessionNotice.PermissionRejected -> stringResource(Res.string.notice_permission_rejected, notice.reason ?: "rejected")
+                            SessionNotice.FilesNotReady -> stringResource(Res.string.files_not_ready)
+                        }
+                        Banner(text, Tone.WARN, Modifier.testTag("notice"))
+                    }
+                }
+                if (layout.threadReplacesMain && thread != null) {
+                    ThreadBar(byId[thread], backToMain, onBack = viewModel::backToMain, besideMain = false)
+                    key(thread) { ConfirmingLinks { Transcript(state, thread, byId, memberId, viewModel, openThread, Modifier.weight(1f)) } }
+                } else key(null) { ConfirmingLinks { Transcript(state, null, byId, memberId, viewModel, openThread.takeIf { work.hasContent }, Modifier.weight(1f)) } }
+            }
+            if (layout.threadBeside && thread != null) {
+                Box(Modifier.width(1.dp).fillMaxHeight().background(colors.line))
+                Column(Modifier.weight(1f).fillMaxHeight().testTag("thread-column")) {
+                    ThreadBar(byId[thread], backToMain, onBack = viewModel::backToMain, besideMain = true)
+                    key(thread) { ConfirmingLinks { Transcript(state, thread, byId, memberId, viewModel, openThread, Modifier.weight(1f)) } }
                 }
             }
-            ConfirmingLinks { Transcript(state, memberId, viewModel, Modifier.weight(1f)) }
+            if (layout.panel == PanelPlacement.SIDE) {
+                Box(Modifier.width(1.dp).fillMaxHeight().background(colors.line))
+                panel(Modifier.width(SubagentPanelWidth).fillMaxHeight(), null, viewModel::togglePanelHidden)
+            }
+            }
+            state.session?.let { Dock(it, state, viewModel) }
         }
-        state.session?.let { Dock(it, state, viewModel) }
+        when (layout.panel) {
+            PanelPlacement.OVERLAY -> SubagentPanelOverlay(viewModel::closePanel) { panel(it, viewModel::closePanel, null) }
+            PanelPlacement.SCREEN -> SubagentPanelScreen { panel(it.windowInsetsPadding(WindowInsets.statusBars), viewModel::closePanel, null) }
+            else -> Unit
+        }
+        state.confirmStop?.let { taskId ->
+            val name = work.commands.firstOrNull { it.task.id == taskId }?.let { it.command ?: it.task.description }
+                ?: work.subagents.firstOrNull { it.taskId == taskId }?.let { "${it.type}: ${it.description}" } ?: taskId
+            StopTaskDialog(name, onConfirm = viewModel::confirmStop, onDismiss = viewModel::cancelStop)
+        }
+        if (dropping) {
+            Box(Modifier.fillMaxSize().background(colors.shade).padding(24.dp).testTag("drop-files"), contentAlignment = Alignment.Center) {
+                Text(stringResource(Res.string.files_drop), color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
+                    modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(colors.panel).border(1.dp, colors.accent, RoundedCornerShape(12.dp)).padding(20.dp))
+            }
+        }
     }
 }
 
-/** "…": pause or resume (owner and administrators), and the artifacts this session published. */
+/** "…": pause, resume or end (owner and administrators), and the artifacts this session published. */
 @Composable
-private fun SessionMenu(state: SessionUiState, viewModel: SessionViewModel, onOpenArtifacts: () -> Unit) {
+private fun SessionMenu(state: SessionUiState, viewModel: SessionViewModel, onOpenArtifacts: () -> Unit, menuItems: @Composable (CloudSession, () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    var confirmEnd by remember { mutableStateOf(false) }
     val session = state.session
     Box {
         TcIconButton(PhosphorIcons.Regular.DotsThree, stringResource(Res.string.session_actions), onClick = { open = true }, modifier = Modifier.testTag("session-menu"))
@@ -177,6 +335,32 @@ private fun SessionMenu(state: SessionUiState, viewModel: SessionViewModel, onOp
             }
             DropdownMenuItem(text = { Text(stringResource(Res.string.artifacts_session_title)) }, leadingIcon = { Icon(PhosphorIcons.Regular.Files, null, Modifier.size(18.dp)) },
                 onClick = { open = false; onOpenArtifacts() }, modifier = Modifier.testTag("session-artifacts"))
+            if (session != null) menuItems(session) { open = false }
+            if (session != null && state.canControl && ControlSessionUseCase.canEnd(session)) {
+                DropdownMenuItem(text = { Text(stringResource(Res.string.session_menu_end), color = TeamCode.colors.danger) },
+                    leadingIcon = { Icon(PhosphorIcons.Regular.Stop, null, Modifier.size(18.dp), tint = TeamCode.colors.danger) },
+                    enabled = !state.acting, onClick = { open = false; confirmEnd = true }, modifier = Modifier.testTag("end"))
+            }
+        }
+    }
+    if (confirmEnd) EndSessionDialog(onConfirm = { confirmEnd = false; viewModel.end() }, onDismiss = { confirmEnd = false })
+}
+
+/** Ending a session deletes its workspace and cannot be undone: asked first. */
+@Composable
+private fun EndSessionDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val colors = TeamCode.colors
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.widthIn(max = 420.dp).fillMaxWidth().clip(Radii.card).background(colors.panel).border(1.dp, colors.line, Radii.card).padding(18.dp).testTag("end-confirm"),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(stringResource(Res.string.session_end_title), color = colors.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(Res.string.session_end_body), color = colors.muted, fontSize = 13.sp, lineHeight = 18.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TcButton(stringResource(Res.string.action_cancel), onClick = onDismiss, kind = ButtonKind.SECONDARY, modifier = Modifier.weight(1f))
+                TcButton(stringResource(Res.string.session_menu_end), onClick = onConfirm, kind = ButtonKind.DANGER, modifier = Modifier.weight(1f).testTag("end-confirm-yes"))
+            }
         }
     }
 }
@@ -192,20 +376,38 @@ private fun Summary(session: CloudSession, state: SessionUiState) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StateChip(session.state)
-            LiveLabel(state)
-            Spacer(Modifier.weight(1f))
-            Text(stringResource(Res.string.session_details), style = MetaStyle.copy(fontSize = 11.5.sp), color = colors.muted)
-            Icon(if (expanded) PhosphorIcons.Regular.CaretUp else PhosphorIcons.Regular.CaretDown, contentDescription = null, tint = colors.muted, modifier = Modifier.size(14.dp))
+            // The weighted chips are measured after the caret, so on a phone they wrap to a second line instead of
+            // squeezing the caret out of the row.
+            FlowRow(
+                Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
+                StateChip(session.state)
+                if (session.remote) KindChips(session)
+                LiveLabel(state)
+            }
+            Icon(
+                if (expanded) PhosphorIcons.Regular.CaretUp else PhosphorIcons.Regular.CaretDown, contentDescription = stringResource(Res.string.session_details),
+                tint = colors.muted, modifier = Modifier.size(14.dp),
+            )
         }
         if (!expanded) {
-            val line = listOfNotNull(session.agentKind, session.model, session.effort, session.repositories.firstOrNull()?.let { if (session.repositories.size > 1) "$it +${session.repositories.size - 1}" else it })
+            val line = listOfNotNull(session.agentKind, session.model, session.effort, session.host?.directoryName, session.repositories.firstOrNull()?.let { if (session.repositories.size > 1) "$it +${session.repositories.size - 1}" else it })
             Text(line.joinToString(" · "), style = MetaStyle, color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         } else {
+            Detail(stringResource(Res.string.session_detail_runs_on), if (session.remote) hostName(session.host) else stringResource(Res.string.session_kind_cloud))
+            session.host?.let { host ->
+                systemOf(host)?.let { Detail(stringResource(Res.string.session_detail_system), it) }
+                host.directoryName?.let { Detail(stringResource(Res.string.session_detail_folder), it) }
+                when (host.permissionMode) {
+                    SessionHost.ASK -> Detail(stringResource(Res.string.session_detail_permissions), stringResource(Res.string.session_permissions_ask))
+                    SessionHost.BYPASS -> Detail(stringResource(Res.string.session_detail_permissions), stringResource(Res.string.session_permissions_bypass))
+                }
+            }
             Detail(stringResource(Res.string.session_detail_agent), session.agentKind)
             session.model?.let { Detail(stringResource(Res.string.session_detail_model), it) }
             session.effort?.let { Detail(stringResource(Res.string.session_detail_effort), it) }
-            session.phase?.let { Detail(stringResource(Res.string.session_detail_phase), it) }
+            phaseLabel(session)?.let { Detail(stringResource(Res.string.session_detail_phase), it) }
             if (session.repositories.isNotEmpty()) Detail(stringResource(Res.string.session_detail_repositories), session.repositories.joinToString("\n"))
         }
     }
@@ -237,33 +439,92 @@ private fun LiveLabel(state: SessionUiState) {
     }
 }
 
+/**
+ * The main agent's thread ([thread] null), or the subagent [thread]'s own: its events only, a subagent shown as a card
+ * that opens its thread ([onOpenSubagent]). Each thread has its own list state ([key] by the caller), so following the
+ * newest message and keeping the reading position work in each as they always did.
+ */
 @Composable
-private fun Transcript(state: SessionUiState, memberId: String?, viewModel: SessionViewModel, modifier: Modifier) {
+private fun Transcript(state: SessionUiState, thread: String?, subagents: Map<String, Subagent>, memberId: String?, viewModel: SessionViewModel,
+    onOpenSubagent: ((String) -> Unit)?, modifier: Modifier) {
     val colors = TeamCode.colors
-    val items = remember(state.transcript.events) { transcriptItems(state.transcript.events) }
+    val items = remember(state.transcript.events, thread) { transcriptItems(threadEvents(state.transcript.events, thread)) }
     val listState = rememberLazyListState()
-    // Follow the newest event while the member is at the bottom; leave the position alone when reading older ones.
-    val atBottom by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 2 } ?: true } }
-    // Keyed on the newest event, not the last item: a tool's result or a folded run grows the tail under the same item.
-    LaunchedEffect(state.transcript.events.lastOrNull()?.seq, state.running, state.pending.size) {
-        // The bottom item's index from the new items, not from the last layout, which has not measured them yet.
-        if (atBottom) listState.scrollToItem(items.size + 1)
+    // The transcript opens on its last message and follows the newest one while the member stays at the bottom; scrolled
+    // up to read older ones, the position is left alone until they come back down. Decided by the member's own scrolling,
+    // not by the last layout: items that grow after their first measure (a tool's result, a folded run unfolded)
+    // would otherwise leave the list above the bottom, at its top when the session opens.
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        // Only when a scroll ends: the first value is no gesture, and a transcript measured before this ran must still be pinned.
+        snapshotFlow { listState.isScrollInProgress }.drop(1).collect { scrolling -> if (!scrolling) follow = !listState.canScrollForward }
     }
-    LazyColumn(modifier.widthIn(max = ContentWidth).fillMaxWidth().testTag("transcript"), state = listState, contentPadding = PaddingValues(vertical = 8.dp)) {
+    // Older events arrive above the ones being read: the list keeps the member on the same event, whatever the items'
+    // keys became. Compose keeps the first visible item by its key, which is not enough here: the "top" row is the first
+    // visible item of a member who reached the top, and it stays at index 0 while the page lands under it.
+    var shownItems by remember { mutableStateOf<List<TranscriptItem>?>(null) }
+    SideEffect {
+        if (shownItems !== items) {
+            // Following the newest message is decided by the effect above; nothing is read yet when the first page lands.
+            if (!follow) listState.keepReading(items)
+            shownItems = items
+        }
+    }
+    // Hidden until the first page is pinned to the bottom: the transcript never shows its top, then jumps.
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { Triple(listState.layoutInfo.totalItemsCount, listState.layoutInfo.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size }, listState.canScrollForward) }
+            .collect { (count, _, below) ->
+                // Never while the member scrolls: their gesture wins, and decides whether to follow when it ends.
+                if (follow && below && count > 0 && !listState.isScrollInProgress) {
+                    // At the next measure, without an animation: the last item, past its end so a bottom item taller than
+                    // the window (pending messages) shows its end; the list stops at its bottom.
+                    listState.requestScrollToItem(count - 1, 1_000_000)
+                }
+            }
+    }
+    LaunchedEffect(state.loaded, items.isEmpty()) {
+        if (!state.loaded) return@LaunchedEffect
+        // One frame for the pinning above to run on the loaded page.
+        withFrameNanos { }
+        withFrameNanos { }
+        settled = true
+    }
+    LazyColumn(modifier.fillMaxWidth().alpha(if (settled || !state.loaded) 1f else 0f).testTag("transcript"), state = listState,
+        contentPadding = PaddingValues(vertical = 8.dp)) {
         item(key = "top") {
             when {
                 state.loadingOlder -> BusyRow(true)
                 state.transcript.nextBefore != null -> TcButton(stringResource(Res.string.session_load_older), onClick = viewModel::loadOlder, kind = ButtonKind.GHOST, small = true)
-                state.loaded && items.isNotEmpty() -> TranscriptSeparator(stringResource(Res.string.session_nothing_older))
+                // A subagent's thread starts with its call: "nothing older" speaks of the whole conversation.
+                thread == null && state.loaded && items.isNotEmpty() -> TranscriptSeparator(stringResource(Res.string.session_nothing_older))
                 !state.loaded -> BusyRow(state.error == null)
             }
         }
-        items(items, key = { it.key }) { TranscriptItemView(it, memberId) }
+        items(items, key = { it.key }) { TranscriptItemView(it, memberId, subagents, onOpenSubagent) }
         item(key = "bottom") {
-            if (state.loaded && items.isEmpty()) Text(stringResource(Res.string.session_empty), modifier = Modifier.fillMaxWidth().padding(16.dp), color = colors.muted, textAlign = TextAlign.Center)
-            state.pending.forEach { PendingBubble(it, viewModel) }
+            if (state.loaded && items.isEmpty()) Text(stringResource(if (thread == null) Res.string.session_empty else Res.string.subagents_thread_empty),
+                modifier = Modifier.fillMaxWidth().padding(16.dp), color = colors.muted, textAlign = TextAlign.Center)
+            // Messages go to the main agent: they show in its thread.
+            if (thread == null) state.pending.forEach { PendingBubble(it, viewModel) }
         }
     }
+}
+
+/**
+ * Called as [items] replace the ones the list was laid out with (before the next measure): puts the list back on the
+ * event its first visible row shows, at the same distance from the top, when that row moved to another index.
+ */
+private fun LazyListState.keepReading(items: List<TranscriptItem>) {
+    val info = layoutInfo
+    // The first row that is an event: the "top" and "bottom" rows have no sequence.
+    val reading = info.visibleItemsInfo.firstOrNull { it.key is Long } ?: return
+    val index = items.indexOfEvent(reading.key as Long)
+    if (index < 0 || index + 1 == reading.index) return
+    // The row stays the first one laid out, at the top edge: a row that started below it (the "top" button above it was
+    // visible) moves up by that button's height at most. A negative offset would anchor the list on rows above it, whose
+    // heights are only known once measured, and it would drift as they settle.
+    requestScrollToItem(index + 1, 0)
 }
 
 /** The bottom dock: what the agent does (Interrupt) or that the session is paused (Resume), then the message field. */
@@ -275,11 +536,15 @@ private fun Dock(session: CloudSession, state: SessionUiState, viewModel: Sessio
             Modifier.fillMaxWidth().background(colors.panelAlt).navigationBarsPadding().imePadding().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Column(Modifier.widthIn(max = ContentWidth).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!ControlSessionUseCase.canMessage(session)) {
                     Text(stringResource(Res.string.composer_ended), color = colors.muted, fontSize = 13.5.sp, textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp).testTag("composer-ended"))
                     return@Column
+                }
+                // The agent waits on it: shown above everything else, scrolled within a bounded height.
+                state.permission?.let { card ->
+                    Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) { PermissionCardView(card, viewModel) }
                 }
                 val paused = session.state == SessionState.PAUSED || session.state == SessionState.PAUSING
                 when {
@@ -287,20 +552,44 @@ private fun Dock(session: CloudSession, state: SessionUiState, viewModel: Sessio
                         TcButton(stringResource(Res.string.action_interrupt), onClick = viewModel::interrupt, enabled = !state.acting, busy = state.acting, kind = ButtonKind.SECONDARY, small = true,
                             icon = PhosphorIcons.Regular.Stop, modifier = Modifier.testTag("interrupt"))
                     }
-                    paused -> DockStatus(stringResource(Res.string.session_paused_dock), colors.warn, dot = false, tag = "paused") {
+                    paused -> DockStatus(
+                        if (session.remote) stringResource(Res.string.session_paused_remote_dock, hostName(session.host)) else stringResource(Res.string.session_paused_dock),
+                        colors.warn, dot = false, tag = "paused",
+                    ) {
                         if (state.canControl && ControlSessionUseCase.canResume(session)) {
                             TcButton(stringResource(Res.string.action_resume), onClick = viewModel::resume, enabled = !state.acting, busy = state.acting, kind = ButtonKind.SECONDARY, small = true,
                                 icon = PhosphorIcons.Regular.Play, modifier = Modifier.testTag("dock-resume"))
                         }
                     }
                 }
+                state.files.notice?.let { problem ->
+                    Banner(fileProblemText(problem), Tone.WARN, Modifier.testTag("file-notice"), action = {
+                        TcButton(stringResource(Res.string.files_dismiss), onClick = viewModel::dismissFileNotice, kind = ButtonKind.GHOST, small = true)
+                    })
+                }
+                PendingFileChips(state.files.files, onRetry = viewModel::retryFile, onRemove = viewModel::removeFile)
+                // The microphone where the platform transcribes natively: the words fill the draft, never sent by themselves.
+                val dictation = rememberDictation()
+                val field = remember { FocusRequester() }
+                dictation?.let { DictationNotice(it) }
+                val send = { dictation?.cancel(); viewModel.send() }
                 Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Only once the server announced `cloud.files.v1`: an older server shows the composer as before.
+                    if (state.files.supported) {
+                        val picker = rememberFilePicker(onPicked = viewModel::attach, onFailed = viewModel::pickFailed)
+                        AttachButton(state.files, picker, onUnavailable = viewModel::explainFiles)
+                    }
                     TcTextField(
-                        state.draft, viewModel::onDraftChange, placeholder = stringResource(Res.string.composer_hint), singleLine = false, maxLines = 6,
-                        modifier = Modifier.weight(1f), tag = "composer", shape = RoundedCornerShape(22.dp), minHeight = 44.dp,
+                        state.draft, viewModel::onDraftChange, singleLine = false, maxLines = 6,
+                        placeholder = if (dictation?.listening() == true) listeningHint() else stringResource(Res.string.composer_hint),
+                        modifier = Modifier.weight(1f).focusRequester(field), tag = "composer", shape = RoundedCornerShape(22.dp), minHeight = 44.dp,
+                        onSubmit = { if (state.canSend) send() },
+                        // A file or a screenshot pasted into the field goes the way of the paperclip's, when files are on.
+                        onPasteFiles = if (state.files.supported && state.files.canAttach) viewModel::attach else null, onPasteFailed = viewModel::pickFailed,
+                        trailing = dictation?.let { { DictationButton(it, { viewModel.uiState.value.draft }, viewModel::onDraftChange, field) } },
                     )
-                    TcIconButton(PhosphorIcons.Regular.ArrowUp, stringResource(Res.string.composer_send), onClick = viewModel::send, kind = IconButtonKind.FILLED,
-                        enabled = state.draft.isNotBlank(), modifier = Modifier.testTag("send"))
+                    TcIconButton(PhosphorIcons.Regular.ArrowUp, stringResource(Res.string.composer_send), onClick = send, kind = IconButtonKind.FILLED,
+                        enabled = state.canSend, modifier = Modifier.testTag("send"))
                 }
             }
         }
@@ -316,22 +605,33 @@ private fun DockStatus(text: String, color: androidx.compose.ui.graphics.Color, 
     }
 }
 
+/** A message's refusal: the files' codes in words, any other reason as the server's code. */
+@Composable
+private fun messageRefusal(reason: String?): String = when (reason) {
+    "file_unavailable" -> stringResource(Res.string.message_files_unavailable)
+    "files_too_large" -> stringResource(Res.string.message_files_too_large)
+    "files_unsupported" -> stringResource(Res.string.message_files_unsupported)
+    "invalid_files" -> stringResource(Res.string.message_files_invalid)
+    else -> reason.orEmpty()
+}
+
 @Composable
 private fun PendingBubble(message: PendingMessage, viewModel: SessionViewModel) {
     val colors = TeamCode.colors
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).testTag("pending-${message.clientMessageId}"), horizontalAlignment = Alignment.End) {
-        Text(
+        if (message.text.isNotEmpty()) Text(
             message.text,
-            modifier = Modifier.widthIn(max = 560.dp).alpha(0.7f).clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)).background(colors.bubble).padding(horizontal = 12.dp, vertical = 9.dp),
+            modifier = Modifier.atMostBubbleWidth().alpha(0.7f).clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)).background(colors.bubble).padding(horizontal = 12.dp, vertical = 9.dp),
             color = colors.onBubble,
             fontSize = 14.5.sp,
         )
+        MessageFiles(message.files, Modifier.padding(top = 4.dp))
         val failed = message.state == PendingMessage.State.FAILED || message.state == PendingMessage.State.REFUSED
         val status = when (message.state) {
             PendingMessage.State.SENDING -> stringResource(Res.string.pending_sending)
             PendingMessage.State.SENT -> stringResource(if (message.woke) Res.string.pending_woke else Res.string.pending_sent)
             PendingMessage.State.FAILED -> stringResource(Res.string.pending_failed, message.reason ?: "")
-            PendingMessage.State.REFUSED -> stringResource(Res.string.pending_refused, message.reason ?: "")
+            PendingMessage.State.REFUSED -> stringResource(Res.string.pending_refused, messageRefusal(message.reason))
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(status, fontSize = 12.sp, color = if (failed) colors.danger else colors.muted)

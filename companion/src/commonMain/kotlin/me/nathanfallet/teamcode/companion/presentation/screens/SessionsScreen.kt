@@ -1,5 +1,6 @@
 package me.nathanfallet.teamcode.companion.presentation.screens
 
+import me.nathanfallet.teamcode.companion.presentation.viewmodels.words
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,25 +50,32 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.adamglin.PhosphorIcons
 import com.adamglin.phosphoricons.Regular
 import com.adamglin.phosphoricons.regular.CaretDown
+import com.adamglin.phosphoricons.regular.Check
+import com.adamglin.phosphoricons.regular.Files
 import com.adamglin.phosphoricons.regular.Plus
 import com.adamglin.phosphoricons.regular.TerminalWindow
 import com.adamglin.phosphoricons.regular.Warning
 import kotlinx.coroutines.delay
 import me.nathanfallet.teamcode.companion.domain.models.Account
 import me.nathanfallet.teamcode.companion.domain.models.CloudSession
-import me.nathanfallet.teamcode.companion.domain.models.SessionGroup
+import me.nathanfallet.teamcode.companion.domain.models.SessionFilter
 import me.nathanfallet.teamcode.companion.domain.models.SessionScope
 import me.nathanfallet.teamcode.companion.domain.services.Clock
+import me.nathanfallet.teamcode.companion.presentation.components.phaseLabel
 import me.nathanfallet.teamcode.companion.presentation.components.Banner
 import me.nathanfallet.teamcode.companion.presentation.components.BrandGlyph
 import me.nathanfallet.teamcode.companion.presentation.components.BusyRow
 import me.nathanfallet.teamcode.companion.presentation.components.ButtonKind
 import me.nathanfallet.teamcode.companion.presentation.components.ContentWidth
+import me.nathanfallet.teamcode.companion.presentation.components.ContextMenuBox
+import me.nathanfallet.teamcode.companion.presentation.components.arrowKeyNavigation
 import me.nathanfallet.teamcode.companion.presentation.components.Dot
 import me.nathanfallet.teamcode.companion.presentation.components.EmptyState
 import me.nathanfallet.teamcode.companion.presentation.components.IconButtonKind
+import me.nathanfallet.teamcode.companion.presentation.components.KindChips
 import me.nathanfallet.teamcode.companion.presentation.components.LargeTitle
-import me.nathanfallet.teamcode.companion.presentation.components.Segmented
+import me.nathanfallet.teamcode.companion.presentation.components.LocalDense
+import me.nathanfallet.teamcode.companion.presentation.components.LocalWideLayout
 import me.nathanfallet.teamcode.companion.presentation.components.Skeleton
 import me.nathanfallet.teamcode.companion.presentation.components.StateChip
 import me.nathanfallet.teamcode.companion.presentation.components.TcButton
@@ -82,21 +90,25 @@ import me.nathanfallet.teamcode.companion.presentation.viewmodels.HomeViewModel
 import me.nathanfallet.teamcode.companion.presentation.viewmodels.SessionsViewModel
 import me.nathanfallet.teamcode.companion.resources.Res
 import me.nathanfallet.teamcode.companion.resources.action_retry
+import me.nathanfallet.teamcode.companion.resources.artifacts_session_title
+import me.nathanfallet.teamcode.companion.resources.sidebar_mark_read
+import me.nathanfallet.teamcode.companion.resources.sidebar_open
 import me.nathanfallet.teamcode.companion.resources.home_sign_in_again
 import me.nathanfallet.teamcode.companion.resources.home_signed_out
 import me.nathanfallet.teamcode.companion.resources.new_session_title
-import me.nathanfallet.teamcode.companion.resources.sessions_active
 import me.nathanfallet.teamcode.companion.resources.sessions_empty_active
 import me.nathanfallet.teamcode.companion.resources.sessions_empty_active_body
 import me.nathanfallet.teamcode.companion.resources.sessions_empty_ended
 import me.nathanfallet.teamcode.companion.resources.sessions_empty_ended_body
-import me.nathanfallet.teamcode.companion.resources.sessions_empty_paused
-import me.nathanfallet.teamcode.companion.resources.sessions_empty_paused_body
-import me.nathanfallet.teamcode.companion.resources.sessions_ended
+import me.nathanfallet.teamcode.companion.resources.sessions_empty_all
+import me.nathanfallet.teamcode.companion.resources.sessions_empty_all_body
+import me.nathanfallet.teamcode.companion.resources.sessions_filter
+import me.nathanfallet.teamcode.companion.resources.sessions_filter_all
+import me.nathanfallet.teamcode.companion.resources.sessions_filter_ended
+import me.nathanfallet.teamcode.companion.resources.sessions_filter_open
 import me.nathanfallet.teamcode.companion.resources.sessions_load_more
 import me.nathanfallet.teamcode.companion.resources.sessions_loading
 import me.nathanfallet.teamcode.companion.resources.sessions_mine
-import me.nathanfallet.teamcode.companion.resources.sessions_paused
 import me.nathanfallet.teamcode.companion.resources.sessions_reconnecting
 import me.nathanfallet.teamcode.companion.resources.sessions_scope
 import me.nathanfallet.teamcode.companion.resources.sessions_signed_out_title
@@ -114,7 +126,10 @@ import org.koin.compose.viewmodel.koinViewModel
 
 /**
  * The Sessions tab: the active account's cloud sessions, kept current by the team feed while the tab is visible.
- * [onNewSession] opens the new-session sheet, [onSwitchAccount] the account switcher.
+ * [onNewSession] opens the new-session sheet, [onSwitchAccount] the account switcher. A right click on a card opens
+ * its menu; Up and Down move the keyboard focus between cards, Enter opens the focused one. [follow]: the screen starts
+ * and stops the list's feed with its lifecycle; false when the list is shared with a caller that does (the wide layout's
+ * sidebar shows it too).
  */
 @Composable
 fun SessionsScreen(
@@ -122,14 +137,19 @@ fun SessionsScreen(
     onOpenSession: (Account, CloudSession) -> Unit,
     onNewSession: (Account) -> Unit = {},
     onSwitchAccount: () -> Unit = {},
+    /** More buttons of the title for a signed-in account (the transfers list). */
+    titleActions: @Composable (Account) -> Unit = {},
+    /** The session's artifacts, from the card's menu; null: no such entry. */
+    onOpenSessionArtifacts: ((Account, CloudSession) -> Unit)? = null,
     viewModel: HomeViewModel = koinViewModel(),
     sessionsViewModel: SessionsViewModel = koinViewModel(),
+    follow: Boolean = true,
     clock: Clock = koinInject(),
 ) {
     val home by viewModel.uiState.collectAsStateWithLifecycle()
     val state by sessionsViewModel.uiState.collectAsStateWithLifecycle()
     // Streams are open only while the screen is visible: closed in the background, resumed on return.
-    LifecycleStartEffect(sessionsViewModel) {
+    if (follow) LifecycleStartEffect(sessionsViewModel) {
         sessionsViewModel.start()
         onStopOrDispose { sessionsViewModel.stop() }
     }
@@ -143,16 +163,24 @@ fun SessionsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             LargeTitle(stringResource(Res.string.sessions_title)) {
+                if (account != null && account.signedIn) titleActions(account)
+                if (account != null && account.signedIn) {
+                    FilterPill(
+                        listOf(SessionFilter.ALL to stringResource(Res.string.sessions_filter_all), SessionFilter.OPEN to stringResource(Res.string.sessions_filter_open),
+                            SessionFilter.ENDED to stringResource(Res.string.sessions_filter_ended)),
+                        state.filter, sessionsViewModel::setFilter, stringResource(Res.string.sessions_filter), tag = "filter", optionTag = { "filter-${it.name.lowercase()}" },
+                    )
+                }
                 if (account != null && account.signedIn) TcIconButton(PhosphorIcons.Regular.Plus, stringResource(Res.string.new_session_title), onClick = { onNewSession(account) },
                     kind = IconButtonKind.FILLED, modifier = Modifier.testTag("new-session"))
             }
-            account?.let { AccountPill(it, onSwitchAccount) }
-            if (account != null && account.signedIn) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Segmented(
-                    listOf(SessionGroup.ACTIVE to stringResource(Res.string.sessions_active), SessionGroup.PAUSED to stringResource(Res.string.sessions_paused), SessionGroup.ENDED to stringResource(Res.string.sessions_ended)),
-                    selected = state.group, onSelect = sessionsViewModel::setGroup, modifier = Modifier.weight(1f), tag = { "group-${it.name.lowercase()}" },
+            // The sidebar lists the accounts on a wide window.
+            if (!LocalWideLayout.current) account?.let { AccountPill(it, onSwitchAccount) }
+            if (account != null && account.signedIn && account.isAdministrator) Row(verticalAlignment = Alignment.CenterVertically) {
+                FilterPill(
+                    listOf(SessionScope.MINE to stringResource(Res.string.sessions_mine), SessionScope.TEAM to stringResource(Res.string.sessions_team)),
+                    state.scope, sessionsViewModel::setScope, stringResource(Res.string.sessions_scope), tag = "scope", optionTag = { "scope-${it.name.lowercase()}" },
                 )
-                if (account.isAdministrator) ScopePill(state.scope, sessionsViewModel::setScope)
             }
         }
 
@@ -162,7 +190,7 @@ fun SessionsScreen(
         LaunchedEffect(nearEnd, list?.nextBefore) { if (nearEnd) sessionsViewModel.loadMore() }
         val error = state.error ?: home.error
         LazyColumn(
-            Modifier.widthIn(max = ContentWidth).fillMaxWidth().weight(1f).testTag("sessions"),
+            Modifier.widthIn(max = ContentWidth).fillMaxWidth().weight(1f).arrowKeyNavigation().testTag("sessions"),
             state = listState,
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -179,7 +207,7 @@ fun SessionsScreen(
                 return@LazyColumn
             }
             if (error != null) item(key = "error") {
-                Banner(error, Tone.DANGER, Modifier.testTag("sessions-error"), action = if (state.error != null) {
+                Banner(error.words(), Tone.DANGER, Modifier.testTag("sessions-error"), action = if (state.error != null) {
                     { TcButton(stringResource(Res.string.action_retry), onClick = sessionsViewModel::retry, kind = ButtonKind.SECONDARY, small = true) }
                 } else null)
             }
@@ -189,21 +217,29 @@ fun SessionsScreen(
                 items(3, key = { "skeleton-$it" }) { index -> SkeletonCard(index) }
             }
             items(sessions, key = { it.id }) { session ->
-                SessionCard(session, finished = list?.finishedTurns?.contains(session.id) == true, now = now, dimmed = error != null) {
-                    sessionsViewModel.opened(session.id)
-                    account?.let { onOpenSession(it, session) }
+                val finished = list?.finishedTurns?.contains(session.id) == true
+                val open = { sessionsViewModel.opened(session.id); account?.let { onOpenSession(it, session) }; Unit }
+                ContextMenuBox(menu = { close ->
+                    DropdownMenuItem(text = { Text(stringResource(Res.string.sidebar_open)) }, onClick = { close(); open() }, modifier = Modifier.testTag("menu-open"))
+                    if (onOpenSessionArtifacts != null && account != null) DropdownMenuItem(text = { Text(stringResource(Res.string.artifacts_session_title)) },
+                        leadingIcon = { Icon(PhosphorIcons.Regular.Files, null, Modifier.size(16.dp)) }, onClick = { close(); onOpenSessionArtifacts(account, session) },
+                        modifier = Modifier.testTag("menu-artifacts"))
+                    if (finished) DropdownMenuItem(text = { Text(stringResource(Res.string.sidebar_mark_read)) }, leadingIcon = { Icon(PhosphorIcons.Regular.Check, null, Modifier.size(16.dp)) },
+                        onClick = { close(); sessionsViewModel.opened(session.id) }, modifier = Modifier.testTag("menu-mark-read"))
+                }) {
+                    SessionCard(session, finished = finished, now = now, dimmed = error != null, showKind = state.remoteSessions, onClick = open)
                 }
             }
             item(key = "end") {
                 BusyRow(state.loadingMore)
                 if (!state.loading && list != null && sessions.isEmpty() && state.error == null && account != null && account.signedIn) {
-                    val (title, body) = when (list.group) {
-                        SessionGroup.ACTIVE -> Res.string.sessions_empty_active to Res.string.sessions_empty_active_body
-                        SessionGroup.PAUSED -> Res.string.sessions_empty_paused to Res.string.sessions_empty_paused_body
-                        SessionGroup.ENDED -> Res.string.sessions_empty_ended to Res.string.sessions_empty_ended_body
+                    val (title, body) = when (list.filter) {
+                        SessionFilter.OPEN -> Res.string.sessions_empty_active to Res.string.sessions_empty_active_body
+                        SessionFilter.ALL -> Res.string.sessions_empty_all to Res.string.sessions_empty_all_body
+                        SessionFilter.ENDED -> Res.string.sessions_empty_ended to Res.string.sessions_empty_ended_body
                     }
                     EmptyState(PhosphorIcons.Regular.TerminalWindow, stringResource(title), stringResource(body), Modifier.testTag("sessions-empty")) {
-                        if (list.group == SessionGroup.ACTIVE) TcButton(stringResource(Res.string.new_session_title), onClick = { onNewSession(account) }, icon = PhosphorIcons.Regular.Plus)
+                        if (list.filter != SessionFilter.ENDED) TcButton(stringResource(Res.string.new_session_title), onClick = { onNewSession(account) }, icon = PhosphorIcons.Regular.Plus)
                     }
                 }
                 if (list?.nextBefore != null && !state.loadingMore) {
@@ -239,13 +275,11 @@ fun AccountPill(account: Account, onClick: () -> Unit, modifier: Modifier = Modi
     }
 }
 
-/** Administrators choose between their own sessions and the whole team's. */
+/** A pill showing the chosen option; it opens a menu of [options], the chosen one in bold. */
 @Composable
-private fun ScopePill(scope: SessionScope, onScope: (SessionScope) -> Unit) {
+private fun <T> FilterPill(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit, description: String, tag: String, optionTag: (T) -> String) {
     val colors = TeamCode.colors
     var open by remember { mutableStateOf(false) }
-    val options = listOf(SessionScope.MINE to stringResource(Res.string.sessions_mine), SessionScope.TEAM to stringResource(Res.string.sessions_team))
-    val description = stringResource(Res.string.sessions_scope)
     Box {
         Row(
             Modifier
@@ -256,36 +290,55 @@ private fun ScopePill(scope: SessionScope, onScope: (SessionScope) -> Unit) {
                 .clickable(role = Role.Button) { open = true }
                 .semantics { contentDescription = description }
                 .padding(horizontal = 12.dp)
-                .testTag("scope"),
+                .testTag(tag),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(options.first { it.first == scope }.second, color = colors.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(options.first { it.first == selected }.second, color = colors.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Icon(PhosphorIcons.Regular.CaretDown, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = colors.panel) {
             for ((value, label) in options) {
-                DropdownMenuItem(text = { Text(label, fontWeight = if (value == scope) FontWeight.SemiBold else FontWeight.Normal) }, onClick = { open = false; onScope(value) },
-                    modifier = Modifier.testTag("scope-${value.name.lowercase()}"))
+                DropdownMenuItem(text = { Text(label, fontWeight = if (value == selected) FontWeight.SemiBold else FontWeight.Normal) }, onClick = { open = false; onSelect(value) },
+                    modifier = Modifier.testTag(optionTag(value)))
             }
         }
     }
 }
 
-/** A session: name and state, agent and model, repositories and age; a finished turn not seen yet is marked. */
+/**
+ * A session: name and state, agent and model, where it runs ([showKind], once the server has remote sessions),
+ * repositories or folder and age; a finished turn not seen yet is marked.
+ */
 @Composable
-private fun SessionCard(session: CloudSession, finished: Boolean, now: Long, dimmed: Boolean, onClick: () -> Unit) {
+private fun SessionCard(session: CloudSession, finished: Boolean, now: Long, dimmed: Boolean, showKind: Boolean, onClick: () -> Unit) {
     val colors = TeamCode.colors
-    TcCard(Modifier.alpha(if (dimmed) 0.7f else 1f).testTag("session-${session.id}"), borderColor = if (finished) colors.accentDim else colors.line, onClick = onClick) {
+    val dense = LocalDense.current && LocalWideLayout.current
+    TcCard(Modifier.alpha(if (dimmed) 0.7f else 1f).testTag("session-${session.id}"), borderColor = if (finished) colors.accentDim else colors.line, onClick = onClick,
+        padding = if (dense) 12.dp else 14.dp, spacing = if (dense) 5.dp else 7.dp) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (finished) Dot(colors.accentText, Modifier.testTag("finished-${session.id}"))
             Text(session.name, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             StateChip(session.state)
         }
-        val details = listOfNotNull(session.agentKind, session.model, session.effort, session.phase).joinToString(" · ")
+        val details = listOfNotNull(session.agentKind, session.model, session.effort, phaseLabel(session)).joinToString(" · ")
+        // A remote session has no repository to clone: the folder it runs in tells it apart instead.
+        val where = if (session.remote) session.host?.directoryName.orEmpty() else session.repositories.joinToString(", ")
+        if (dense) {
+            // A wide pointer-first window: one line of details under the name, the card is a list row.
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (showKind || session.remote) KindChips(session)
+                Text(listOf(details, where).filter { it.isNotEmpty() }.joinToString("  ·  "), style = MetaStyle, color = colors.muted, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                if (finished) Text(stringResource(Res.string.sessions_turn_finished), color = colors.accentText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(relativeTime(session.lastActivityAt, now), style = MetaStyle, color = colors.muted, maxLines = 1)
+            }
+            return@TcCard
+        }
         if (details.isNotEmpty()) Text(details, style = MetaStyle, color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (showKind || session.remote) KindChips(session)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(session.repositories.joinToString(", "), style = MetaStyle, color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(where, style = MetaStyle, color = colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             if (finished) Text(stringResource(Res.string.sessions_turn_finished), color = colors.accentText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(relativeTime(session.lastActivityAt, now), style = MetaStyle, color = colors.muted, maxLines = 1)
         }

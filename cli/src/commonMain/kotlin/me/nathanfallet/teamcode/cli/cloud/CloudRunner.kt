@@ -29,6 +29,8 @@ import okio.Path.Companion.toPath
 internal interface RunnerCalls {
     suspend fun register(): RunnerInstructionView
     suspend fun heartbeat(ready: Boolean): RunnerInstructionView
+    /** A heartbeat that also says whether the agent has background work (subagents, background commands, scheduled wake-ups). */
+    suspend fun heartbeat(ready: Boolean, background: Boolean): RunnerInstructionView = heartbeat(ready)
     suspend fun checkpoint(completed: Boolean): RunnerInstructionView
 }
 
@@ -37,6 +39,8 @@ internal interface RunnerCalls {
  * checkpoint when a pause is requested. The loop does not wait for the next 15-second tick when something changes:
  * the end of the preparation (ready is reported at once), the end of the drain (the checkpoint is sent at once) and a
  * change of the desired state seen by the agent's input long-poll ([wake]) all start the next heartbeat right away.
+ * Each heartbeat also says whether the agent has background work ([RunnerAgent.backgroundWork]), which the server's idle
+ * pause counts for a bounded time.
  * Once the server accepted the checkpoint the runner exits, so the pod stops without waiting for its grace period.
  *
  * `409 execution_fenced` means this execution is fenced: stop and exit without checkpointing; any other `409` is
@@ -109,13 +113,15 @@ internal class RunnerLoop(
             // This heartbeat answers every wake-up so far (a preparation that ended before the first one, in particular).
             wakeUps.tryReceive()
             val ready = prepared()
-            val instruction = when (val outcome = attempt { calls.heartbeat(ready = ready) }) {
+            // The agent's background work keeps the session from the idle pause; it only runs once the environment is ready.
+            val background = ready && agent?.backgroundWork == true
+            val instruction = when (val outcome = attempt { calls.heartbeat(ready = ready, background = background) }) {
                 is Outcome.Done -> outcome.instruction
                 Outcome.Fenced -> return EXIT_FENCED_OR_DONE
                 Outcome.Conflict -> null
             }
             when (instruction?.desiredState) {
-                "terminated" -> { log("The session is being deleted."); return EXIT_FENCED_OR_DONE }
+                "terminated" -> { log("The session is being deleted."); agent?.sessionEnded(); return EXIT_FENCED_OR_DONE }
                 // Nothing to checkpoint before the environment is ready: the server stops a resume it cancels.
                 "paused" -> if (ready) {
                     val drain = draining ?: (if (agent == null) CompletableDeferred(true)
@@ -188,7 +194,8 @@ internal class CloudRunner : SuspendingCliktCommand(name = "runner") {
         val code = untilTerminated({ echo(it, err = true) }) { client.use {
             val calls = object : RunnerCalls {
                 override suspend fun register() = client.runnerRegister(RunnerRegisterRequest(team, session, epoch))
-                override suspend fun heartbeat(ready: Boolean) = client.runnerHeartbeat(RunnerHeartbeatRequest(team, session, epoch, ready))
+                override suspend fun heartbeat(ready: Boolean) = heartbeat(ready, background = false)
+                override suspend fun heartbeat(ready: Boolean, background: Boolean) = client.runnerHeartbeat(RunnerHeartbeatRequest(team, session, epoch, ready, background))
                 override suspend fun checkpoint(completed: Boolean) = client.runnerCheckpoint(RunnerCheckpointRequest(team, session, epoch, completed))
             }
             val preparation = object : PreparationCalls {
@@ -198,13 +205,14 @@ internal class CloudRunner : SuspendingCliktCommand(name = "runner") {
             }
             val log: (String) -> Unit = { echo(it, err = true) }
             val workspace = EnvironmentPreparation.WORKSPACE
-            val commands = ShellCommandRunner(EnvironmentPreparation.logFile(workspace, epoch))
             val agentChannel = object : AgentChannel {
                 override suspend fun agent() = client.runnerAgent(RunnerAgentRequest(team, session, epoch))
                 override suspend fun events(events: List<RunnerEventView>) = client.runnerEvents(RunnerEventsRequest(team, session, epoch, events))
                 override suspend fun inputs(waitMillis: Long) = client.runnerInputs(RunnerInputsRequest(team, session, epoch, waitMillis)).inputs
-                override suspend fun poll(waitMillis: Long, desiredState: String) = client.runnerInputs(RunnerInputsRequest(team, session, epoch, waitMillis, desiredState))
+                override suspend fun poll(waitMillis: Long, desiredState: String, acceptsFiles: Boolean, acceptsTaskStops: Boolean) =
+                    client.runnerInputs(RunnerInputsRequest(team, session, epoch, waitMillis, desiredState, acceptsFiles, acceptsTaskStops))
                 override suspend fun acknowledge(acks: List<RunnerInputAckView>) = client.runnerAcknowledge(RunnerInputAckRequest(team, session, epoch, acks))
+                override suspend fun file(fileId: String, maxBytes: Long, receive: (ByteArray, Int) -> Unit) = client.runnerFile(team, session, epoch, fileId, maxBytes, receive)
             }
             // The agent's inference goes through a loopback proxy in this process, authenticated to the server with
             // the execution's `tcex_` credential; the agent only gets the proxy's random local token.
@@ -221,8 +229,9 @@ internal class CloudRunner : SuspendingCliktCommand(name = "runner") {
                 // Again after the proxy, whose engine installs its own handlers.
                 installServiceSignalHandlers()
                 val port = proxy.engine.resolvedConnectors().single().port
-                // HOME is on the workspace volume, so the conversation id survives pauses and new pods.
-                val home = environment("HOME")?.takeIf { it.isNotBlank() } ?: "/workspace/.home"
+                // The runner's state stays on the workspace volume, so the conversation id survives pauses and new pods.
+                // Its HOME does not: the pod gives it a volume of its own, which the agent's container never mounts.
+                val home = "$workspace/$RUNNER_STATE_DIR"
                 // In a session pod the agent runs in its own container under another UID: processes start through the
                 // supervisor there, and the helper in that container fetches git credentials from this process.
                 val processes = environment("TEAMCODE_AGENT_SOCKET")?.takeIf { it.isNotBlank() }?.let { RemoteProcesses(it, scope, log = { message -> echo(message, err = true) }) }
@@ -247,10 +256,14 @@ internal class CloudRunner : SuspendingCliktCommand(name = "runner") {
                 // The owner's environment variables: in the agent's environment at each start and, for Claude Code,
                 // asked of this process again before each Bash command through a script that holds no value.
                 val variables = RunnerVariables({ client.runnerVariables(RunnerVariablesRequest(team, session, epoch)) }, log = { echo(it, err = true) })
+                // The agent's `Stop` hook reports its scheduled wake-ups on the same socket; the agent host is built below.
+                var wakeups: (Int) -> Unit = {}
+                var stateHook: String? = null
                 val environmentScript = environment("TEAMCODE_CREDENTIAL_SOCKET")?.takeIf { it.isNotBlank() }?.let { credential ->
                     try {
                         val socket = EnvironmentBroker.socketFor(credential)
-                        val broker = EnvironmentBroker(listenUnix(socket), variables, log = { message -> echo(message, err = true) })
+                        val broker = EnvironmentBroker(listenUnix(socket), variables, log = { message -> echo(message, err = true) }, wakeups = { wakeups(it) })
+                        stateHook = "${AgentEnvironment.quote(binary)} cloud agent-state --socket ${AgentEnvironment.quote(socket)}"
                         scope.launch { broker.serve() }
                         EnvironmentBroker.scriptFor(credential).also { path ->
                             FileSystem.SYSTEM.write(path.toPath()) { writeUtf8(AgentEnvironment.cloudScript(binary, socket)) }
@@ -272,7 +285,18 @@ internal class CloudRunner : SuspendingCliktCommand(name = "runner") {
                         // Fetched before the agent starts, so a server without the route is known and the agent keeps its own configuration.
                         inference.available()
                         if (inference.unsupported) null else AgentInferenceEndpoint(port, localToken)
-                    }, tools = tools, variables = agentVariables)
+                    }, tools = tools, variables = agentVariables,
+                    // The pod's `uploads` volume, mounted read-only in the agent's container; an older pod spec has none.
+                    uploads = environment("TEAMCODE_UPLOADS_DIR")?.takeIf { it.isNotBlank() }?.let { SessionUploads.pod(it) }, stateHook = stateHook)
+                wakeups = agent::scheduledWakeups
+                // Preparation commands run where the agent runs, never beside the projected token; the runner masks their
+                // output and a writer in the agent's container keeps the log.
+                val logFile = EnvironmentPreparation.logFile(workspace, epoch)
+                val commands: CommandRunner = processes?.let { remote ->
+                    SupervisedCommandRunner(workspace, { command, arguments, overrides, directory -> remote.start(command, arguments, overrides, directory) }) {
+                        ProcessLogSink(remote.start(binary, listOf("cloud", "preparation-log", logFile), emptyMap(), workspace))
+                    }
+                } ?: ShellCommandRunner(logFile)
                 val prepare: suspend () -> Boolean = {
                     val prepared = EnvironmentPreparation(preparation, commands, workspace, log = log).run()
                     // The first write happens here, after registration and before the agent starts, so its first `gh` is authenticated.
@@ -322,3 +346,5 @@ internal suspend fun untilTerminated(log: (String) -> Unit, stopRequested: () ->
 }
 
 private const val SIGNAL_POLL_MILLIS = 100L
+/** The runner's state on the workspace (the agent's conversation id), below `/workspace`; formerly its `HOME`. */
+internal const val RUNNER_STATE_DIR = ".home"

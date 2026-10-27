@@ -5,10 +5,12 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.emptyFlow
 import me.nathanfallet.teamcode.api.Serialization
 import me.nathanfallet.teamcode.api.models.*
 import me.nathanfallet.teamcode.client.TeamCodeClient
+import me.nathanfallet.teamcode.client.TeamCodeException
 import me.nathanfallet.teamcode.domain.cloud.*
 import me.nathanfallet.teamcode.domain.gateway.*
 import me.nathanfallet.teamcode.domain.team.*
@@ -23,7 +25,7 @@ class CloudRoutesTest {
         val sessions = linkedMapOf<String, CloudSession>()
         val keys = mutableMapOf<String, Pair<String, String>>()
         var clock = 1_000L
-        val profile = CloudProfile("profile-id", "default", "toolchain", 1, CloudProfileSpec("cluster-id", "teamcode", "registry.example/toolchain:1"), setOf(colleague.id), 1, 1)
+        var profile = CloudProfile("profile-id", "default", "toolchain", 1, CloudProfileSpec("cluster-id", "teamcode", "registry.example/toolchain:1"), setOf(colleague.id), 1, 1)
         /** A profile assigned to nobody: only administrators may use it. */
         val reserved = CloudProfile("reserved-id", "default", "reserved", 1, profile.spec, emptySet(), 1, 1)
         override suspend fun now() = clock++
@@ -32,7 +34,8 @@ class CloudRoutesTest {
         override suspend fun profile(teamId: String, profileId: String) = listOf(profile, reserved).find { it.id == profileId }
         override suspend fun profileVersion(teamId: String, profileId: String, version: Int) = profile.spec
         override suspend fun cluster(teamId: String, clusterId: String) = CloudCluster("cluster-id", "default", "lab", "https://k8s.example.test", listOf("teamcode"), 10, "standard", 1, 0, null, 1, 1)
-        override suspend fun settings(teamId: String) = CloudSettings()
+        var cloudSettings = CloudSettings()
+        override suspend fun settings(teamId: String) = cloudSettings
         override suspend fun insert(session: CloudSession, actor: CloudActor, idempotency: IdempotencyRequest?, retainedLimit: Int): CloudCreateOutcome {
             if (idempotency != null) keys[actor.principal.member.id + idempotency.key]?.let { (digest, id) ->
                 if (digest != idempotency.requestDigest) throw TeamFailure("idempotency_conflict", 422, "conflict")
@@ -58,9 +61,9 @@ class CloudRoutesTest {
         override suspend fun claimDue(owner: String, leaseMillis: Long, limit: Int) = emptyList<CloudSession>()
         override suspend fun release(sessionId: String, owner: String, reconcileAt: Long?) = Unit
         override suspend fun startExecution(expected: CloudSession, next: CloudSession, execution: CloudExecution, leaseOwner: String, memberRunningLimit: Int) = StartOutcome.Conflict
-        override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean): Boolean {
+        override suspend fun heartbeat(sessionId: String, epoch: Int, runnerReady: Boolean, background: Boolean): Boolean {
             val run = runs[sessionId to epoch]?.takeIf { sessions[sessionId]?.currentEpoch == epoch } ?: return false
-            runs[sessionId to epoch] = run.copy(lastHeartbeatAt = clock, runnerReady = runnerReady)
+            runs[sessionId to epoch] = CloudIdleRules.heartbeat(run, background, clock).copy(lastHeartbeatAt = clock, runnerReady = runnerReady)
             return true
         }
         /** Login sessions with an installation, by token id: two devices of the colleague's. */
@@ -104,6 +107,8 @@ class CloudRoutesTest {
             "admin-read" -> Principal(admin, "admin-read-key", "default", setOf(ServiceScope.TEAM_READ))
             "admin-usage" -> Principal(admin, "admin-usage-key", "default", setOf(ServiceScope.USAGE_READ, ServiceScope.CLOUD_READ))
             "admin-read-write" -> Principal(admin, "admin-read-write-key", "default", setOf(ServiceScope.TEAM_READ, ServiceScope.CLOUD_WRITE))
+            // A cloud session's execution credential, given every scope to show the refusal does not depend on them.
+            "pod" -> Principal(colleague, "pod-execution", "default", ServiceScope.entries.toSet())
             else -> null
         }
     }
@@ -321,6 +326,35 @@ class CloudRoutesTest {
         override suspend fun complete(expected: CloudSession, next: CloudSession, transfer: CloudTransfer, leaseOwner: String, retainedLimit: Int) = TransferCompletion.Conflict
         override suspend fun expireOffers(limit: Int) = 0
         override suspend fun maintain() = Unit
+        val recipientLimits = mutableListOf<Int>()
+        override suspend fun recipients(teamId: String, limit: Int): List<CloudTransferRecipient> {
+            recipientLimits += limit
+            return listOf(store.member(teamId, "admin-id")!!, store.member(teamId, "colleague-id")!!).map { CloudTransferRecipient(it.id, it.username, it.role.isAdministrator) }
+        }
+    }
+
+    @Test fun recipientsAreListedToWhoeverMayRequestATransfer() = testApplication {
+        val store = Store()
+        val sessions = CloudSessionService(store)
+        val transferStore = Transfers(store)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(Admin(), FakeCluster),
+                cloudTransfers = CloudTransferService(store, transferStore, sessions, CloudRecipientPolicy(store)), publicOrigin = "http://localhost")
+        }
+        assertTrue("cloud.transfer.recipients.v1" in Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features)
+        val member = TeamCodeClient("http://localhost", { "colleague" }) { config -> createClient { config(this) } }
+        try {
+            // Only what a picker needs: no role name, no state, nothing else of the member.
+            assertEquals(listOf(CloudTransferRecipientView("admin-id", "admin", true), CloudTransferRecipientView("colleague-id", "colleague", false)), member.cloudTransferRecipients())
+            val body = client.get("/api/v1/cloud/transfer-recipients") { bearerAuth("colleague") }.bodyAsText()
+            assertEquals("""{"recipients":[{"id":"admin-id","username":"admin","administrator":true},{"id":"colleague-id","username":"colleague","administrator":false}]}""", body)
+            assertEquals(listOf(CloudTransferService.MAX_RECIPIENTS), transferStore.recipientLimits.distinct())
+            assertEquals(HttpStatusCode.Forbidden, client.get("/api/v1/cloud/transfer-recipients") { bearerAuth("service-admin") }.status, "A key without a cloud write scope lists nobody")
+            // A team that keeps transfers to administrators does not show members its directory.
+            store.cloudSettings = CloudSettings(memberTransfers = MemberTransfers.DISABLED)
+            assertEquals("transfer_disabled", assertFailsWith<me.nathanfallet.teamcode.client.TeamCodeException> { member.cloudTransferRecipients() }.code)
+            assertEquals(2, Serialization.json.decodeFromString<CloudTransferRecipientsView>(client.get("/api/v1/cloud/transfer-recipients") { bearerAuth("admin") }.bodyAsText()).recipients.size)
+        } finally { member.close() }
     }
 
     @Test fun transfersAreOffersForMembersAndImmediateForAdministrators() = testApplication {
@@ -478,6 +512,9 @@ class CloudRoutesTest {
             assertEquals(CloudSessionState.PREPARING, store.sessions.getValue("s1").state)
             runner.runnerHeartbeat(RunnerHeartbeatRequest("default", "s1", 1, ready = true))
             assertEquals(CloudSessionState.READY, store.sessions.getValue("s1").state)
+            assertNull(store.runs.getValue("s1" to 1).backgroundSeenAt, "No background work reported yet")
+            runner.runnerHeartbeat(RunnerHeartbeatRequest("default", "s1", 1, ready = true, background = true))
+            assertNotNull(store.runs.getValue("s1" to 1).backgroundSeenAt, "The runner's background work reaches the store")
             assertEquals(409, assertFailsWith<me.nathanfallet.teamcode.client.TeamCodeException> {
                 runner.runnerCheckpoint(RunnerCheckpointRequest("default", "s1", 1, completed = true))
             }.statusCode, "No checkpoint before a pause is requested")
@@ -542,6 +579,189 @@ class CloudRoutesTest {
         // A second host fences the first.
         client.post("/api/v1/cloud/sessions/${view.id}/host") { bearerAuth("colleague") }
         refused("execution_fenced", runner("register", laptop), HttpStatusCode.Conflict)
+    }
+
+    /** In memory, as the SQL store: presence by device, folders by device, the queue read from the sessions. */
+    private class Daemons(val store: Store) : DeviceDaemonStore {
+        val seen = mutableMapOf<String, Pair<Long, String?>>()
+        val features = mutableMapOf<String, List<String>>()
+        val folders = mutableMapOf<String, List<DeviceFolder>>()
+        /** Requests by id: device, listing, and the answer once given. */
+        val listings = java.util.concurrent.ConcurrentHashMap<String, Triple<String, DaemonListing, ResumableAnswer?>>()
+        val owners = mapOf("laptop-id" to "colleague-id", "desktop-id" to "colleague-id", "admin-device" to "admin-id")
+        override suspend fun now() = store.clock
+        override suspend fun deviceOf(principal: Principal) = store.deviceOf(principal)
+        override suspend fun cloudExecution(principal: Principal) = principal.tokenId == "pod-execution"
+        override suspend fun touch(deviceId: String, version: String?, features: List<String>) { seen[deviceId] = store.clock to version; this.features[deviceId] = features }
+        override suspend fun offline(deviceId: String) { seen.remove(deviceId) }
+        override suspend fun publish(deviceId: String, folders: List<DeviceFolder>) { this.folders[deviceId] = folders }
+        override suspend fun owned(teamId: String, memberId: String, deviceId: String) = deviceId.takeIf { owners[it] == memberId }?.let {
+            OwnedDevice(it, it, seen[it]?.let { (at, version) -> DaemonPresence.of(at, version, store.clock, features[it].orEmpty()) }, folders[it].orEmpty())
+        }
+        override suspend fun orders(deviceId: String, limit: Int) = store.sessions.values.filter {
+            it.host?.deviceId == deviceId && it.host?.folderId != null && it.phase == CloudSessionService.WAITING_HOST && it.desiredState == DesiredState.RUNNING
+        }.take(limit).map { DaemonOrder(it.id, it.host!!.folderId!!, it.host!!.directoryName!!, it.agentKind, it.host!!.permissionMode, it.state, it.updatedAt, it.host!!.resumeSessionId) }
+        override suspend fun askListing(deviceId: String, folderId: String, limit: Int, before: Long?, expiresAt: Long) =
+            java.util.UUID.randomUUID().toString().also { listings[it] = Triple(deviceId, DaemonListing(it, folderId, limit, before), null) }
+        override suspend fun listings(deviceId: String, limit: Int) = listings.values.filter { it.first == deviceId && it.third == null }.map { it.second }.take(limit)
+        override suspend fun answerListing(deviceId: String, requestId: String, answer: ResumableAnswer): Boolean {
+            val found = listings[requestId]?.takeIf { it.first == deviceId && it.third == null } ?: return false
+            listings[requestId] = found.copy(third = answer)
+            return true
+        }
+        override suspend fun listingAnswer(requestId: String) = listings[requestId]?.third
+        override suspend fun dropListing(requestId: String) { listings.remove(requestId) }
+    }
+
+    @Test fun aFoldersConversationsAreListedByTheDaemonAndASessionContinuesOne() = testApplication {
+        val store = Store()
+        val daemons = Daemons(store)
+        val sessions = CloudSessionService(store, daemons = daemons)
+        val logins = team()
+        val conversations = java.lang.reflect.Proxy.newProxyInstance(CloudConversationStore::class.java.classLoader, arrayOf(CloudConversationStore::class.java)) { _, method, _ ->
+            if (method.name == "toString") "stub" else error("unused: ${method.name}")
+        } as CloudConversationStore
+        val access = CloudAccessService(conversations, store)
+        application {
+            configureGateway(gateway, team = logins, cloudSessions = sessions, cloudAdmin = CloudAdministrationService(Admin(), FakeCluster),
+                cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, FakeCluster, logins = { logins.authenticate(it) }), remoteHosts = true),
+                cloudConversation = CloudConversation(CloudConversationService(conversations, store, access, { _, _ -> false }), access, RunnerConversationUseCase(store, conversations, { _, _ -> false })),
+                deviceDaemons = DeviceDaemonChannel(DeviceDaemonUseCase(daemons, sleep = { kotlinx.coroutines.delay(5) }), sessions), publicOrigin = "http://localhost")
+        }
+        suspend fun json(method: HttpMethod, path: String, token: String, body: String) = client.request(path) {
+            this.method = method; bearerAuth(token); contentType(ContentType.Application.Json); setBody(body)
+        }
+        suspend fun create(token: String, body: String) = client.post("/api/v1/cloud/sessions") {
+            bearerAuth(token); contentType(ContentType.Application.Json); setBody(body); header(CloudHeaders.IDEMPOTENCY_KEY, body.hashCode().toString() + token)
+        }
+        assertTrue(ResumableSessions.CAPABILITY in Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features)
+        val device = TeamCodeClient("http://localhost", { "colleague" }) { config -> createClient { config(this) } }
+        val app = TeamCodeClient("http://localhost", { "colleague-desktop" }) { config -> createClient { config(this) } }
+        val id = "0000000a-aaaa-4bbb-8ccc-00000000000a"
+        try {
+            device.publishDeviceFolders(listOf(DeviceFolderView("api", "api")))
+            // An older daemon announces nothing: the app is told, and nothing is asked of it.
+            device.pollDeviceDaemon(0, "1.0.0")
+            assertEquals(emptyList(), app.deviceFolders("laptop-id").daemon!!.features)
+            assertEquals("daemon_resume_unsupported", assertFailsWith<TeamCodeException> { app.resumableSessions("laptop-id", "api") }.code)
+            assertEquals(emptyMap(), daemons.listings)
+
+            device.stopDeviceDaemon()
+            assertEquals(emptyList(), device.pollDeviceDaemon(0, "1.1.0", listOf(DaemonFeatures.RESUME)).listings)
+            assertEquals(listOf(DaemonFeatures.RESUME), app.deviceFolders("laptop-id").daemon!!.features)
+            assertEquals("folder_not_published", assertFailsWith<TeamCodeException> { app.resumableSessions("laptop-id", "web") }.code)
+            runCatchingAssert("device_not_found", client.get("/api/v1/devices/laptop-id/folders/api/resumable") { bearerAuth("admin") }, HttpStatusCode.NotFound)
+            runCatchingAssert("invalid_limit", client.get("/api/v1/devices/laptop-id/folders/api/resumable?limit=x") { bearerAuth("colleague-desktop") }, HttpStatusCode.BadRequest)
+            runCatchingAssert("invalid_limit", client.get("/api/v1/devices/laptop-id/folders/api/resumable?limit=51") { bearerAuth("colleague-desktop") }, HttpStatusCode.BadRequest)
+
+            // The app waits while the daemon, at its next poll, reads the folder and answers.
+            val page = ResumableSessionsView(listOf(ResumableSessionView(id, "Fix the build", 1_000, 3)), nextBefore = 1_000)
+            val listed = kotlinx.coroutines.coroutineScope {
+                val waiting = async { app.resumableSessions("laptop-id", "api", limit = 5, before = 9_000) }
+                var listing: DaemonListingView? = null
+                while (listing == null) listing = device.pollDeviceDaemon(0, "1.1.0", listOf(DaemonFeatures.RESUME)).listings.singleOrNull()
+                assertEquals(DaemonListingView(listing.requestId, "api", 5, 9_000), listing)
+                runCatchingAssert("invalid_listing", json(HttpMethod.Post, "/api/v1/devices/current/daemon/listings/${listing.requestId}", "colleague",
+                    """{"sessions":[{"id":"$id","title":"","lastActiveAt":1,"turns":1}]}"""), HttpStatusCode.BadRequest)
+                runCatchingAssert("listing_not_found", json(HttpMethod.Post, "/api/v1/devices/current/daemon/listings/${listing.requestId}", "colleague-desktop", "{}"), HttpStatusCode.NotFound)
+                device.answerDeviceDaemonListing(listing.requestId, DaemonListingAnswerRequest(page.sessions, page.nextBefore))
+                waiting.await()
+            }
+            assertEquals(page, listed)
+            assertEquals(emptyMap(), daemons.listings, "Gone once read")
+            // A refusal of the daemon reaches the app as its reason.
+            val refused = kotlinx.coroutines.coroutineScope {
+                val waiting = async { assertFailsWith<TeamCodeException> { app.resumableSessions("laptop-id", "api") } }
+                var listing: DaemonListingView? = null
+                while (listing == null) listing = device.pollDeviceDaemon(0, "1.1.0", listOf(DaemonFeatures.RESUME)).listings.singleOrNull()
+                device.answerDeviceDaemonListing(listing.requestId, DaemonListingAnswerRequest(refused = "folder_missing"))
+                waiting.await()
+            }
+            assertEquals("folder_missing" to 422, refused.code to refused.statusCode)
+
+            // A session continues one: the order carries it to the daemon.
+            fun start(agent: String, resume: String) = CreateCloudSessionRequest("Go on", agent = CloudAgentRequest(kind = agent), kind = "remote", deviceId = "laptop-id", folderId = "api", resumeSessionId = resume)
+            assertEquals("invalid_resume", assertFailsWith<TeamCodeException> { app.createCloudSession(start("claude", "../etc")) }.code)
+            assertEquals("resume_unsupported", assertFailsWith<TeamCodeException> { app.createCloudSession(start("codex", id)) }.code)
+            runCatchingAssert("invalid_session", create("colleague", """{"name":"Task","profileId":"profile-id","resumeSessionId":"$id"}"""), HttpStatusCode.BadRequest)
+            val session = app.createCloudSession(start("claude", id))
+            assertEquals(id, device.pollDeviceDaemon(0, "1.1.0", listOf(DaemonFeatures.RESUME)).orders.single { it.sessionId == session.id }.resumeSessionId)
+        } finally { device.close(); app.close() }
+    }
+
+    @Test fun remoteSessionsStartOnTheOwnersOnlineDeviceThroughItsDaemon() = testApplication {
+        val store = Store()
+        val daemons = Daemons(store)
+        val sessions = CloudSessionService(store, daemons = daemons)
+        val logins = team()
+        // Never called here: the conversation is mounted only because the capability needs it.
+        val conversations = java.lang.reflect.Proxy.newProxyInstance(CloudConversationStore::class.java.classLoader, arrayOf(CloudConversationStore::class.java)) { _, method, _ ->
+            if (method.name == "toString") "stub" else error("unused: ${method.name}")
+        } as CloudConversationStore
+        val access = CloudAccessService(conversations, store)
+        application {
+            configureGateway(gateway, team = logins, cloudSessions = sessions, cloudAdmin = CloudAdministrationService(Admin(), FakeCluster),
+                cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, FakeCluster, logins = { logins.authenticate(it) }), remoteHosts = true),
+                cloudConversation = CloudConversation(CloudConversationService(conversations, store, access, { _, _ -> false }), access, RunnerConversationUseCase(store, conversations, { _, _ -> false })),
+                deviceDaemons = DeviceDaemonChannel(DeviceDaemonUseCase(daemons, sleep = {}), sessions), publicOrigin = "http://localhost")
+        }
+        assertTrue("cloud.sessions.remote.daemon.v1" in Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features)
+        suspend fun json(method: HttpMethod, path: String, token: String, body: String) = client.request(path) {
+            this.method = method; bearerAuth(token); contentType(ContentType.Application.Json); setBody(body)
+        }
+        suspend fun create(token: String, body: String) = client.post("/api/v1/cloud/sessions") {
+            bearerAuth(token); contentType(ContentType.Application.Json); setBody(body); header(CloudHeaders.IDEMPOTENCY_KEY, body.hashCode().toString() + token)
+        }
+        val start = """{"name":"From the phone","kind":"remote","agent":{"kind":"claude"},"deviceId":"laptop-id","folderId":"api","permissionMode":"bypass"}"""
+
+        // The daemon channel is interactive and bound to a device.
+        runCatchingAssert("credential_scope", json(HttpMethod.Post, "/api/v1/devices/current/daemon/poll", "colleague-write", "{}"), HttpStatusCode.Forbidden)
+        runCatchingAssert("device_offline", create("colleague-desktop", start), HttpStatusCode.Conflict)
+        // A cloud pod never becomes a device and never orders one: one pod runs one session.
+        runCatchingAssert("cloud_session_credential", create("pod", start), HttpStatusCode.Forbidden)
+        val published = json(HttpMethod.Put, "/api/v1/devices/current/folders", "colleague", """{"folders":[{"id":"api","name":"api","label":"~/work/api"}]}""")
+        assertEquals(listOf(DeviceFolderView("api", "api", "~/work/api")), Serialization.json.decodeFromString<List<DeviceFolderView>>(published.bodyAsText()))
+        runCatchingAssert("invalid_folders", json(HttpMethod.Put, "/api/v1/devices/current/folders", "colleague", """{"folders":[{"id":"x","name":"/home/x"}]}"""), HttpStatusCode.BadRequest)
+        val empty = Serialization.json.decodeFromString<DaemonPollView>(json(HttpMethod.Post, "/api/v1/devices/current/daemon/poll", "colleague", """{"waitMillis":0,"version":"1.0.0"}""").bodyAsText())
+        assertEquals(DaemonPollView(emptyList(), DeviceDaemonRules.ONLINE_TTL_MILLIS, DeviceDaemonRules.MAX_WAIT_MILLIS), empty)
+
+        // Only the owner reads the folders and starts a session there; the device's folder is checked.
+        val folders = Serialization.json.decodeFromString<DeviceFoldersView>(client.get("/api/v1/devices/laptop-id/folders") { bearerAuth("colleague-desktop") }.bodyAsText())
+        assertEquals("laptop-id" to true, folders.deviceId to folders.daemon!!.online)
+        runCatchingAssert("device_not_found", client.get("/api/v1/devices/laptop-id/folders") { bearerAuth("admin") }, HttpStatusCode.NotFound)
+        runCatchingAssert("device_not_found", create("admin", start), HttpStatusCode.NotFound)
+        runCatchingAssert("remote_requires_login", create("colleague-write", start), HttpStatusCode.UnprocessableEntity)
+        runCatchingAssert("folder_not_published", create("colleague-desktop", start.replace("\"api\"", "\"web\"")), HttpStatusCode.UnprocessableEntity)
+        runCatchingAssert("invalid_session", create("colleague", """{"name":"Task","profileId":"profile-id","deviceId":"laptop-id"}"""), HttpStatusCode.BadRequest)
+        val created = create("colleague-desktop", start)
+        assertEquals(HttpStatusCode.Accepted, created.status)
+        val view = Serialization.json.decodeFromString<CloudSessionView>(created.bodyAsText())
+        assertEquals(CloudSessionHostView("laptop-id", directoryName = "api", permissionMode = "bypass", folderId = "api"), view.host)
+
+        val poll = Serialization.json.decodeFromString<DaemonPollView>(json(HttpMethod.Post, "/api/v1/devices/current/daemon/poll", "colleague", """{"waitMillis":20000}""").bodyAsText())
+        assertEquals(listOf(DaemonOrderView(view.id, "api", "api", "claude", "bypass", "creating", poll.orders.single().requestedAt)), poll.orders)
+        runCatchingAssert("remote_host_mismatch", json(HttpMethod.Post, "/api/v1/devices/current/daemon/sessions/${view.id}/refuse", "colleague-desktop", """{"reason":"folder_missing"}"""), HttpStatusCode.Conflict)
+        val refused = Serialization.json.decodeFromString<CloudSessionView>(json(HttpMethod.Post, "/api/v1/devices/current/daemon/sessions/${view.id}/refuse", "colleague", """{"reason":"folder_missing"}""").bodyAsText())
+        assertEquals("host_refused", refused.failure?.code)
+        assertEquals(emptyList(), Serialization.json.decodeFromString<DaemonPollView>(json(HttpMethod.Post, "/api/v1/devices/current/daemon/poll", "colleague", "{}").bodyAsText()).orders)
+
+        assertEquals(HttpStatusCode.NoContent, client.delete("/api/v1/devices/current/daemon") { bearerAuth("colleague") }.status)
+        runCatchingAssert("device_offline", create("colleague-desktop", start.replace("From the phone", "Again")), HttpStatusCode.Conflict)
+
+        // The same flow through the client SDK: the daemon with the laptop's login, the app with another device's.
+        val device = TeamCodeClient("http://localhost", { "colleague" }) { config -> createClient { config(this) } }
+        val app = TeamCodeClient("http://localhost", { "colleague-desktop" }) { config -> createClient { config(this) } }
+        try {
+            assertEquals(listOf(DeviceFolderView("web", "web")), device.publishDeviceFolders(listOf(DeviceFolderView("web", "web"))))
+            assertEquals(emptyList(), device.pollDeviceDaemon(0, "1.0.0").orders)
+            assertEquals(listOf("web"), app.deviceFolders("laptop-id").folders.map { it.id })
+            val session = app.createCloudSession(CreateCloudSessionRequest("SDK", agent = CloudAgentRequest(kind = "codex"), kind = "remote", deviceId = "laptop-id", folderId = "web"))
+            assertEquals("ask" to "web", session.host?.permissionMode to session.host?.directoryName)
+            assertEquals(listOf(session.id), device.pollDeviceDaemon(0).orders.map { it.sessionId })
+            assertEquals("host_refused", device.refuseDeviceDaemonSession(session.id, "agent_missing").failure?.code)
+            device.stopDeviceDaemon()
+            assertNull(app.deviceFolders("laptop-id").daemon)
+        } finally { device.close(); app.close() }
     }
 
     private suspend fun runCatchingAssert(code: String, response: HttpResponse, status: HttpStatusCode) {
@@ -647,6 +867,64 @@ class CloudRoutesTest {
         } finally { runner.close() }
     }
 
+    /**
+     * A session created on someone's behalf runs the creator's instructions: it gets no GitHub token until its owner
+     * turns GitHub access on (audit M2). Only the owner changes the access, and turning it off waits for a pause,
+     * because the runner keeps a token it already received until that token expires.
+     */
+    @Test fun aSessionCreatedOnSomeonesBehalfGetsNoGitHubTokenUntilItsOwnerAllowsIt() = testApplication {
+        val store = Store()
+        val cluster = object : ClusterPort by FakeCluster {
+            override suspend fun reviewToken(clusterId: String, token: String, audience: String): TokenIdentity? =
+                if (token == "projected-pod-token-1") TokenIdentity("teamcode", "default", "tc-s1-e1", "uid-1") else null
+        }
+        val github = GitHubAccessSource { _, member ->
+            if (member == colleague.id) GitHubAccess.Linked(GitHubUserToken("ghu_colleague_token", 99, "octo", 42)) else GitHubAccess.NotLinked
+        }
+        val sessions = CloudSessionService(store)
+        application {
+            configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(Admin(), cluster),
+                cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store), AuthenticateRunnerUseCase(store, cluster), github = RunnerGitHubUseCase(store, github)),
+                publicOrigin = "http://localhost")
+        }
+        val created = (sessions.create(Principal(admin, "admin-session", "default"), colleague.id, CloudSessionDraft("Run", "profile-id", null, null, null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        assertEquals(colleague.id, created.ownerId)
+        store.sessions.clear()
+        store.sessions["s1"] = created.copy(id = "s1", currentEpoch = 1, generation = 1, state = CloudSessionState.ACTIVE)
+        store.runs["s1" to 1] = CloudExecution("s1", 1, "tc-s1-e1", ExecutionState.RUNNING, 1, ownerId = colleague.id)
+        assertTrue("cloud.sessions.github-access.v1" in Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("colleague") }.bodyAsText()).features)
+        assertTrue("\"githubAccess\":\"none\"" in client.get("/api/v1/cloud/sessions/s1") { bearerAuth("colleague") }.bodyAsText())
+        val runner = TeamCodeClient("http://localhost", { "projected-pod-token-1" }) { config -> createClient { config(this); install(HttpTimeout) { socketTimeoutMillis = null } } }
+        suspend fun access(token: String, value: String, onBehalf: String? = null) = client.put("/api/v1/cloud/sessions/s1/github") {
+            bearerAuth(token); onBehalf?.let { header("TeamCode-On-Behalf-Of", it) }; contentType(ContentType.Application.Json); setBody("""{"access":"$value"}""")
+        }
+        try {
+            val refused = runner.runnerGitHub(RunnerGitHubRequest("default", "s1", 1))
+            assertEquals("not_linked", refused.status, "The creator's instructions never run with the owner's token"); assertNull(refused.token)
+            assertEquals(HttpStatusCode.NotFound, access("admin", "owner").status, "Only the owner turns GitHub access on")
+            assertEquals(HttpStatusCode.Forbidden, access("admin", "owner", onBehalf = colleague.id).status, "Not even on the owner's behalf")
+            assertEquals(HttpStatusCode.BadRequest, access("colleague", "everyone").status)
+            val granted = access("colleague", "owner")
+            assertEquals(HttpStatusCode.OK, granted.status); assertTrue("\"githubAccess\":\"owner\"" in granted.bodyAsText())
+            assertEquals("ghu_colleague_token", runner.runnerGitHub(RunnerGitHubRequest("default", "s1", 1)).token)
+            val running = access("colleague", "none")
+            assertEquals(HttpStatusCode.Conflict, running.status, "A running agent keeps a token it received: turning access off waits for a pause")
+            assertTrue("session_not_paused" in running.bodyAsText())
+            store.sessions["s1"] = store.sessions.getValue("s1").copy(state = CloudSessionState.PAUSED, desiredState = DesiredState.PAUSED)
+            assertEquals(HttpStatusCode.OK, access("colleague", "none").status)
+            store.sessions["s1"] = store.sessions.getValue("s1").copy(githubAccess = CloudGitHubAccess.OWNER, environment = CloudEnvironmentSpec(requireGitHub = true))
+            assertEquals(HttpStatusCode.UnprocessableEntity, access("colleague", "none").status, "A profile that requires GitHub cannot run without it")
+        } finally { runner.close() }
+        // A session the owner created stays as before: the owner's token, with nothing to turn on.
+        val own = (sessions.create(Principal(colleague, "colleague-session", "default"), null, CloudSessionDraft("Own", "profile-id", null, null, null, emptyMap(), null), null) as CloudCreateOutcome.Created).session
+        assertEquals(CloudGitHubAccess.OWNER, own.githubAccess)
+        // A profile that requires GitHub cannot work without the owner's consent: it is refused up front, not failed later.
+        store.profile = store.profile.copy(spec = store.profile.spec.copy(environment = CloudEnvironmentSpec(requireGitHub = true)))
+        assertEquals("github_owner_consent", assertFailsWith<TeamFailure> {
+            sessions.create(Principal(admin, "admin-session", "default"), colleague.id, CloudSessionDraft("Run", "profile-id", null, null, null, emptyMap(), null), null)
+        }.code)
+    }
+
     @Test fun runnerReadsTheVariablesOfTheExecutionOwnerOnlyWhileTheSessionRuns() = testApplication {
         val store = Store()
         val cluster = object : ClusterPort by FakeCluster {
@@ -704,7 +982,9 @@ class CloudRoutesTest {
             configureGateway(gateway, team = team(), cloudSessions = sessions, cloudAdmin = CloudAdministrationService(Admin(), cluster),
                 cloudRunner = CloudRunnerChannel(RunnerChannelUseCase(store, variables, github), AuthenticateRunnerUseCase(store, cluster)), publicOrigin = "http://localhost")
         }
-        assertTrue("cloud.environment.v1" in Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("admin") }.bodyAsText()).features)
+        val features = Serialization.json.decodeFromString<Capabilities>(client.get("/api/v1/capabilities") { bearerAuth("admin") }.bodyAsText()).features
+        assertTrue("cloud.environment.v1" in features)
+        assertTrue("cloud.sessions.background-work.v1" in features, "Runners report background work and the idle pause counts it")
         val override = CloudEnvironmentRequest(listOf(CloudRepositoryView("https://github.com/example/api.git", "api", "main", "task-1")), "api")
         val response = client.post("/api/v1/cloud/sessions") {
             bearerAuth("colleague"); header(CloudHeaders.IDEMPOTENCY_KEY, "env-1"); contentType(ContentType.Application.Json)

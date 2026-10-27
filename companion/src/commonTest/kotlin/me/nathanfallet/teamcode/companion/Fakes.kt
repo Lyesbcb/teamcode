@@ -105,12 +105,20 @@ fun cloudSession(
     state: me.nathanfallet.teamcode.companion.domain.models.SessionState = me.nathanfallet.teamcode.companion.domain.models.SessionState.READY,
     ownerId: String = "m1",
     createdAt: Long = 1_000,
+    host: me.nathanfallet.teamcode.companion.domain.models.SessionHost? = null,
+    problemCode: String? = null,
 ) = me.nathanfallet.teamcode.companion.domain.models.CloudSession(
     id = id, name = "Session $id", ownerId = ownerId, state = state, phase = null, agentKind = "claude", model = "opus", effort = null,
-    profileId = "p1", repositories = emptyList(), lastActivityAt = createdAt, createdAt = createdAt, updatedAt = createdAt, problemCode = null,
+    profileId = "p1", repositories = emptyList(), lastActivityAt = createdAt, createdAt = createdAt, updatedAt = createdAt, problemCode = problemCode,
+    kind = if (host != null) me.nathanfallet.teamcode.companion.domain.models.SessionKind.REMOTE else me.nathanfallet.teamcode.companion.domain.models.SessionKind.CLOUD,
+    host = host,
 )
 
-class FakeFeatures(var features: Set<String> = setOf("cloud.sessions.v1", "cloud.transcript.v1", "cloud.messages.v1", "cloud.events.v1")) :
+/** A remote session's host: a named macOS laptop running in `app`, online unless said otherwise. */
+fun laptop(online: Boolean = true, name: String? = "Ada's MacBook", removed: Boolean = false) =
+    me.nathanfallet.teamcode.companion.domain.models.SessionHost(name, "macos", "15.1", "app", online, removed, "ask")
+
+class FakeFeatures(var features: Set<String> = setOf("cloud.sessions.v1", "cloud.transcript.v1", "cloud.messages.v1", "cloud.events.v1", "cloud.permissions.v1")) :
     me.nathanfallet.teamcode.companion.domain.repositories.FeaturesRepository {
     val refreshes = mutableListOf<Boolean>()
     override suspend fun features(accountId: String, refresh: Boolean): Set<String> { refreshes += refresh; return features }
@@ -119,7 +127,7 @@ class FakeFeatures(var features: Set<String> = setOf("cloud.sessions.v1", "cloud
 /** Sessions answered from a map; the feed is whatever [changes] emits. */
 class FakeSessionRepository : me.nathanfallet.teamcode.companion.domain.repositories.SessionRepository {
     val calls = mutableListOf<String>()
-    var pages: (me.nathanfallet.teamcode.companion.domain.models.SessionGroup, String?) -> me.nathanfallet.teamcode.companion.domain.models.SessionPage =
+    var pages: (me.nathanfallet.teamcode.companion.domain.models.SessionFilter, String?) -> me.nathanfallet.teamcode.companion.domain.models.SessionPage =
         { _, _ -> me.nathanfallet.teamcode.companion.domain.models.SessionPage(emptyList(), null) }
     val byId = mutableMapOf<String, me.nathanfallet.teamcode.companion.domain.models.CloudSession>()
     var sessionFailure: Exception? = null
@@ -128,10 +136,11 @@ class FakeSessionRepository : me.nathanfallet.teamcode.companion.domain.reposito
     /** Suspends each list load until released, to change things while it is in flight. */
     var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
-    override suspend fun sessions(accountId: String, scope: me.nathanfallet.teamcode.companion.domain.models.SessionScope, group: me.nathanfallet.teamcode.companion.domain.models.SessionGroup, before: String?): me.nathanfallet.teamcode.companion.domain.models.SessionPage {
-        calls += "list $scope $group $before"
+    override suspend fun sessions(accountId: String, scope: me.nathanfallet.teamcode.companion.domain.models.SessionScope, filter: me.nathanfallet.teamcode.companion.domain.models.SessionFilter, before: String?,
+        kinds: Set<me.nathanfallet.teamcode.companion.domain.models.SessionKind>): me.nathanfallet.teamcode.companion.domain.models.SessionPage {
+        calls += "list $scope $filter $before" + if (kinds.isEmpty()) "" else " " + kinds.map { it.wire }.sorted().joinToString(",")
         gate?.await()
-        return pages(group, before)
+        return pages(filter, before)
     }
     override suspend fun session(accountId: String, sessionId: String): me.nathanfallet.teamcode.companion.domain.models.CloudSession {
         calls += "get $sessionId"
@@ -148,14 +157,36 @@ class FakeSessionRepository : me.nathanfallet.teamcode.companion.domain.reposito
         calls += "create ${session.name} $idempotencyKey"
         return createResult(session)
     }
-    override suspend fun send(accountId: String, sessionId: String, text: String, clientMessageId: String): me.nathanfallet.teamcode.companion.domain.models.InputReceipt {
-        calls += "send $sessionId $text $clientMessageId"
+    var createOnDeviceResult: (me.nathanfallet.teamcode.companion.domain.models.NewDeviceSession) -> me.nathanfallet.teamcode.companion.domain.models.CloudSession =
+        { cloudSession("new").copy(kind = me.nathanfallet.teamcode.companion.domain.models.SessionKind.REMOTE) }
+    val deviceCreations = mutableListOf<Pair<me.nathanfallet.teamcode.companion.domain.models.NewDeviceSession, String>>()
+    override suspend fun createOnDevice(accountId: String, session: me.nathanfallet.teamcode.companion.domain.models.NewDeviceSession, idempotencyKey: String): me.nathanfallet.teamcode.companion.domain.models.CloudSession {
+        calls += "createOnDevice ${session.name} $idempotencyKey"
+        deviceCreations += session to idempotencyKey
+        return createOnDeviceResult(session)
+    }
+    override suspend fun send(accountId: String, sessionId: String, text: String, clientMessageId: String, fileIds: List<String>): me.nathanfallet.teamcode.companion.domain.models.InputReceipt {
+        calls += "send $sessionId $text $clientMessageId" + if (fileIds.isEmpty()) "" else " files=" + fileIds.joinToString(",")
         return sendResult(clientMessageId)
     }
+    /** Each answer's acknowledgement; throw from it to fail. */
+    var answerResult: (me.nathanfallet.teamcode.companion.domain.models.PermissionAnswer) -> me.nathanfallet.teamcode.companion.domain.models.InputReceipt =
+        { me.nathanfallet.teamcode.companion.domain.models.InputReceipt("ans-${it.requestId}", "queued", false, null) }
+    val answers = mutableListOf<Pair<me.nathanfallet.teamcode.companion.domain.models.PermissionAnswer, String>>()
+    override suspend fun answer(accountId: String, sessionId: String, answer: me.nathanfallet.teamcode.companion.domain.models.PermissionAnswer, idempotencyKey: String): me.nathanfallet.teamcode.companion.domain.models.InputReceipt {
+        calls += "answer $sessionId ${answer.requestId} $idempotencyKey"
+        answers += answer to idempotencyKey
+        return answerResult(answer)
+    }
     override suspend fun interrupt(accountId: String, sessionId: String, idempotencyKey: String): me.nathanfallet.teamcode.companion.domain.models.InputReceipt { calls += "interrupt $sessionId $idempotencyKey"; return interruptResult() }
+    var stopTaskResult: () -> me.nathanfallet.teamcode.companion.domain.models.InputReceipt = { me.nathanfallet.teamcode.companion.domain.models.InputReceipt("stop", "queued", false, null) }
+    override suspend fun stopTask(accountId: String, sessionId: String, taskId: String, idempotencyKey: String): me.nathanfallet.teamcode.companion.domain.models.InputReceipt { calls += "stopTask $sessionId $taskId $idempotencyKey"; return stopTaskResult() }
     override suspend fun pause(accountId: String, sessionId: String) = (byId[sessionId] ?: cloudSession(sessionId)).copy(state = me.nathanfallet.teamcode.companion.domain.models.SessionState.PAUSING).also { calls += "pause $sessionId" }
+    override suspend fun end(accountId: String, sessionId: String) { calls += "end $sessionId"; endFailure?.let { throw it } }
+    var endFailure: Exception? = null
     override suspend fun resume(accountId: String, sessionId: String) = (byId[sessionId] ?: cloudSession(sessionId)).copy(state = me.nathanfallet.teamcode.companion.domain.models.SessionState.RESUMING).also { calls += "resume $sessionId" }
-    override fun sessionChanges(accountId: String) = changes.also { calls += "feed" }
+    override fun sessionChanges(accountId: String, kinds: Set<me.nathanfallet.teamcode.companion.domain.models.SessionKind>) =
+        changes.also { calls += "feed" + if (kinds.isEmpty()) "" else " " + kinds.map { it.wire }.sorted().joinToString(",") }
 }
 
 fun artifact(id: String, title: String = "Report $id", version: Int = 1, updatedAt: Long = 1_000) = me.nathanfallet.teamcode.companion.domain.models.Artifact(
@@ -182,3 +213,20 @@ class FakeArtifactRepository : me.nathanfallet.teamcode.companion.domain.reposit
     }
     override suspend fun ticket(accountId: String, artifactId: String, version: Int?) = tickets(artifactId, version).also { calls += "ticket $artifactId $version" }
 }
+
+/** Online devices and their folders from maps; throw from [devicesResult] or [foldersResult] to fail. */
+class FakeDeviceRepository : me.nathanfallet.teamcode.companion.domain.repositories.DeviceRepository {
+    val calls = mutableListOf<String>()
+    var devicesResult: () -> List<me.nathanfallet.teamcode.companion.domain.models.HostDevice> = { emptyList() }
+    var foldersResult: (String) -> me.nathanfallet.teamcode.companion.domain.models.DeviceFolders =
+        { me.nathanfallet.teamcode.companion.domain.models.DeviceFolders(true, emptyList()) }
+    override suspend fun onlineDevices(accountId: String) = devicesResult().also { calls += "devices" }
+    override suspend fun folders(accountId: String, deviceId: String) = foldersResult(deviceId).also { calls += "folders $deviceId" }
+    var resumableResult: (deviceId: String, folderId: String, before: Long?) -> me.nathanfallet.teamcode.companion.domain.models.ResumableSessions =
+        { _, _, _ -> me.nathanfallet.teamcode.companion.domain.models.ResumableSessions(emptyList()) }
+    override suspend fun resumable(accountId: String, deviceId: String, folderId: String, limit: Int, before: Long?) =
+        resumableResult(deviceId, folderId, before).also { calls += "resumable $deviceId $folderId $limit" + (before?.let { " before=$it" } ?: "") }
+}
+
+fun hostDevice(id: String, name: String = "Device $id", current: Boolean = false) =
+    me.nathanfallet.teamcode.companion.domain.models.HostDevice(id, name, "macos", "15.1", current)

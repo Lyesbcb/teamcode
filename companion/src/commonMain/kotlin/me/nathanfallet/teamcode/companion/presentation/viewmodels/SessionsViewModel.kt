@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.nathanfallet.teamcode.companion.domain.models.Account
 import me.nathanfallet.teamcode.companion.domain.models.CompanionException
-import me.nathanfallet.teamcode.companion.domain.models.SessionGroup
+import me.nathanfallet.teamcode.companion.domain.models.SessionFilter
 import me.nathanfallet.teamcode.companion.domain.models.SessionScope
 import me.nathanfallet.teamcode.companion.domain.repositories.AccountRepository
 import me.nathanfallet.teamcode.companion.domain.usecases.sessions.FollowSessionListUseCase
@@ -35,10 +35,12 @@ data class SessionsUiState(
     /** True while the feed (or polling) is running; false in the background, after a refusal, or signed out. */
     val following: Boolean = false,
     val reconnecting: Boolean = false,
-    val error: String? = null,
+    val error: Failure? = null,
+    /** The server announces remote sessions: a row says where its session runs. */
+    val remoteSessions: Boolean = false,
 ) {
     val scope: SessionScope get() = list?.scope ?: SessionScope.MINE
-    val group: SessionGroup get() = list?.group ?: SessionGroup.ACTIVE
+    val filter: SessionFilter get() = list?.filter ?: SessionFilter.OPEN
 }
 
 /**
@@ -77,7 +79,7 @@ class SessionsViewModel(
                 }
                 .collect { account ->
                     val scope = if (account?.isAdministrator == true) state.value.scope else SessionScope.MINE
-                    state.value = SessionsUiState(account = account, list = account?.let { SessionList(scope, state.value.group, it.memberId) })
+                    state.value = SessionsUiState(account = account, list = account?.let { SessionList(scope, state.value.filter, it.memberId) })
                     restart()
                 }
         }
@@ -93,8 +95,8 @@ class SessionsViewModel(
 
     fun retry() = restart()
 
-    fun setGroup(group: SessionGroup) = changeFilter(state.value.scope, group)
-    fun setScope(scope: SessionScope) = changeFilter(scope, state.value.group)
+    fun setFilter(filter: SessionFilter) = changeFilter(state.value.scope, filter)
+    fun setScope(scope: SessionScope) = changeFilter(scope, state.value.filter)
     fun loadMore() {
         // One page at a time: the button and the scroll's end ask together, and a queued request would load the page after.
         if (state.value.list?.nextBefore == null || follow?.isActive != true || moreQueued) return
@@ -102,14 +104,14 @@ class SessionsViewModel(
     }
     fun opened(sessionId: String) = state.update { it.copy(list = it.list?.opened(sessionId)) }
 
-    private fun changeFilter(scope: SessionScope, group: SessionGroup) {
+    private fun changeFilter(scope: SessionScope, filter: SessionFilter) {
         val current = state.value
         val account = current.account ?: return
-        if (scope == current.scope && group == current.group) return
+        if (scope == current.scope && filter == current.filter) return
         if (scope == SessionScope.TEAM && !account.isAdministrator) return
         // Loading until the queued reload runs: an empty new list never reads as "no sessions" meanwhile.
         val running = follow?.isActive == true
-        state.update { it.copy(list = SessionList(scope, group, account.memberId, finishedTurns = it.list?.finishedTurns.orEmpty()), loading = running, error = null) }
+        state.update { it.copy(list = SessionList(scope, filter, account.memberId, finishedTurns = it.list?.finishedTurns.orEmpty()), loading = running, error = null) }
         // The loop reads the command; stopped after an error, it is started again, and the feed's opening loads the list.
         if (!running || !commands.trySend(Command.Reload).isSuccess) restart()
     }
@@ -150,6 +152,7 @@ class SessionsViewModel(
                 (unsettled.drop(first) + unsettled.take(first)).take(MAX_SETTLE).forEach { fetchOne(accountId, it) }
             }
             is SessionListSignal.Connection -> state.update { it.copy(reconnecting = signal.reconnecting) }
+            is SessionListSignal.RemoteSessions -> state.update { it.copy(remoteSessions = signal.supported) }
             is SessionListSignal.Changed -> {
                 val list = state.value.list ?: return
                 val (applied, fetch) = list.applied(signal.change)
@@ -164,10 +167,10 @@ class SessionsViewModel(
         // The spinner only for a list with nothing to show yet: a refresh of a shown list stays quiet.
         state.update { it.copy(loading = list.sessions.isEmpty()) }
         // Cancelled by a restart (retry, account change): the flag never stays on.
-        val outcome = try { attempt { loadSessions(accountId, list.scope, list.group) } } finally { state.update { it.copy(loading = false) } }
+        val outcome = try { attempt { loadSessions(accountId, list.scope, list.filter) } } finally { state.update { it.copy(loading = false) } }
         state.update { current ->
             // A filter changed while loading: that change queued its own reload.
-            val target = current.list?.takeIf { it.scope == list.scope && it.group == list.group }
+            val target = current.list?.takeIf { it.scope == list.scope && it.filter == list.filter }
             current.copy(loading = false, list = outcome.getOrNull()?.let { page -> target?.refreshed(page) } ?: current.list, error = outcome.exceptionOrNull()?.userMessage())
         }
     }
@@ -176,9 +179,9 @@ class SessionsViewModel(
         val list = state.value.list ?: return
         val before = list.nextBefore ?: return
         state.update { it.copy(loadingMore = true) }
-        val outcome = try { attempt { loadSessions(accountId, list.scope, list.group, before) } } finally { state.update { it.copy(loadingMore = false) } }
+        val outcome = try { attempt { loadSessions(accountId, list.scope, list.filter, before) } } finally { state.update { it.copy(loadingMore = false) } }
         state.update { current ->
-            val target = current.list?.takeIf { it.scope == list.scope && it.group == list.group && it.nextBefore == before }
+            val target = current.list?.takeIf { it.scope == list.scope && it.filter == list.filter && it.nextBefore == before }
             current.copy(loadingMore = false, list = outcome.getOrNull()?.let { page -> target?.appended(page) } ?: current.list, error = outcome.exceptionOrNull()?.userMessage())
         }
     }

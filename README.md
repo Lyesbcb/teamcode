@@ -2,7 +2,7 @@
 
 An open-source, self-hosted model gateway for teams: pooled provider accounts, fair access, predictive capacity management, a web dashboard, and a native Kotlin Multiplatform CLI.
 
-**Initial release: 0.1.0.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit native model routes and macOS/Linux user service installation are implemented. Cross-provider translation is experimental, disabled by default and outside V1 release acceptance; explicit startup before login and signed native distribution are included. Additional workstation/load/operational validation moves to V2 under the owner decision; see the [handoff](docs/v2-validation-handoff.md). Native Windows runtime and user service acceptance have passed. See [implementation status](docs/status.md) before using a command from the [product roadmap](docs/product.md).
+**Initial release: 0.1.0.** Claude Max and Codex subscription inference, native account import/proxy, team administration, weighted daily budgets, model/effort policies and capacity guidance are implemented. Real Claude Code → Haiku and Codex CLI → GPT-6 Luna acceptance runs have passed through the native proxy and central server. Explicit native model routes and macOS/Linux user service installation are implemented. Cross-provider translation is experimental, disabled by default and outside V1 release acceptance; explicit startup before login and signed native distribution are included. Additional workstation/load/operational validation moves to V2 under the owner decision; see the [handoff](docs/v2-validation-handoff.md). Native Windows runtime and user service acceptance have passed.
 
 ## Install the native CLI
 
@@ -17,6 +17,24 @@ curl -fsSL https://github.com/nathanfallet/teamcode/releases/latest/download/ins
 ```
 
 The script is pinned to the release it comes from, so every file it downloads matches that exact version. To install a specific version, replace `releases/latest/download/` with `releases/download/<version>/`. No JVM is required. The installer makes `teamcode` available by name (a `~/.local/bin` link on macOS/Linux, your user PATH on Windows) and preserves login and personal agent configuration. See the guide for prerequisites, custom roots, offline installation and current platform evidence.
+
+## Install the desktop app
+
+TeamCode Desktop (macOS, Windows, Linux) follows your team's sessions and runs remote sessions on your computer. It ships with every release, under the same version as the CLI. Three ways, none needing administrator rights:
+
+1. **From the CLI (recommended).** `teamcode ui` installs the desktop app of the CLI's version, or updates an older one, then opens it with the CLI's account. It checks the signed `desktop-manifest.json`, the package's SHA-256 and, on macOS, the Developer ID signature before anything runs. `teamcode ui --yes --no-launch` installs without asking or opening it.
+2. **Direct download.** The [latest release](https://github.com/nathanfallet/teamcode/releases/latest) attaches `teamcode-desktop-VERSION-TARGET.EXT` for each system:
+
+   | System | `teamcode ui` installs | Also attached |
+   | --- | --- | --- |
+   | macOS (Apple silicon `macos-arm64`; Intel Macs are no longer supported, the last release with an Intel build is [1.0.1](https://github.com/nathanfallet/teamcode/releases/tag/1.0.1)) | `.zip` of `TeamCode.app`: unzip into `~/Applications` | `.dmg` |
+   | Windows (`windows-x64`) | `.msi`, installed for the current user in `%LOCALAPPDATA%\TeamCode App` | |
+   | Linux (`linux-x64`, `linux-arm64`) | `.tar.gz` of the `TeamCode` folder (`bin/TeamCode` starts it) | `.deb`, `.rpm` (installed in `/opt/teamcode`) |
+
+   Every file is listed in the release's `SHA256SUMS`. macOS packages are signed with a Developer ID and notarized. The Windows installer is not signed by a paid signing service: SmartScreen warns on first launch ("More info", then "Run anyway"); its hash is in the signed `desktop-manifest.json`.
+3. **From the app to the CLI.** Without the CLI, the desktop app offers "Install the TeamCode CLI": it runs the release's `install.sh` (or `install.ps1`) of its own version, only when the script's SHA-256 matches the one built into the app.
+
+There is no separate desktop install script.
 
 ## Troubleshooting CLI errors
 
@@ -34,6 +52,7 @@ When a command fails, the CLI prints what happened and what to do, then exits wi
 | `Cannot reach` / `Cannot find` / `did not answer in time` | Connection refused, host name not resolved, or timeout. | Check the server URL in the message, that the server runs, and your network or VPN. |
 | `TLS error` | Untrusted, expired or mismatched certificate, or no HTTPS on that port. | Check the URL and the certificate; an HTTPS-intercepting proxy can cause this. |
 | `pasted … sign-in code is incomplete` / `did not accept the sign-in code` | The OAuth code is truncated, from another attempt, or expired. | Run `teamcode accounts add` again and paste the complete code (`code#state` for Claude, the whole `localhost:1455/auth/callback` URL for Codex). |
+| `teamcode update` fails with `release_…` (for example `release_network_failure` on Linux or Windows, up to 1.0.0) | The message names the cause: GitHub unreachable, DNS, TLS, proxy, rate limit, disk, or an older client that cannot read GitHub's current redirect. | Follow the message. To reinstall the latest release with the system's own downloader, run the [install command](#install-the-native-cli) again: it keeps the login and settings. |
 | `Cannot read or write a private TeamCode file` | Permissions on the configuration directory. | Make sure your user owns `~/.config/teamcode` (or `$XDG_CONFIG_HOME/teamcode`) and can read and write it. |
 
 For a bug report, add `--debug` before the command (`teamcode --debug accounts list`) or set `TEAMCODE_DEBUG=1`. The CLI then prints one more line with the error type, HTTP status, codes, the network failure family and the CLI version, still without secrets.
@@ -53,7 +72,7 @@ export TEAMCODE_PUBLIC_URL=https://teamcode.example.org
 java -jar app/build/libs/app-all.jar
 ```
 
-Put an HTTPS reverse proxy in front of port 8080, or use `http://localhost:8080` as the public URL for local development. `TEAMCODE_HOST` defaults to loopback. The public URL must match the browser origin for form protection.
+Put an HTTPS reverse proxy in front of port 8080, or use `http://localhost:8080` as the public URL for local development. `TEAMCODE_HOST` defaults to loopback. The public URL must match the browser origin for form protection. Behind a proxy, set `TEAMCODE_TRUSTED_PROXIES` (Helm: `trustedProxies`) to its addresses so that [sign-in throttling](docs/team-roles.md#sign-in-throttling) sees each client's address.
 
 On an empty database, TeamCode creates owner account `admin` and prints its random temporary password **once** to the bootstrap log. Sign in at `/dashboard` and change it. Restarting does not print or reset it. There is no public registration, email setup or OAuth requirement for team membership. Administrators create users and receive a one-time temporary password to share privately. Password changes and resets revoke every existing session; disabling or changing a member's role also revokes their sessions. The [last ready owner](docs/team-roles.md) cannot be disabled, demoted or have their password reset; administrators cannot grant ownership or change an owner account. Administrators can also create [groups with cumulative budgets and scoped managers](docs/groups.md); managers can pause/resume admission within their groups without changing global roles or quotas.
 
@@ -69,6 +88,10 @@ teamcode logout
 ```
 
 The CLI prompts for username/password, handles required password changes, and saves only the server URL and revocable session token. Provider sign-in uses a local PKCE flow: the CLI opens the sign-in link in your default browser (it only prints it over SSH, without a display, or with `--no-browser`); paste the complete `code#state` (Claude) or final `http://localhost:1455/auth/callback?...` address (Codex) into the hidden prompt. Codex uses its registered redirect address; no local callback listener is started, so paste the address even when the browser reports that the page cannot load. Credentials are sent to TeamCode, where the Claude profile/Max subscription or Codex authenticated subscription identity is checked before encrypted storage. Import reads TeamClaude/TeamRouter's XDG configuration or `--config PATH` and never modifies the source. Existing accounts keep their ID, custom name, disabled state and priority. An account added this way is active at once; imported accounts wait for a handover. Stop any other credential refresher before explicit `handover --confirm`, the dashboard Handover button, or import `--take-ownership`. Reconnect with `accounts add --provider claude` or `accounts add --provider codex`; verified enrollment updates an existing account. Only administrators add accounts unless one of them allows every member in **Dashboard → Subscription accounts → Who can add accounts** ([details](docs/capacity.md#who-can-add-accounts)). The Codex login flow has synthetic protocol tests; a live browser-consent acceptance run remains pending. For a temporary trial while TeamClaude still owns refresh, import with `--access-only`: TeamCode uses the current access tokens and refuses to refresh them. Reimport current credentials when they expire.
+
+## Sending files to a session
+
+Members can send images, PDFs and text files to a cloud or remote session: `/attach PATH` in `teamcode attach`, or the paperclip in the companion apps. The server needs the team's artifact bucket, saved and tested in Settings → Artifacts; without it uploads are refused with `file_storage_not_configured`. Files wait in the bucket under `session-files/` for 24 hours at most, and are deleted once the session's host has received them. See [files in cloud sessions](docs/cloud-conversations.md#files).
 
 ## Service and CI credentials
 
@@ -105,7 +128,7 @@ Administrators can configure ordered model replacements and fallbacks in **Dashb
 
 ## Local service
 
-After login, `teamcode service install` starts a local proxy automatically at user login on macOS, Linux and Windows. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Native Windows Task Scheduler acceptance has passed; `teamcode service install --at-boot` (`--system`) enables startup before login with the OS authorization described in that guide. Extra real-workstation reboot/logon checks are V2 follow-up. See the [Windows workstation guide](docs/windows.md).
+`install.sh`, `install.ps1`, `teamcode install`, `teamcode update` (including automatic updates) and `teamcode ui`, once it has installed the desktop app, install the local service at user login on macOS, Linux and Windows, or repair its login startup; nothing is elevated, and `--no-service`, `TEAMCODE_NO_SERVICE=1` or `teamcode service automatic off` opt out ([automatic setup](docs/services.md#automatic-setup)). `teamcode service install` does it by hand. `teamcode run claude -- …` and `teamcode run codex -- …` reuse the authenticated service when available. Use `service status`, `service logs`, `service stop`, `service start`, `service restart` or `service uninstall` to manage it. Installation requires a stable native binary path and preserves your saved login on uninstall. See [service behavior and verification](docs/services.md); Native Windows Task Scheduler acceptance has passed; `teamcode service install --at-boot` (`--system`) enables startup before login with the OS authorization described in that guide. Extra real-workstation reboot/logon checks are V2 follow-up. See the [Windows workstation guide](docs/windows.md).
 
 ## Native updates
 
@@ -197,7 +220,7 @@ teamcode run claude --workload background -- -p "Review the test coverage"
 teamcode run claude --label task=1234 -- -p "Review the test coverage"   # list with: teamcode sessions list --label task=1234
 ```
 
-`run` reuses a matching authenticated TeamCode service when available; otherwise it starts a dedicated proxy on a free loopback port. It launches the installed agent from your PATH, forwards the arguments after `--` literally and preserves your working directory and terminal. The dedicated proxy closes when the agent exits; a shared service stays running. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each dedicated proxy gets its own local capability. Native launcher and user-service acceptance has passed on macOS/Linux/Windows; see [status](docs/status.md) for feature-specific evidence.
+`run` reuses a matching authenticated TeamCode service when available; otherwise it starts a dedicated proxy on a free loopback port. It launches the installed agent from your PATH, forwards the arguments after `--` literally and preserves your working directory and terminal. The dedicated proxy closes when the agent exits; a shared service stays running. The agent's exit status is returned. URL/session settings come from your saved TeamCode configuration; personal agent configuration files are not edited. Each dedicated proxy gets its own local capability. Native launcher and user-service acceptance has passed on macOS/Linux/Windows.
 
 Use `--workload background` before `--` for unattended work, or `--workload interactive` (the default) for interactive sessions. This is a scheduling hint for the [shared admission queue](docs/capacity.md#shared-admission-queue); it does not detach the process, change permissions or bypass quotas. Each launch keeps its own class even when sharing the local service. An older service without workload support is left running while the launcher uses a dedicated proxy for the background session.
 
